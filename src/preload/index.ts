@@ -34,14 +34,15 @@ const ghostBridge = {
     w: number,
     h: number,
     mode: 'pill' | 'glass' | 'panel',
-    opts?: { durationMs?: number; pillDrive?: boolean }
+    opts?: { durationMs?: number; pillDrive?: boolean; center?: boolean }
   ) =>
     ipcRenderer.invoke('window:setBounds', {
       w,
       h,
       mode,
       durationMs: opts?.durationMs,
-      pillDrive: opts?.pillDrive
+      pillDrive: opts?.pillDrive,
+      center: opts?.center
     }),
   /** Open (or focus) the workspace window; optional deep-link to a workflow / run. */
   openWorkspace: (focus?: string | WorkspaceFocus) =>
@@ -147,6 +148,9 @@ const ghostBridge = {
   /** Finish onboarding: promote to the pill/workspace (optionally open record). */
   completeOnboarding: (opts?: { openRecordPanel?: boolean }): Promise<void> =>
     ipcRenderer.invoke('onboarding:complete', opts ?? {}),
+  /** Resize the onboarding window to hug the current card. */
+  setOnboardingSize: (w: number, h: number): Promise<void> =>
+    ipcRenderer.invoke('onboarding:setSize', { w, h }),
   /** Open a URL in the system browser (Terms, Privacy, OAuth). */
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
   onDeepLink: (cb: (link: DeepLink) => void) => {

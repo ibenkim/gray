@@ -259,6 +259,9 @@ export default function WorkspaceApp() {
                 updateWorkflow(id, (w) => ({ ...w, status: w.status === 'on' ? 'off' : 'on' }))
               }
               onDiscardSuggestion={discardSuggestion}
+              onRename={(id, name) => updateWorkflow(id, (w) => ({ ...w, name }))}
+              onDuplicate={(id) => void duplicateWorkflow(id)}
+              onDelete={(id) => void deleteWorkflow(id)}
             />
           ) : nav === 'workflows' ? (
             <WorkflowsHome
@@ -274,6 +277,9 @@ export default function WorkspaceApp() {
                 updateWorkflow(id, (w) => ({ ...w, status: w.status === 'on' ? 'off' : 'on' }))
               }
               onDiscardSuggestion={discardSuggestion}
+              onRename={(id, name) => updateWorkflow(id, (w) => ({ ...w, name }))}
+              onDuplicate={(id) => void duplicateWorkflow(id)}
+              onDelete={(id) => void deleteWorkflow(id)}
             />
           ) : (
             <ActivityView

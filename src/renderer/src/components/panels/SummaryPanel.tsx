@@ -78,8 +78,8 @@ export default function SummaryPanel() {
   }
 
   return (
-    <div className="summary-panel">
-      <div className="summary-head" onMouseDown={onDragMouseDown}>
+    <div className="summary-panel" onMouseDown={onDragMouseDown}>
+      <div className="summary-head">
         <div className="summary-title">{workflow.name}</div>
         <div className="meta">{summaryMeta}</div>
       </div>

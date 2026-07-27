@@ -99,9 +99,7 @@ export default function RecordPanel() {
       >
         Start Recording
       </button>
-      {screenGranted ? (
-        <div className="record-hint">Press ⌥G to record</div>
-      ) : (
+      {screenGranted ? null : (
         <button className="record-hint record-hint-warn" onClick={openScreenRecovery}>
           Screen Recording is off — turn it on to record
         </button>

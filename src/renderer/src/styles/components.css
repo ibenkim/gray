@@ -22,7 +22,7 @@
   color: var(--white-text);
   text-align: left;
   padding-left: 2px;
-  cursor: grab;
+  cursor: default;
 }
 
 .segmented {
@@ -206,7 +206,7 @@
   align-items: center;
   gap: 8px;
   padding: 3px 3px 6px;
-  cursor: grab;
+  cursor: default;
 }
 .ledger-title {
   font-size: 11px;
@@ -319,9 +319,8 @@
 }
 .editor-head {
   flex-shrink: 0;
-  cursor: grab;
+  cursor: default;
 }
-.editor-head:active { cursor: grabbing; }
 .editor-title-row {
   display: flex;
   align-items: center;
@@ -797,15 +796,15 @@
   padding: 15px 10px 14px;
   display: flex;
   flex-direction: column;
+  cursor: default;
 }
 .summary-head {
   padding: 0 6px 8px;
-  cursor: grab;
+  cursor: default;
 }
-.summary-head:active { cursor: grabbing; }
 .summary-title { font-size: 13px; font-weight: 600; color: var(--text); }
 
-.summary-row { cursor: pointer; }
+.summary-row { cursor: default; }
 .summary-row:hover { background: var(--white3); }
 .summary-row-held {
   background: #fff;

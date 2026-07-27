@@ -20,12 +20,18 @@ import type {
   Run,
   RunStep,
   RunStepResult,
+  StepApp,
   SummaryOutcome,
   Workflow
 } from './types'
 import { createMockDraft, makeRunSteps, MOCK_WATCH_LOG } from './mockData'
 
-export type WatchEntry = { time: string; text: string; voiceNote?: string }
+export type WatchEntry = {
+  time: string
+  text: string
+  voiceNote?: string
+  app?: StepApp
+}
 
 const RUN_TICK_MS = 1800
 /** 10-minute error hold → auto-stop (6.4). */
@@ -419,12 +425,17 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Sync window bounds with state ──
   useEffect(() => {
-    type Size = { w: number; h: number; mode: 'pill' | 'glass' | 'panel' }
+    type Size = {
+      w: number
+      h: number
+      mode: 'pill' | 'glass' | 'panel'
+      center?: boolean
+    }
     const glassPanelH = Math.max(hoverPanelH, HOVER_PANEL_H)
     const idleSize: Size = savedConfirm
       ? { w: 210, h: 24, mode: 'pill' }
       : permToastVisible
-        ? { w: 340, h: 180, mode: 'panel' }
+        ? { w: 392, h: 232, mode: 'panel' }
         : permissionPaused
           ? { w: 224, h: 24, mode: 'pill' }
           : { w: 94, h: 24, mode: 'pill' }
@@ -432,18 +443,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       idle: idleSize,
       hover: { w: 266, h: glassPanelH + 8 + 24, mode: 'glass' },
       recording: watchExpanded
-        ? { w: 300, h: 330, mode: 'panel' }
+        ? // Hug ledger + side/bottom shadow pad; top pad is 0 via .ghost-root-panel.
+          { w: 321, h: 336, mode: 'panel' }
         : { w: 161, h: 24, mode: 'pill' },
       organizing: { w: 94, h: 24, mode: 'pill' },
       editor: editorCollapsed
         ? { w: 125, h: 24, mode: 'pill' }
-        : { w: 700, h: 590, mode: 'panel' },
+        : // 660×521 card + 36 side pads + 36 bottom pad (no top pad).
+          { w: 732, h: 557, mode: 'panel' },
       running: runCollapsed
         ? { w: 230, h: 24, mode: 'pill' }
-        : { w: 490, h: 420, mode: 'panel' },
-      summary: { w: 380, h: 380, mode: 'panel' }
+        : // 436-wide running card + pads; height hugs typical content.
+          { w: 508, h: 436, mode: 'panel' },
+      summary: { w: 432, h: 432, mode: 'panel', center: true }
     }
-    const { w, h, mode } = sizes[state]
+    const { w, h, mode, center } = sizes[state]
     const prev = prevStateRef.current
     prevStateRef.current = state
     if (hoverClosingRef.current && state === 'hover') return
@@ -466,9 +480,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         }
       }, 440)
     }
-    window.ghostBridge?.setBounds?.(w, h, mode, { durationMs, pillDrive })?.then((placement) => {
-      if (placement) setPanelPlacement(placement)
-    })
+    window.ghostBridge
+      ?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
+      ?.then((placement) => {
+        if (placement) setPanelPlacement(placement)
+      })
   }, [
     state,
     watchExpanded,
@@ -498,7 +514,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       watchIndexRef.current = i + 1
       setWatchLog((log) => [
         ...log,
-        narrate ? entry : { time: entry.time, text: entry.text }
+        narrate
+          ? entry
+          : { time: entry.time, text: entry.text, app: entry.app }
       ])
     }, 2600)
     return () => clearInterval(t)

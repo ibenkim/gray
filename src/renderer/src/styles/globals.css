@@ -42,7 +42,7 @@
    * process keeps aligned behind the pill and the panel slot.
    */
   --glass-bg: rgba(22, 20, 39, 0.15);
-  --glass-panel-bg: rgba(22, 20, 39, 0.15);
+  --glass-panel-bg: rgba(0, 0, 0, 0.2);
   --panel-shadow: 0px 4px 30px rgba(62, 43, 73, 0.2);
   --pill-shadow: 0px 4px 30px rgba(98, 91, 143, 0.4);
 }
@@ -114,7 +114,30 @@ button {
   align-items: flex-end;
   justify-content: flex-end;
   gap: 10px;
-  padding: 10px;
+  padding: 36px;
+}
+
+/*
+ * Summary only: center the card in the window so a centered BrowserWindow
+ * places the card at the true screen center. Other expanded panels keep
+ * flex-end so they stay pinned to the pill anchor.
+ */
+.ghost-root-summary {
+  justify-content: center;
+  align-items: center;
+  padding: 36px;
+}
+
+/*
+ * Expanded panels (learning / editor / running): pack the card at the top of
+ * the window with no top pad so dragging flush to the menu bar brings the
+ * card with it. Pill anchor is frozen while these panels drag (main process).
+ */
+.ghost-root-panel {
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: flex-end;
+  padding: 0 36px 36px;
 }
 
 /*
@@ -299,8 +322,8 @@ button {
   max-height: 24px;
   flex-shrink: 0;
   box-sizing: border-box;
-  /* Capsule = half of 24px height; stroke (::after) inherits the same radius. */
-  border-radius: 12px;
+  /* Match frame radius so corners aren't clipped; stroke (::after) inherits. */
+  border-radius: 10px;
   padding: 0 6px 0 3px;
   user-select: none;
   animation: pillIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -380,6 +403,7 @@ button {
   text-underline-offset: 2px;
   cursor: pointer;
   white-space: nowrap;
+  margin-left: auto;
 }
 .pill-action:hover { opacity: 0.85; }
 
@@ -387,6 +411,8 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   height: 100%;
@@ -405,6 +431,7 @@ button {
   font-size: 11px;
   color: var(--text-40);
   font-variant-numeric: tabular-nums;
+  margin-left: auto;
 }
 .pill-blink { animation: blink 1.2s ease-in-out infinite; }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Session, Team } from '../state/types'
+import { useWorkspaceDrag } from '../hooks/useWorkspaceDrag'
 
 type Choice = 'create' | 'join'
 
@@ -18,6 +19,7 @@ export default function TeamStep({
   const [invalid, setInvalid] = useState(false)
   const [busy, setBusy] = useState(false)
   const [invitePreview, setInvitePreview] = useState<Team>(null)
+  const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
   // Arrived via an invite link → pre-fill Join with a confirm row.
   useEffect(() => {
@@ -48,8 +50,10 @@ export default function TeamStep({
 
   return (
     <div className="onb-card">
-      <div className="onb-eyebrow">TEAM</div>
-      <div className="onb-title">Where will you work?</div>
+      <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
+        <div className="onb-eyebrow">TEAM</div>
+        <div className="onb-title">Where will you work?</div>
+      </div>
 
       <div className="onb-gap" />
 

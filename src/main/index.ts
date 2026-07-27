@@ -446,11 +446,13 @@ type BoundsRequest = {
    * geometry). Close fades the panel then snaps to pill size.
    */
   pillDrive?: boolean
+  /** Center in the display work area instead of anchoring to the pill BR. */
+  center?: boolean
 }
 type Placement = 'above' | 'below'
 type Rect = { x: number; y: number; width: number; height: number }
 
-const PANEL_PADDING = 10
+const PANEL_PADDING = 36
 const PILL_HEIGHT = 24
 /** Screen position of the pill's bottom-right corner. */
 let pillAnchor: { x: number; y: number } | null = null
@@ -598,20 +600,34 @@ function applyBounds(win: BrowserWindow, req: BoundsRequest): Placement | Promis
   const insets = req.mode === 'panel' ? PANEL_PADDING : 0
   const pillDrive = !!req.pillDrive && durationMs > 0
 
-  // Prefer the panel directly above the pill; if that would leave the work
-  // area (obstructed), open below the pill instead.
   let placement: Placement = 'above'
-  let trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
-  if (req.mode !== 'pill' && trial.y < wa.y) {
-    placement = 'below'
-    trial = rectFromPillAnchor(anchorBefore, width, height, 'below', insets)
-    if (trial.y + height > wa.y + wa.height) {
-      placement = 'above'
-      trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
-      trial.y = Math.max(wa.y, trial.y)
+  let trial: Rect
+
+  if (req.center) {
+    // Center in the work area; leave pillAnchor untouched so the pill returns
+    // to its spot when this panel closes (drag still re-syncs the anchor).
+    trial = {
+      x: Math.round(wa.x + (wa.width - width) / 2),
+      y: Math.round(wa.y + (wa.height - height) / 2),
+      width,
+      height
     }
+    placement = 'above'
+  } else {
+    // Prefer the panel directly above the pill; if that would leave the work
+    // area (obstructed), open below the pill instead.
+    trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
+    if (req.mode !== 'pill' && trial.y < wa.y) {
+      placement = 'below'
+      trial = rectFromPillAnchor(anchorBefore, width, height, 'below', insets)
+      if (trial.y + height > wa.y + wa.height) {
+        placement = 'above'
+        trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
+        trial.y = Math.max(wa.y, trial.y)
+      }
+    }
+    trial.x = Math.min(Math.max(trial.x, wa.x), wa.x + wa.width - width)
   }
-  trial.x = Math.min(Math.max(trial.x, wa.x), wa.x + wa.width - width)
 
   currentInsets = insets
   currentPlacement = req.mode === 'pill' ? 'above' : placement
@@ -777,6 +793,10 @@ ipcMain.handle(
   const grab = { x: cursor0.x - b0.x, y: cursor0.y - b0.y }
 
   if (dragTimer) clearInterval(dragTimer)
+  // Panel-mode chrome hides the pill. Updating the anchor from the window BR
+  // while dragging a large panel (esp. clamped under the menu bar) parks the
+  // pill mid-screen. Keep the pre-panel pill spot — same as summary.
+  const freezeAnchor = isPill && currentMode === 'panel'
   dragTimer = setInterval(() => {
     const cursor = screen.getCursorScreenPoint()
     const nx = Math.round(cursor.x - grab.x)
@@ -784,7 +804,9 @@ ipcMain.handle(
     win.setPosition(nx, ny)
     if (isPill) {
       const bounds = win.getBounds()
-      pillAnchor = pillAnchorFromBounds(bounds)
+      if (!freezeAnchor) {
+        pillAnchor = pillAnchorFromBounds(bounds)
+      }
       layoutBackdrops(bounds)
     }
   }, 16)
@@ -797,8 +819,11 @@ ipcMain.handle('pill:dragEnd', (event) => {
   }
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win && win === pillWindow) {
-    pillAnchor = pillAnchorFromWindow(win)
-    setPillPosition({ x: pillAnchor.x, y: pillAnchor.y })
+    // Panel overlays: keep the pre-panel pill spot (see freezeAnchor above).
+    if (currentMode !== 'panel') {
+      pillAnchor = pillAnchorFromWindow(win)
+      setPillPosition({ x: pillAnchor.x, y: pillAnchor.y })
+    }
     if (pendingBounds) {
       const req = pendingBounds
       pendingBounds = null
@@ -854,9 +879,15 @@ ipcMain.handle('pill:contextMenu', (event) => {
 })
 
 // ── Onboarding gate ──
-// A fullscreen transparent overlay: the desktop shows through but stays inert
-// (the window captures all mouse events), there is no Esc/close, and quitting
-// is only possible from the tray. Relaunch returns to the persisted step.
+// Card-sized movable window: desktop stays interactive, window can sit behind
+// other apps. Quitting is only possible from the tray. Relaunch resumes the
+// persisted step.
+const ONB_SHADOW_PAD = 36
+const ONB_CONTENT_W = 440
+const ONB_CONTENT_H = 320
+const ONB_W = ONB_CONTENT_W + ONB_SHADOW_PAD * 2
+const ONB_H = ONB_CONTENT_H + ONB_SHADOW_PAD * 2
+
 function createOnboardingWindow() {
   if (onboardingWindow) {
     if (overlayDemotedForSettings) promoteOnboardingOverlay()
@@ -866,7 +897,11 @@ function createOnboardingWindow() {
     }
     return
   }
-  const { x, y, width, height } = screen.getPrimaryDisplay().bounds
+  const { workArea } = screen.getPrimaryDisplay()
+  const width = ONB_W
+  const height = ONB_H
+  const x = Math.round(workArea.x + (workArea.width - width) / 2)
+  const y = Math.round(workArea.y + (workArea.height - height) / 2)
   onboardingWindow = new BrowserWindow({
     x,
     y,
@@ -875,23 +910,22 @@ function createOnboardingWindow() {
     frame: false,
     transparent: true,
     resizable: false,
-    movable: false,
+    movable: true,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     hasShadow: false,
     skipTaskbar: false,
-    alwaysOnTop: true,
+    alwaysOnTop: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true
     }
   })
-  onboardingWindow.setAlwaysOnTop(true, 'floating')
-  onboardingWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 
-  // Restore the gate after returning from System Settings.
+  // Restore after returning from System Settings (show + focus only —
+  // do not re-pin always-on-top so the user can still put it behind).
   onboardingWindow.on('focus', () => {
     if (overlayDemotedForSettings) promoteOnboardingOverlay()
   })
@@ -1033,15 +1067,12 @@ function enterOnboardingMode(): void {
 }
 
 /**
- * Hide the fullscreen onboarding overlay so System Settings (and the macOS
- * permission sheet) can receive clicks. Clearing alwaysOnTop alone is not
- * enough — the overlay still covers the display.
+ * Hide the onboarding window so System Settings (and the macOS permission
+ * sheet) can receive clicks.
  */
 function demoteOnboardingForSettings(): void {
   if (!onboardingWindow || onboardingWindow.isDestroyed()) return
   overlayDemotedForSettings = true
-  onboardingWindow.setAlwaysOnTop(false)
-  onboardingWindow.setVisibleOnAllWorkspaces(false)
   onboardingWindow.hide()
 }
 
@@ -1049,8 +1080,6 @@ function promoteOnboardingOverlay(): void {
   if (!onboardingWindow || onboardingWindow.isDestroyed()) return
   if (getSnapshot().onboardingComplete) return
   overlayDemotedForSettings = false
-  onboardingWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-  onboardingWindow.setAlwaysOnTop(true, 'floating')
   onboardingWindow.show()
   onboardingWindow.focus()
 }
@@ -1080,6 +1109,26 @@ function registerOnboardingIpc() {
       onboardingWindow = null
     }
     enterNormalMode(opts)
+  })
+
+  /** Resize the onboarding window to hug the card (keeps current center). */
+  ipcMain.handle('onboarding:setSize', (event, size: { w: number; h: number }) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win !== onboardingWindow) return
+    const width = Math.max(1, Math.round(size.w))
+    const height = Math.max(1, Math.round(size.h))
+    const b = win.getBounds()
+    const cx = b.x + b.width / 2
+    const cy = b.y + b.height / 2
+    win.setBounds(
+      {
+        x: Math.round(cx - width / 2),
+        y: Math.round(cy - height / 2),
+        width,
+        height
+      },
+      false
+    )
   })
 
   ipcMain.handle('auth:logout', () => {

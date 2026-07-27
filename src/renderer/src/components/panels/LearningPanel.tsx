@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useWorkflow } from '../../state/WorkflowContext'
 import { PauseButton, ChevronDown } from '../GhostPill'
 import MicIcon from '../ui/MicIcon'
+import AppChip from '../shared/AppChip'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 
 /**
@@ -49,6 +50,7 @@ export default function LearningPanel() {
             <div className="watch-entry-main">
               <span className="watch-time">{entry.time}</span>
               <span className="watch-text">{entry.text}</span>
+              {entry.app && <AppChip app={entry.app} muted />}
               {entry.voiceNote && (
                 <button
                   className={`voice-tag ${openVoiceIdx === i ? 'voice-tag-open' : ''}`}

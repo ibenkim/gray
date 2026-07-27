@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Session } from '../state/types'
+import { useWorkspaceDrag } from '../hooks/useWorkspaceDrag'
 
 type Mode = 'buttons' | 'email' | 'sent'
 
@@ -11,6 +12,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
   async function continueWithGoogle() {
     setError(null)
@@ -35,8 +37,10 @@ export default function WelcomeStep({ session }: { session: Session }) {
 
   return (
     <div className="onb-card">
-      <div className="onb-eyebrow">WELCOME</div>
-      <div className="onb-title">Meet yuh</div>
+      <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
+        <div className="onb-eyebrow">WELCOME</div>
+        <div className="onb-title">Meet yuh</div>
+      </div>
       <p className="onb-sub">
         Show it a task once. It learns the steps,
         <br />

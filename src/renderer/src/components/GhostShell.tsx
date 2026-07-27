@@ -106,12 +106,20 @@ export default function GhostShell() {
   // Pill mode: the window is sized exactly to the pill (native blur/shadow).
   const pillMode = !expandedPanel && state !== 'hover' && !showToast
 
+  const learningOpen = state === 'recording' && watchExpanded
+  const panelFlush =
+    learningOpen ||
+    (state === 'editor' && !editorCollapsed) ||
+    (state === 'running' && !runCollapsed)
+
   const rootClass = [
     'ghost-root',
     pillMode ? 'ghost-root-pill' : '',
     state === 'hover' ? 'ghost-root-glass' : '',
     state === 'hover' && hoverFading ? 'ghost-root-closing' : '',
-    !pillMode && panelPlacement === 'below' ? 'ghost-root-below' : '',
+    state === 'summary' ? 'ghost-root-summary' : '',
+    panelFlush ? 'ghost-root-panel' : '',
+    !pillMode && !panelFlush && panelPlacement === 'below' ? 'ghost-root-below' : '',
     switchFlash ? 'os-switch-flash' : ''
   ]
     .filter(Boolean)

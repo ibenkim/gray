@@ -1,5 +1,5 @@
 import { makeDraftWorkflow, SEED_ACTIVITY, SEED_SUGGESTION, SEED_WORKFLOWS } from '../../../shared/seed'
-import type { RecordableApp, RunStep, Workflow } from './types'
+import type { RecordableApp, RunStep, StepApp, Workflow } from './types'
 
 export const MOCK_APPS: RecordableApp[] = [
   { id: 'chrome', name: 'Chrome', detail: 'youtube.com' },
@@ -8,16 +8,21 @@ export const MOCK_APPS: RecordableApp[] = [
 ]
 
 /** Steps that stream into the "Learning" ledger while recording. */
-export const MOCK_WATCH_LOG: { time: string; text: string; voiceNote?: string }[] = [
-  { time: '00:04', text: 'Opened youtube.com' },
+export const MOCK_WATCH_LOG: {
+  time: string
+  text: string
+  voiceNote?: string
+  app?: StepApp
+}[] = [
+  { time: '00:04', text: 'Opened youtube.com', app: { id: 'chrome', name: 'Chrome' } },
   {
     time: '00:11',
     text: 'Make exception for Youtube',
     voiceNote: '“...always skip the ads on this”'
   },
-  { time: '00:19', text: 'Send link to Minhyeok' },
+  { time: '00:19', text: 'Send link to Minhyeok', app: { id: 'slack', name: 'Slack' } },
   { time: '00:26', text: 'Copied the share link' },
-  { time: '00:31', text: 'Switched to Slack' }
+  { time: '00:31', text: 'Switched to Slack', app: { id: 'slack', name: 'Slack' } }
 ]
 
 /**

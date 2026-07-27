@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PermissionId, PermissionsState } from '../state/types'
+import { useWorkspaceDrag } from '../hooks/useWorkspaceDrag'
 
 type PermMeta = {
   id: PermissionId
@@ -76,6 +77,7 @@ export default function PermissionsStep({
   const [stillOff, setStillOff] = useState<PermissionId | null>(null)
   const [whyOpen, setWhyOpen] = useState(false)
   const whyRef = useRef<HTMLDivElement>(null)
+  const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
   const resolved = (id: PermissionId): boolean => {
     if (id === 'microphone') return permissions.microphone === 'granted' || micSkipped
@@ -132,11 +134,13 @@ export default function PermissionsStep({
 
   return (
     <div className="onb-card onb-perms-card">
-      <div className="onb-perms-head">
-        <span className="onb-eyebrow">SET UP</span>
-        <span className="onb-counter">{currentIndex + 1} of 3</span>
+      <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
+        <div className="onb-perms-head">
+          <span className="onb-eyebrow">SET UP</span>
+          <span className="onb-counter">{currentIndex + 1} of 3</span>
+        </div>
+        <div className="onb-title">{denied ? current.deniedTitle : 'yuh needs a few permissions'}</div>
       </div>
-      <div className="onb-title">{denied ? current.deniedTitle : 'yuh needs a few permissions'}</div>
       <p className="onb-sub">
         {denied
           ? current.deniedSub
@@ -265,12 +269,15 @@ function CompleteCard({
   onDone: () => void
   onRecord: () => void
 }) {
+  const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
   return (
     <div className="onb-card onb-perms-card">
-      <div className="onb-perms-head">
-        <span className="onb-eyebrow">SET UP</span>
+      <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
+        <div className="onb-perms-head">
+          <span className="onb-eyebrow">SET UP</span>
+        </div>
+        <div className="onb-title">You’re all set</div>
       </div>
-      <div className="onb-title">You’re all set</div>
       <p className="onb-sub">yuh can watch, act, and listen — only when you ask it to.</p>
 
       <div className="onb-gap-sm" />

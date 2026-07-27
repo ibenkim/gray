@@ -35,7 +35,7 @@ declare global {
         w: number,
         h: number,
         mode: 'pill' | 'glass' | 'panel',
-        opts?: { durationMs?: number; pillDrive?: boolean }
+        opts?: { durationMs?: number; pillDrive?: boolean; center?: boolean }
       ) => Promise<'above' | 'below'>
       openWorkspace: (focus?: string | WorkspaceFocus) => Promise<void>
       closeWindow: () => Promise<void>
@@ -80,6 +80,7 @@ declare global {
       skipActivity: (entryId: string) => Promise<StoreSnapshot>
       onStoreChanged: (cb: (snapshot: StoreSnapshot) => void) => () => void
       completeOnboarding: (opts?: { openRecordPanel?: boolean }) => Promise<void>
+      setOnboardingSize: (w: number, h: number) => Promise<void>
       openExternalUrl: (url: string) => Promise<void>
       onDeepLink: (cb: (link: DeepLink) => void) => () => void
       authGoogle: () => Promise<Session>

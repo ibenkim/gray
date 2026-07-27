@@ -330,6 +330,7 @@
   padding: 0 12px;
   cursor: pointer;
   transition: background 0.15s;
+  position: relative;
 }
 .ws-row:hover { background: var(--white3); }
 .ws-row-name {
@@ -347,6 +348,24 @@
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+}
+.ws-row-overflow {
+  position: relative;
+  display: inline-flex;
+}
+.ws-row .overflow-btn {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.15s, color 0.15s;
+}
+.ws-row:hover .overflow-btn,
+.ws-row .overflow-btn[aria-expanded='true'] {
+  opacity: 1;
+}
+.ws-row .overflow-menu {
+  top: 26px;
+  right: 0;
 }
 
 .status-word {

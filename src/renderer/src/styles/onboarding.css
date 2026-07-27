@@ -1,6 +1,6 @@
-/* ── Onboarding overlay (Phase 4) ──
- * Fullscreen transparent window over the real (inert) desktop; a single
- * centered card is the only interactive surface. */
+/* ── Onboarding window (Phase 4 / v4 polish) ──
+ * Card-sized movable transparent window; desktop stays interactive.
+ * Window hugs the card via onboarding:setSize so the CSS shadow can paint. */
 
 :root {
   --onb-bar: rgba(62, 43, 73, 0.06);
@@ -12,7 +12,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 36px;
+}
+
+.onb-card-drag {
+  cursor: default;
+  user-select: none;
 }
 
 .onb-card {
