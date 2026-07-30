@@ -85,7 +85,7 @@ describe('extractWorkflow', () => {
           storage: 'file',
           devDir: '/tmp',
           openaiApiKey: null,
-          openaiModel: 'gpt-5.6',
+          openaiModel: 'gpt-5.6-luna',
           isDev: true,
           isPackaged: false
         },
@@ -129,7 +129,7 @@ describe('extractWorkflow', () => {
         storage: 'file',
         devDir: '/tmp',
         openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
-        openaiModel: 'gpt-5.6',
+        openaiModel: 'gpt-5.6-luna',
         isDev: true,
         isPackaged: false
       },
@@ -155,7 +155,7 @@ describe('extractWorkflow', () => {
           storage: 'file',
           devDir: '/tmp',
           openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
-          openaiModel: 'gpt-5.6',
+          openaiModel: 'gpt-5.6-luna',
           isDev: true,
           isPackaged: false
         },
@@ -201,7 +201,7 @@ describe('extractWorkflow', () => {
           storage: 'file',
           devDir: '/tmp',
           openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
-          openaiModel: 'gpt-5.6',
+          openaiModel: 'gpt-5.6-luna',
           isDev: true,
           isPackaged: false
         },
@@ -264,7 +264,7 @@ describe('processSessionWorkflow', () => {
         storage: 'file',
         devDir: '/tmp',
         openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
-        openaiModel: 'gpt-5.6',
+        openaiModel: 'gpt-5.6-luna',
         isDev: true,
         isPackaged: false
       },
@@ -335,7 +335,7 @@ describe('processSessionWorkflow', () => {
         storage: 'file',
         devDir: '/tmp',
         openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
-        openaiModel: 'gpt-5.6',
+        openaiModel: 'gpt-5.6-luna',
         isDev: true,
         isPackaged: false
       },

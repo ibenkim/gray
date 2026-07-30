@@ -55,7 +55,7 @@ export function loadTelemetryConfig(): TelemetryConfig {
     storage,
     devDir,
     openaiApiKey: normalizeOpenAiApiKey(process.env.OPENAI_API_KEY),
-    openaiModel: process.env.OPENAI_MODEL?.trim() || 'gpt-5.6',
+    openaiModel: process.env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna',
     isDev,
     isPackaged
   }

@@ -66,7 +66,7 @@ Copy `.env.example` → `.env`. Variables are loaded once at Electron main-proce
 | Variable | Default (dev) | Purpose |
 |---|---|---|
 | `OPENAI_API_KEY` | _(empty)_ | Workflow extraction on Finish |
-| `OPENAI_MODEL` | `gpt-5.6` | Model for Structured Outputs |
+| `OPENAI_MODEL` | `gpt-5.6-luna` | Model for Structured Outputs |
 | `TELEMETRY_STORAGE` | `file` | Local JSONL store in development |
 | `TELEMETRY_DEV_DIR` | `./development-data/telemetry` | Where sessions are written |
 

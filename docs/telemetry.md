@@ -85,7 +85,7 @@ See `.env.example`. The main process loads `.env` via `dotenv` at startup.
 
 ```text
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.6
+OPENAI_MODEL=gpt-5.6-luna
 TELEMETRY_STORAGE=file
 TELEMETRY_DEV_DIR=./development-data/telemetry
 ```

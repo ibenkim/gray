@@ -227,7 +227,7 @@ export function PauseButton({
     >
       {paused ? (
         <svg width="7" height="8" viewBox="0 0 7 8" fill="currentColor">
-          <path d="M0.5 0.7c0-.55.6-.9 1.07-.62l5.1 3.3a.72.72 0 0 1 0 1.24l-5.1 3.3A.72.72 0 0 1 .5 7.3Z" />
+          <path d="M0.5 0.7c0-.55.6-luna-.9 1.07-.62l5.1 3.3a.72.72 0 0 1 0 1.24l-5.1 3.3A.72.72 0 0 1 .5 7.3Z" />
         </svg>
       ) : (
         <svg width="7" height="8" viewBox="0 0 7 8" fill="currentColor">
