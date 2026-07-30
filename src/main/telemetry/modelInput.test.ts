@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION, type PolishedSession, type TelemetrySessionMeta } from '../../shared/telemetry/schema'
-import { createWorkflowModelInput } from './modelInput'
+import { createWorkflowModelInput, prepareWorkflowModelInput } from './modelInput'
 
 const session: TelemetrySessionMeta = {
   sessionId: 'tsess_test',
@@ -31,7 +31,7 @@ const polished: PolishedSession = {
   ]
 }
 
-describe('createWorkflowModelInput', () => {
+describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
   it('excludes ownerEmail and processing errors', () => {
     const input = createWorkflowModelInput(session, polished)
     const json = JSON.stringify(input)
@@ -39,19 +39,24 @@ describe('createWorkflowModelInput', () => {
     expect(json).not.toContain('secret@example.com')
     expect(json).not.toContain('OPENAI_AUTHENTICATION_FAILED')
     expect(json).not.toContain('processingErrorCode')
+    expect(json).not.toContain('sessionId')
   })
 
   it('redacts temporary paths and env-like values from action text', () => {
     const input = createWorkflowModelInput(session, polished)
-    expect(input.actions[0].text).not.toMatch(/\/var\/folders/)
-    expect(input.actions[0].text).not.toMatch(/TMPDIR=\//)
-    expect(input.actions[0].text).not.toContain('__CFBundleIdentifier=com.apple')
-    expect(input.actions[0].text).not.toContain('XPC_FLAGS=0x0')
+    expect(input.acts[0].t).not.toMatch(/\/var\/folders/)
+    expect(input.acts[0].t).not.toMatch(/TMPDIR=\//)
+    expect(input.acts[0].t).not.toContain('__CFBundleIdentifier=com.apple')
+    expect(input.acts[0].t).not.toContain('XPC_FLAGS=0x0')
   })
 
-  it('preserves source event IDs verbatim', () => {
-    const input = createWorkflowModelInput(session, polished)
-    expect(input.actions[0].sourceEventIds).toEqual([
+  it('remaps source event IDs to short indices and can resolve them back', () => {
+    const prepared = prepareWorkflowModelInput(session, polished)
+    expect(prepared.body.acts[0].ids).toEqual(['0'])
+    expect(JSON.stringify(prepared.body)).not.toContain(
+      'tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'
+    )
+    expect(prepared.resolveEvidence(['0'])).toEqual([
       'tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'
     ])
   })
@@ -101,6 +106,13 @@ describe('createWorkflowModelInput', () => {
           sourceEventIds: ['tevt_paste'],
           appName: 'Messages',
           keyframePath: '/Users/ben/development-data/telemetry/keyframes/x.jpg'
+        },
+        {
+          order: 3,
+          text: 'Started recording',
+          category: 'session',
+          timestamp: '2026-07-29T04:28:40.000Z',
+          sourceEventIds: ['tevt_start']
         }
       ]
     }
@@ -118,11 +130,27 @@ describe('createWorkflowModelInput', () => {
     expect(json).not.toContain('https://')
     expect(json).not.toContain('node-id')
     expect(json).not.toContain('/Users/')
-    expect(input.actions[0].clipboardHost).toBe('figma.com')
-    expect(input.actions[0].keyframePath).toBe('tsess_test/tevt_clip.jpg')
-    expect(input.actions[1].keyframePath).toBeNull()
-    expect(input.variables[0].key).toBe('link')
-    expect(input.screens.length).toBeGreaterThan(0)
-    expect(input.clipboardEvents.length).toBe(1)
+    expect(json).not.toContain('keyframe')
+    expect(json).not.toContain('Started recording')
+    expect(input.acts[0].h).toBe('figma.com')
+    expect(input.acts[0].ct).toBe('url')
+    expect(input.acts[0].a).toBe('Figma')
+    expect(input.acts[0].d).toBe('Gray Design')
+    expect(input.vars?.[0].k).toBe('link')
+    expect(input.vars?.[0].ex).toBe('figma.com/file/abc')
+    // Compact: no null fields, no screens/clipboardEvents arrays
+    expect(json).not.toContain('null')
+    expect(json).not.toContain('screens')
+    expect(json).not.toContain('clipboardEvents')
+    expect(json).not.toContain('clipboardHost')
+  })
+
+  it('omits nulls and uses short category codes', () => {
+    const input = createWorkflowModelInput(session, polished)
+    expect(input.acts[0].c).toBe('nav')
+    expect(input.acts[0]).not.toHaveProperty('inf')
+    expect(input.acts[0]).not.toHaveProperty('v')
+    expect(input.mode).toBe('full-screen')
+    expect(typeof input.dur).toBe('number')
   })
 })

@@ -10,7 +10,7 @@ import {
 } from '../../shared/telemetry/schema'
 import type { TelemetryConfig } from './config'
 import { TelemetryProcessingError, mapToProcessingError } from './errors'
-import { createWorkflowModelInput } from './modelInput'
+import { prepareWorkflowModelInput } from './modelInput'
 import { WORKFLOW_INSTRUCTIONS } from './prompt'
 import type { TelemetryStore } from './store/TelemetryStore'
 import { extractWorkflowVariables } from './variables'
@@ -65,7 +65,7 @@ export async function extractWorkflow(
     }
   }
 
-  const modelInput = createWorkflowModelInput(session, polished, { variables })
+  const prepared = prepareWorkflowModelInput(session, polished, { variables })
   const createClient = deps.createClient ?? defaultClient
   const client = createClient(config.openaiApiKey)
   const model = config.openaiModel
@@ -82,7 +82,7 @@ export async function extractWorkflow(
         },
         {
           role: 'user',
-          content: JSON.stringify(modelInput)
+          content: JSON.stringify(prepared.body)
         }
       ],
       text: {
@@ -103,9 +103,16 @@ export async function extractWorkflow(
     throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
   }
 
+  // Expand short evidence ids from the compact payload back to full event ids.
+  const expandedSteps = validatedResult.data.steps.map((step) => ({
+    ...step,
+    evidenceEventIds: prepared.resolveEvidence(step.evidenceEventIds)
+  }))
+
   // Prefer deterministic variables when the model omitted them.
   const workflow: ExtractedWorkflow = {
     ...validatedResult.data,
+    steps: expandedSteps,
     variables:
       validatedResult.data.variables && validatedResult.data.variables.length > 0
         ? validatedResult.data.variables

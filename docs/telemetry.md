@@ -116,6 +116,7 @@ You do **not** need `OPENAI_API_KEY` to collect data. Without it (or with an inv
 | Batch queue | `src/main/telemetry/queue.ts` |
 | File store | `src/main/telemetry/store/FileTelemetryStore.ts` |
 | Polisher | `src/main/telemetry/polish.ts` |
+| Model input (compact) | `src/main/telemetry/modelInput.ts` |
 | Prompt | `src/main/telemetry/prompt.ts` |
 | Workflow LLM | `src/main/telemetry/workflow.ts` |
 | IPC | `src/main/telemetry/index.ts` |
