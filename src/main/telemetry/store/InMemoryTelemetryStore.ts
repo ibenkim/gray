@@ -2,9 +2,11 @@ import {
   SCHEMA_VERSION,
   type ExtractedWorkflow,
   type PolishedSession,
+  type StoredVariables,
   type StoredWorkflowResult,
   type TelemetryEvent,
-  type TelemetrySessionMeta
+  type TelemetrySessionMeta,
+  type WorkflowVariable
 } from '../../../shared/telemetry/schema'
 import type {
   AppendEventsResult,
@@ -19,6 +21,8 @@ export class InMemoryTelemetryStore implements TelemetryStore {
   events = new Map<string, TelemetryEvent[]>()
   polished = new Map<string, PolishedSession>()
   workflows = new Map<string, StoredWorkflowResult>()
+  variables = new Map<string, StoredVariables>()
+  keyframes = new Map<string, Buffer>()
 
   async ensureReady(): Promise<void> {
     /* no-op */
@@ -97,6 +101,35 @@ export class InMemoryTelemetryStore implements TelemetryStore {
 
   async getWorkflow(sessionId: string): Promise<StoredWorkflowResult | null> {
     return this.workflows.get(sessionId) ?? null
+  }
+
+  async saveVariables(sessionId: string, variables: WorkflowVariable[]): Promise<StoredVariables> {
+    const stored: StoredVariables = {
+      sessionId,
+      schemaVersion: SCHEMA_VERSION,
+      extractedAt: new Date().toISOString(),
+      variables
+    }
+    this.variables.set(sessionId, stored)
+    return stored
+  }
+
+  async getVariables(sessionId: string): Promise<StoredVariables | null> {
+    return this.variables.get(sessionId) ?? null
+  }
+
+  async saveKeyframe(
+    sessionId: string,
+    eventId: string,
+    jpeg: Buffer
+  ): Promise<{ absolutePath: string; relativePath: string }> {
+    const relativePath = `${sessionId}/${eventId}.jpg`
+    this.keyframes.set(relativePath, jpeg)
+    return { absolutePath: `/tmp/${relativePath}`, relativePath }
+  }
+
+  keyframesRoot(): string {
+    return '/tmp/keyframes'
   }
 
   async getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null> {

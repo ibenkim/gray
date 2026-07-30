@@ -294,7 +294,11 @@ export type Team = {
   invites: Invite[]
 } | null
 
-/** macOS privacy permissions yuh preflights before recording / running. */
+/**
+ * macOS privacy permissions. Only `screen` is required for recording today.
+ * `accessibility` and `microphone` stay in the type so helpers can return them
+ * when InteractionProvider / narration ship later.
+ */
 export type PermissionId = 'screen' | 'accessibility' | 'microphone'
 
 export type PermissionStatus = 'granted' | 'denied' | 'unknown'

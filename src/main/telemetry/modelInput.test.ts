@@ -71,4 +71,58 @@ describe('createWorkflowModelInput', () => {
     expect(json).not.toMatch(/sk-[A-Za-z0-9]{10,}/)
     expect(json).not.toContain('Incorrect API key provided')
   })
+
+  it('never includes raw clipboard text, absolute paths, or URL query strings', () => {
+    const rich: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Copied figma.com link',
+          category: 'clipboard',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_clip'],
+          appName: 'Figma',
+          documentTitle: 'Gray Design',
+          clipboard: {
+            contentType: 'url',
+            urlHost: 'figma.com',
+            urlPath: '/file/abc',
+            charCount: 80,
+            contentHash: 'deadbeef'
+          },
+          keyframePath: 'tsess_test/tevt_clip.jpg'
+        },
+        {
+          order: 2,
+          text: 'Pasted link',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:47.548Z',
+          sourceEventIds: ['tevt_paste'],
+          appName: 'Messages',
+          keyframePath: '/Users/ben/development-data/telemetry/keyframes/x.jpg'
+        }
+      ]
+    }
+    const input = createWorkflowModelInput(session, rich, {
+      variables: [
+        {
+          key: 'link',
+          label: 'Shared link',
+          kind: 'url',
+          exampleSanitized: 'figma.com/file/abc'
+        }
+      ]
+    })
+    const json = JSON.stringify(input)
+    expect(json).not.toContain('https://')
+    expect(json).not.toContain('node-id')
+    expect(json).not.toContain('/Users/')
+    expect(input.actions[0].clipboardHost).toBe('figma.com')
+    expect(input.actions[0].keyframePath).toBe('tsess_test/tevt_clip.jpg')
+    expect(input.actions[1].keyframePath).toBeNull()
+    expect(input.variables[0].key).toBe('link')
+    expect(input.screens.length).toBeGreaterThan(0)
+    expect(input.clipboardEvents.length).toBe(1)
+  })
 })

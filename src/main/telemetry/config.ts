@@ -16,9 +16,14 @@ export type TelemetryConfig = {
 
 export { normalizeOpenAiApiKey } from './openaiKey'
 
-function parseStorage(raw: string | undefined): TelemetryStorageKind {
+function parseStorage(raw: string | undefined, isDev: boolean): TelemetryStorageKind {
   if (raw === 'file') return 'file'
-  if (raw === 'none' || !raw) return 'none'
+  if (raw === 'none') return 'none'
+  if (!raw) {
+    // Dev defaults to file so a fresh clone records without requiring .env.
+    // Packaged apps must never fall through to file storage.
+    return isDev ? 'file' : 'none'
+  }
   console.warn(`[telemetry] unknown TELEMETRY_STORAGE=${raw}; using none`)
   return 'none'
 }
@@ -42,7 +47,7 @@ export function loadTelemetryConfig(): TelemetryConfig {
   ensureDotenv()
   const isPackaged = app.isPackaged
   const isDev = !isPackaged
-  const storage = parseStorage(process.env.TELEMETRY_STORAGE)
+  const storage = parseStorage(process.env.TELEMETRY_STORAGE, isDev)
   const rawDir = process.env.TELEMETRY_DEV_DIR || './development-data/telemetry'
   const devDir = isAbsolute(rawDir) ? rawDir : resolve(process.cwd(), rawDir)
 

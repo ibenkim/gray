@@ -1,11 +1,10 @@
-import { shell } from 'electron'
 import type { Session } from '../shared/types'
 
 /**
  * Mocked auth service behind a swappable interface. Real Google OAuth and
  * magic-link delivery land later (see reference3 / TODO "Real auth backend");
- * these stubs exercise the same flow — system-browser round-trip for Google
- * and a deep-link return for the email magic link.
+ * these stubs exercise the same in-app flow without opening a browser —
+ * opening a fake Google OAuth URL looks like phishing to Gatekeeper / users.
  */
 
 const MOCK_ACCOUNT = { email: 'harry@yuh.app', displayName: 'Harry' }
@@ -28,15 +27,8 @@ export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 }
 
-/** Continue with Google → system browser round-trip → signed-in session. */
+/** Continue with Google → in-app mock delay → signed-in session (no browser). */
 export async function googleAuth(): Promise<Session> {
-  try {
-    await shell.openExternal(
-      'https://accounts.google.com/o/oauth2/v2/auth?client_id=yuh-stub&scope=email'
-    )
-  } catch {
-    // Browser failing to open shouldn't block the mocked round-trip.
-  }
   await delay(600)
   return { ...MOCK_ACCOUNT }
 }

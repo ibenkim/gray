@@ -118,7 +118,8 @@ describe('extractWorkflow', () => {
         warnings: [
           'No clicks, commands, text entry, or confirmed outcome were recorded.',
           'A screen-title change alone does not establish a distinct user action.'
-        ]
+        ],
+        variables: null
       }
     }))
 
@@ -179,7 +180,8 @@ describe('extractWorkflow', () => {
                       confidence: 0.9
                     }
                   ],
-                  warnings: []
+                  warnings: [],
+                  variables: null
                 }
               })
             }
@@ -236,7 +238,8 @@ describe('assertEvidence', () => {
               confidence: 0.9
             }
           ],
-          warnings: []
+          warnings: [],
+          variables: null
         },
         polished
       )
@@ -321,7 +324,8 @@ describe('processSessionWorkflow', () => {
             confidence: 0.9
           }
         ],
-        warnings: ['No confirmed outcome.']
+        warnings: ['No confirmed outcome.'],
+        variables: null
       }
     }))
 

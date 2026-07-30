@@ -53,6 +53,10 @@ export function openPermissionSettings(id: PermissionId): void {
  * Fire the real macOS prompt for the given permission. Screen recording has no
  * direct request API — touching `desktopCapturer` triggers the system dialog.
  *
+ * Onboarding only requests `screen` today. Accessibility and microphone helpers
+ * remain here for a future InteractionProvider / narration phase — do not
+ * surface them in the UI until those features ship.
+ *
  * Does NOT auto-open System Settings: the OS sheet already offers that path, and
  * stacking Settings on top of it is awkward. Denied → recovery card; the user
  * opens Settings explicitly via "Open System Settings".

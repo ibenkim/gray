@@ -24,17 +24,31 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
     case 'session_stopped':
       return { time, text: 'Stopped recording' }
     case 'navigation': {
-      const label = event.data?.windowTitle || event.data?.appName || event.page || 'a page'
-      return { time, text: `Opened ${label}`, appName }
+      const doc = event.data?.documentTitle || event.data?.windowTitle
+      const label = doc || event.data?.appName || event.page || 'a page'
+      return {
+        time,
+        text: doc && event.data?.appName ? `Opened ${doc} in ${event.data.appName}` : `Opened ${label}`,
+        appName
+      }
     }
     case 'screen_changed': {
-      const label = event.data?.windowTitle || event.page
+      const label = event.data?.documentTitle || event.data?.windowTitle || event.page
       if (!label) return null
-      // Skip noisy duplicates when navigation already covered the same title.
       return { time, text: `Looking at ${label}`, appName }
     }
-    case 'click': {
+    case 'focus_changed': {
       const name =
+        event.data?.elementLabel ||
+        event.target?.accessibleLabel ||
+        event.data?.elementRole ||
+        'a control'
+      return { time, text: `Focused ${name}`, appName }
+    }
+    case 'click':
+    case 'element_activated': {
+      const name =
+        event.data?.elementLabel ||
         event.target?.visibleLabel ||
         event.target?.accessibleLabel ||
         event.target?.analyticsId ||
@@ -44,6 +58,7 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
     case 'field_completed': {
       const label =
         event.data?.field?.label ||
+        event.data?.elementLabel ||
         event.target?.accessibleLabel ||
         event.target?.visibleLabel ||
         'a field'
@@ -54,11 +69,29 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
       return { time, text: `Submitted ${form}`, appName }
     }
     case 'selection_changed': {
-      const label = event.data?.selectionLabel || event.target?.visibleLabel || 'selection'
-      return { time, text: `Changed ${label}`, appName }
+      const label =
+        event.data?.selectionLabel ||
+        event.data?.selectedLabels?.[0] ||
+        event.target?.visibleLabel ||
+        'selection'
+      return { time, text: `Selected ${label}`, appName }
+    }
+    case 'clipboard_changed': {
+      const clip = event.data?.clipboard
+      if (!clip) return { time, text: 'Copied to clipboard', appName }
+      if (clip.contentType === 'url' && clip.urlHost) {
+        return { time, text: `Copied ${clip.urlHost} link`, appName }
+      }
+      return { time, text: `Copied ${clip.contentType}`, appName }
+    }
+    case 'paste_detected': {
+      const host = event.data?.clipboard?.urlHost
+      return { time, text: host ? `Pasted ${host} link` : 'Pasted clipboard', appName }
     }
     case 'keyboard_shortcut':
       return { time, text: `Shortcut ${event.data?.shortcut ?? ''}`, appName }
+    case 'keyframe_captured':
+      return null
     case 'error':
       return {
         time,

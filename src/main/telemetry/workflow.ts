@@ -5,13 +5,15 @@ import {
   type ExtractedWorkflow,
   type PolishedSession,
   type StoredWorkflowResult,
-  type TelemetrySessionMeta
+  type TelemetrySessionMeta,
+  type WorkflowVariable
 } from '../../shared/telemetry/schema'
 import type { TelemetryConfig } from './config'
 import { TelemetryProcessingError, mapToProcessingError } from './errors'
 import { createWorkflowModelInput } from './modelInput'
 import { WORKFLOW_INSTRUCTIONS } from './prompt'
 import type { TelemetryStore } from './store/TelemetryStore'
+import { extractWorkflowVariables } from './variables'
 
 export type OpenAIResponsesClient = {
   responses: {
@@ -53,7 +55,17 @@ export async function extractWorkflow(
     throw new TelemetryProcessingError('WORKFLOW_EMPTY_ACTIONS')
   }
 
-  const modelInput = createWorkflowModelInput(session, polished)
+  const events = await store.readSessionEvents(session.sessionId)
+  const variables: WorkflowVariable[] = extractWorkflowVariables(events, polished)
+  if (store.saveVariables && variables.length > 0) {
+    try {
+      await store.saveVariables(session.sessionId, variables)
+    } catch (err) {
+      console.error('[telemetry] saveVariables failed', err instanceof Error ? err.name : 'error')
+    }
+  }
+
+  const modelInput = createWorkflowModelInput(session, polished, { variables })
   const createClient = deps.createClient ?? defaultClient
   const client = createClient(config.openaiApiKey)
   const model = config.openaiModel
@@ -91,8 +103,19 @@ export async function extractWorkflow(
     throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
   }
 
-  assertEvidence(validatedResult.data, polished)
-  return store.saveWorkflow(session.sessionId, validatedResult.data, model)
+  // Prefer deterministic variables when the model omitted them.
+  const workflow: ExtractedWorkflow = {
+    ...validatedResult.data,
+    variables:
+      validatedResult.data.variables && validatedResult.data.variables.length > 0
+        ? validatedResult.data.variables
+        : variables.length
+          ? variables
+          : null
+  }
+
+  assertEvidence(workflow, polished)
+  return store.saveWorkflow(session.sessionId, workflow, model)
 }
 
 export function assertEvidence(workflow: ExtractedWorkflow, polished: PolishedSession): void {

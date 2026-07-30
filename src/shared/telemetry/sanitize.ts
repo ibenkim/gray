@@ -182,6 +182,18 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
     data.formLabel = sanitizeLabel(data.formLabel)
     data.errorState = truncate(data.errorState, 200)
     data.successMessage = truncate(data.successMessage, 200)
+    data.documentTitle = sanitizeWindowTitle(data.documentTitle)
+    data.elementRole = sanitizeLabel(data.elementRole)
+    data.elementSubrole = sanitizeLabel(data.elementSubrole)
+    data.elementLabel = sanitizeLabel(data.elementLabel)
+    data.elementPath = data.elementPath
+      ?.map((p) => sanitizeLabel(p))
+      .filter((p): p is string => !!p)
+      .slice(0, 3)
+    data.selectedLabels = data.selectedLabels
+      ?.map((l) => sanitizeLabel(l))
+      .filter((l): l is string => !!l)
+      .slice(0, 5)
     data.headings = data.headings
       ?.map((h) => sanitizeLabel(h))
       .filter((h): h is string => !!h)
@@ -194,6 +206,27 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
       ?.map((d) => sanitizeLabel(d))
       .filter((d): d is string => !!d)
       .slice(0, 8)
+
+    if (data.clipboard) {
+      data.clipboard = {
+        ...data.clipboard,
+        urlHost: truncate(data.clipboard.urlHost, 200),
+        urlPath: truncate(data.clipboard.urlPath, MAX_PATH)
+      }
+    }
+
+    // Never keep absolute paths for keyframes — relative only.
+    if (data.keyframePath) {
+      if (
+        data.keyframePath.includes('..') ||
+        data.keyframePath.startsWith('/') ||
+        /^[A-Za-z]:\\/.test(data.keyframePath)
+      ) {
+        delete data.keyframePath
+      } else {
+        data.keyframePath = truncate(data.keyframePath, 300)
+      }
+    }
 
     if (data.field) {
       const field = { ...data.field }

@@ -4,9 +4,11 @@ import type {
   ProcessingErrorCode,
   ProcessingStatus,
   CaptureStatus,
+  StoredVariables,
   StoredWorkflowResult,
   TelemetryEvent,
-  TelemetrySessionMeta
+  TelemetrySessionMeta,
+  WorkflowVariable
 } from '../../../shared/telemetry/schema'
 
 export type CreateSessionInput = {
@@ -41,4 +43,13 @@ export interface TelemetryStore {
   getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null>
   updateSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<TelemetrySessionMeta>
   ensureReady(): Promise<void>
+  saveVariables?(sessionId: string, variables: WorkflowVariable[]): Promise<StoredVariables>
+  getVariables?(sessionId: string): Promise<StoredVariables | null>
+  saveKeyframe?(
+    sessionId: string,
+    eventId: string,
+    jpeg: Buffer
+  ): Promise<{ absolutePath: string; relativePath: string }>
+  /** Absolute root for keyframe files (optional). */
+  keyframesRoot?(): string
 }

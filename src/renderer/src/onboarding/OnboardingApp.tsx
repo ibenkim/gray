@@ -23,7 +23,6 @@ const ONB_SHADOW_PAD = 36
 export default function OnboardingApp() {
   const [step, setStep] = useState<OnboardingStep>('welcome')
   const [session, setSession] = useState<Session>(null)
-  const [micSkipped, setMicSkipped] = useState(false)
   const [permissions, setPermissions] = useState<PermissionsState>(UNKNOWN_PERMS)
   const [pendingInvite, setPendingInvite] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -34,7 +33,6 @@ export default function OnboardingApp() {
       if (cancelled || !snap) return
       setStep(snap.onboardingStep)
       setSession(snap.session)
-      setMicSkipped(snap.micSkipped)
     })
     window.ghostBridge?.getPermissions?.().then((p) => {
       if (!cancelled && p) setPermissions(p)
@@ -43,7 +41,6 @@ export default function OnboardingApp() {
     const offStore = window.ghostBridge?.onStoreChanged?.((snap) => {
       setStep(snap.onboardingStep)
       setSession(snap.session)
-      setMicSkipped(snap.micSkipped)
     })
     const offPerms = window.ghostBridge?.onPermissionsChanged?.((p) => setPermissions(p))
     const offLink = window.ghostBridge?.onDeepLink?.((link) => {
@@ -79,7 +76,7 @@ export default function OnboardingApp() {
     const observer = new ResizeObserver(report)
     observer.observe(card)
     return () => observer.disconnect()
-  }, [step, permissions, micSkipped, pendingInvite, session])
+  }, [step, permissions, pendingInvite, session])
 
   return (
     <div className="onb-root" ref={rootRef}>
@@ -92,7 +89,7 @@ export default function OnboardingApp() {
         />
       )}
       {(step === 'permissions' || step === 'complete') && (
-        <PermissionsStep permissions={permissions} micSkipped={micSkipped} />
+        <PermissionsStep permissions={permissions} />
       )}
     </div>
   )

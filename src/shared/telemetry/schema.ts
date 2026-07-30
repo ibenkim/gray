@@ -12,7 +12,12 @@ export const TelemetryEventTypeSchema = z.enum([
   'form_submitted',
   'keyboard_shortcut',
   'error',
-  'screen_changed'
+  'screen_changed',
+  'focus_changed',
+  'clipboard_changed',
+  'paste_detected',
+  'element_activated',
+  'keyframe_captured'
 ])
 
 export type TelemetryEventType = z.infer<typeof TelemetryEventTypeSchema>
@@ -67,6 +72,22 @@ export const FieldDataSchema = z
   })
   .strict()
 
+export const ClipboardContentTypeSchema = z.enum(['url', 'text', 'image', 'file', 'other'])
+export type ClipboardContentType = z.infer<typeof ClipboardContentTypeSchema>
+
+/** Sanitized clipboard metadata — never the raw value. */
+export const ClipboardDataSchema = z
+  .object({
+    contentType: ClipboardContentTypeSchema,
+    urlHost: z.string().max(200).optional(),
+    urlPath: z.string().max(200).optional(),
+    charCount: z.number().int().nonnegative().optional(),
+    contentHash: z.string().max(64)
+  })
+  .strict()
+
+export type ClipboardData = z.infer<typeof ClipboardDataSchema>
+
 export const TelemetryEventDataSchema = z
   .object({
     appName: z.string().max(120).optional(),
@@ -86,7 +107,20 @@ export const TelemetryEventDataSchema = z
     errorState: z.string().max(200).optional(),
     successMessage: z.string().max(200).optional(),
     idleGapMs: z.number().int().nonnegative().optional(),
-    ignored: z.boolean().optional()
+    ignored: z.boolean().optional(),
+    documentTitle: z.string().max(200).optional(),
+    elementRole: z.string().max(64).optional(),
+    elementSubrole: z.string().max(64).optional(),
+    elementLabel: z.string().max(120).optional(),
+    elementPath: z.array(z.string().max(80)).max(3).optional(),
+    selectedLabels: z.array(z.string().max(120)).max(5).optional(),
+    clipboard: ClipboardDataSchema.optional(),
+    charCountDelta: z.number().int().optional(),
+    matchedClipboardHash: z.string().max(64).optional(),
+    inferred: z.boolean().optional(),
+    verified: z.boolean().optional(),
+    /** Relative path only — never base64, never absolute. */
+    keyframePath: z.string().max(300).optional()
   })
   .strict()
 
@@ -241,11 +275,19 @@ export const PolishedActionSchema = z
       'error',
       'recovery',
       'idle',
-      'session'
+      'session',
+      'clipboard'
     ]),
     timestamp: z.string().datetime(),
     sourceEventIds: z.array(z.string()).min(1),
-    appName: z.string().max(120).optional()
+    appName: z.string().max(120).optional(),
+    documentTitle: z.string().max(200).optional(),
+    elementLabel: z.string().max(120).optional(),
+    elementRole: z.string().max(64).optional(),
+    clipboard: ClipboardDataSchema.optional(),
+    keyframePath: z.string().max(300).optional(),
+    inferred: z.boolean().optional(),
+    verified: z.boolean().optional()
   })
   .strict()
 
@@ -287,6 +329,17 @@ export const WorkflowStepSchema = z
   })
   .strict()
 
+export const WorkflowVariableSchema = z
+  .object({
+    key: z.string().max(40),
+    label: z.string().max(120),
+    kind: z.enum(['document', 'url', 'recipient', 'text']),
+    exampleSanitized: z.string().max(200).nullable()
+  })
+  .strict()
+
+export type WorkflowVariable = z.infer<typeof WorkflowVariableSchema>
+
 export const ExtractedWorkflowSchema = z
   .object({
     title: z.string().min(1).max(160),
@@ -294,11 +347,24 @@ export const ExtractedWorkflowSchema = z
     summary: z.string().min(1).max(800),
     outcome: z.enum(['completed', 'partial', 'failed', 'unknown']),
     steps: z.array(WorkflowStepSchema).min(1).max(80),
-    warnings: z.array(z.string().max(300)).max(20)
+    warnings: z.array(z.string().max(300)).max(20),
+    /** OpenAI structured outputs require nullable (not optional). */
+    variables: z.array(WorkflowVariableSchema).max(20).nullable()
   })
   .strict()
 
 export type ExtractedWorkflow = z.infer<typeof ExtractedWorkflowSchema>
+
+export const StoredVariablesSchema = z
+  .object({
+    sessionId: z.string(),
+    schemaVersion: z.literal(SCHEMA_VERSION),
+    extractedAt: z.string().datetime(),
+    variables: z.array(WorkflowVariableSchema)
+  })
+  .strict()
+
+export type StoredVariables = z.infer<typeof StoredVariablesSchema>
 
 /** Alias matching the product naming in the summarizer spec. */
 export const WorkflowSchema = ExtractedWorkflowSchema

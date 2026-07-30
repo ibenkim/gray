@@ -123,9 +123,9 @@ type WorkflowContextValue = {
   screenGranted: boolean
   /** True when Microphone is granted (narration availability). */
   micGranted: boolean
-  /** A required permission (screen / accessibility) is currently off. */
+  /** Screen Recording is currently off (required for record/run). */
   permissionPaused: boolean
-  /** A run is holding mid-flight because a required permission dropped. */
+  /** A run is holding mid-flight because Screen Recording dropped. */
   permissionHold: boolean
   /** Show the revoked-permission toast above the pill. */
   permToastVisible: boolean
@@ -273,18 +273,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   permissionHoldRef.current = permissionHold
 
   const screenGranted = permissions ? permissions.screen === 'granted' : true
-  const accessibilityGranted = permissions ? permissions.accessibility === 'granted' : true
   const micGranted = permissions ? permissions.microphone === 'granted' : false
-  const permissionPaused = !!permissions && (!screenGranted || !accessibilityGranted)
-
-  const missingPermissionId = (): 'screen' | 'accessibility' =>
-    permissions && permissions.screen !== 'granted' ? 'screen' : 'accessibility'
+  // Accessibility is reserved for a future InteractionProvider — only Screen
+  // Recording is required for recording today.
+  const permissionPaused = !!permissions && !screenGranted
 
   const computeStake = useCallback(async () => {
-    const missing = permissions && permissions.screen !== 'granted' ? 'screen' : 'accessibility'
-    setPermStakeTitle(
-      missing === 'screen' ? 'Screen recording was turned off' : 'Accessibility was turned off'
-    )
+    setPermStakeTitle('Screen recording was turned off')
     const snap = await window.ghostBridge?.getSnapshot?.()
     const scheduled = (snap?.workflows ?? [])
       .filter((w) => w.status === 'on' && w.trigger.cadence)
@@ -302,7 +297,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       minute: '2-digit'
     })
     setPermStake(`${w.name} is scheduled for ${time}. yuh can’t run it until this is back on.`)
-  }, [permissions])
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -315,8 +310,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       const prev = permissionsRef.current
       permissionsRef.current = p
       setPermissions(p)
-      const wasOk = !!prev && prev.screen === 'granted' && prev.accessibility === 'granted'
-      const nowMissing = p.screen !== 'granted' || p.accessibility !== 'granted'
+      const wasOk = !!prev && prev.screen === 'granted'
+      const nowMissing = p.screen !== 'granted'
       if (wasOk && nowMissing) {
         setToastArmed(true)
         void computeStake()
@@ -343,9 +338,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const permToastVisible = toastArmed && state !== 'running'
 
   const fixPermission = useCallback(() => {
-    window.ghostBridge?.openPermissionSettings?.(missingPermissionId())
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [permissions])
+    window.ghostBridge?.openPermissionSettings?.('screen')
+  }, [])
 
   const openScreenRecovery = useCallback(() => {
     window.ghostBridge?.openPermissionSettings?.('screen')

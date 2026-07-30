@@ -1,4 +1,4 @@
-import type { TelemetryEvent, TelemetryTarget } from '../../shared/telemetry/schema'
+import type { TelemetryEvent, TelemetryEventType, TelemetryTarget } from '../../shared/telemetry/schema'
 
 /**
  * Optional element-level interaction source (macOS Accessibility, etc.).
@@ -8,10 +8,20 @@ export interface InteractionProvider {
   readonly enabled: boolean
   start(onEvent: (partial: InteractionPartial) => void): void
   stop(): void
+  /** Force an immediate sample (e.g. after app/window or clipboard change). */
+  poke?(): void
 }
 
 export type InteractionPartial = {
-  type: 'click' | 'field_completed' | 'selection_changed' | 'form_submitted'
+  type: Extract<
+    TelemetryEventType,
+    | 'click'
+    | 'field_completed'
+    | 'selection_changed'
+    | 'form_submitted'
+    | 'focus_changed'
+    | 'element_activated'
+  >
   target?: TelemetryTarget
   data?: TelemetryEvent['data']
 }
@@ -26,13 +36,28 @@ export class NoopInteractionProvider implements InteractionProvider {
   }
 }
 
+export type KeyframeReason =
+  | 'app_changed'
+  | 'activation'
+  | 'clipboard'
+  | 'settle'
+  | 'ambiguous'
+
 /**
  * Optional redacted keyframe screenshot source.
  * Disabled by default — do not store base64 screenshots in event files.
  */
 export interface ScreenshotProvider {
   readonly enabled: boolean
-  captureKeyframe(_screenStateId: string): Promise<{ path?: string } | null>
+  captureKeyframe(
+    screenStateId: string,
+    opts?: {
+      reason?: KeyframeReason
+      bounds?: { x: number; y: number; width: number; height: number }
+      sessionId?: string
+      eventId?: string
+    }
+  ): Promise<{ path?: string; relativePath?: string } | null>
 }
 
 export class DisabledScreenshotProvider implements ScreenshotProvider {

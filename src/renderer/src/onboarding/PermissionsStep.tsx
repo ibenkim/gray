@@ -15,13 +15,17 @@ type PermMeta = {
   whyLine: string
 }
 
+/**
+ * Screen Recording is required. Accessibility is optional — richer click/focus/
+ * selection capture via JXA. Microphone stays deferred until narration ships.
+ */
 const PERMISSIONS: PermMeta[] = [
   {
     id: 'screen',
     n: 1,
     title: 'See your screen',
     allow: 'Allow screen recording',
-    why: 'To watch what you do while you record, and to see your apps while workflows run. Nothing leaves this Mac.',
+    why: 'To read which app and window are active while you record. Nothing leaves this Mac except an optional OpenAI call when you Finish.',
     deniedTitle: 'yuh can’t see your screen yet',
     deniedSub: 'No pressure — you can turn it on in System Settings. Takes ten seconds.',
     settingsPath: [
@@ -29,58 +33,46 @@ const PERMISSIONS: PermMeta[] = [
       'Click Screen Recording',
       'Turn on yuh, then come back'
     ],
-    whyLine: 'See your screen — so it can record and run your workflows'
+    whyLine: 'See your screen — so it can watch which app you’re in while you record'
   },
   {
     id: 'accessibility',
     n: 2,
-    title: 'Move the cursor',
+    title: 'See what you click',
     allow: 'Allow accessibility',
-    why: 'Clicks, typing, opening apps — exactly as shown. You can take over any time.',
-    deniedTitle: 'yuh can’t move the cursor yet',
-    deniedSub: 'No pressure — you can turn it on in System Settings. Takes ten seconds.',
+    optional: true,
+    why: 'Richer recording — focused controls, selected conversations, and field activity. Optional; recording still works without it.',
+    deniedTitle: 'yuh can’t see controls yet',
+    deniedSub: 'Optional — turn it on in System Settings for richer workflows, or skip for now.',
     settingsPath: [
       'Open System Settings  →  Privacy & Security',
       'Click Accessibility',
       'Turn on yuh, then come back'
     ],
-    whyLine: 'Move the cursor — so it can click and type for you'
-  },
-  {
-    id: 'microphone',
-    n: 3,
-    title: 'Hear your voice',
-    allow: 'Allow microphone',
-    optional: true,
-    why: 'So you can narrate steps out loud while recording. Optional — add it whenever you like.',
-    deniedTitle: 'yuh can’t hear your voice yet',
-    deniedSub: 'Optional — turn it on in System Settings whenever you like.',
-    settingsPath: [
-      'Open System Settings  →  Privacy & Security',
-      'Click Microphone',
-      'Turn on yuh, then come back'
-    ],
-    whyLine: 'Hear your voice — so it can capture narration (optional)'
+    whyLine: 'See what you click — focused controls and selections (optional, richer recording)'
   }
 ]
 
 /** 2.x permissions checklist, 3.1 denied recovery, and 2.5 complete card. */
 export default function PermissionsStep({
   permissions,
-  micSkipped
+  axSkipped = false
 }: {
   permissions: PermissionsState
-  micSkipped: boolean
+  axSkipped?: boolean
 }) {
   const [attempted, setAttempted] = useState<Record<string, boolean>>({})
   const [shakeId, setShakeId] = useState<PermissionId | null>(null)
   const [stillOff, setStillOff] = useState<PermissionId | null>(null)
   const [whyOpen, setWhyOpen] = useState(false)
+  const [localAxSkipped, setLocalAxSkipped] = useState(axSkipped)
   const whyRef = useRef<HTMLDivElement>(null)
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
   const resolved = (id: PermissionId): boolean => {
-    if (id === 'microphone') return permissions.microphone === 'granted' || micSkipped
+    if (id === 'accessibility') {
+      return permissions.accessibility === 'granted' || localAxSkipped
+    }
     return permissions[id] === 'granted'
   }
 
@@ -99,30 +91,26 @@ export default function PermissionsStep({
   async function allow(id: PermissionId) {
     const next = await window.ghostBridge?.requestPermission?.(id)
     setAttempted((a) => ({ ...a, [id]: true }))
-    const granted =
-      id === 'microphone' ? next?.microphone === 'granted' : next?.[id] === 'granted'
-    if (!granted) setStillOff(null)
+    if (next?.[id] !== 'granted') setStillOff(null)
   }
 
   async function checkAgain(id: PermissionId) {
     const next = await window.ghostBridge?.getPermissions?.()
-    const granted =
-      id === 'microphone' ? next?.microphone === 'granted' : next?.[id] === 'granted'
-    if (!granted) {
+    if (next?.[id] !== 'granted') {
       setStillOff(id)
       setShakeId(id)
       setTimeout(() => setShakeId(null), 450)
     }
   }
 
-  function skipMic() {
-    window.ghostBridge?.setMicSkipped?.(true)
+  function skipAx() {
+    setLocalAxSkipped(true)
   }
 
   if (complete) {
     return (
       <CompleteCard
-        micGranted={permissions.microphone === 'granted'}
+        axGranted={permissions.accessibility === 'granted'}
         onDone={() => window.ghostBridge?.completeOnboarding?.({})}
         onRecord={() => window.ghostBridge?.completeOnboarding?.({ openRecordPanel: true })}
       />
@@ -131,20 +119,32 @@ export default function PermissionsStep({
 
   const current = PERMISSIONS[currentIndex]
   const denied = attempted[current.id] && !resolved(current.id)
+  const requiredCount = PERMISSIONS.filter((p) => !p.optional).length
+  const totalShown = PERMISSIONS.length
 
   return (
     <div className="onb-card onb-perms-card">
       <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
         <div className="onb-perms-head">
           <span className="onb-eyebrow">SET UP</span>
-          <span className="onb-counter">{currentIndex + 1} of 3</span>
+          <span className="onb-counter">
+            {currentIndex + 1} of {totalShown}
+          </span>
         </div>
-        <div className="onb-title">{denied ? current.deniedTitle : 'yuh needs a few permissions'}</div>
+        <div className="onb-title">
+          {denied
+            ? current.deniedTitle
+            : requiredCount === 1 && currentIndex === 0
+              ? 'yuh needs one permission'
+              : 'A few more permissions'}
+        </div>
       </div>
       <p className="onb-sub">
         {denied
           ? current.deniedSub
-          : 'macOS asks once for each. yuh only looks and acts when you tell it to.'}
+          : current.optional
+            ? 'Optional — skip if you prefer thinner recordings.'
+            : 'macOS asks once. yuh only looks when you start recording.'}
       </p>
 
       <div className="onb-gap-sm" />
@@ -156,7 +156,6 @@ export default function PermissionsStep({
         if (i > currentIndex) {
           return <PendingRow key={perm.id} n={perm.n} title={perm.title} />
         }
-        // Current row — normal (gray) or denied recovery (amber).
         return (
           <div
             key={perm.id}
@@ -197,6 +196,11 @@ export default function PermissionsStep({
                       Restart yuh
                     </button>
                   )}
+                  {perm.optional && (
+                    <button className="onb-skip" onClick={skipAx}>
+                      Skip for now
+                    </button>
+                  )}
                 </div>
               </>
             ) : (
@@ -207,7 +211,7 @@ export default function PermissionsStep({
                     {perm.allow}
                   </button>
                   {perm.optional ? (
-                    <button className="onb-skip" onClick={skipMic}>
+                    <button className="onb-skip" onClick={skipAx}>
                       Skip for now
                     </button>
                   ) : (
@@ -233,7 +237,9 @@ export default function PermissionsStep({
                 {p.whyLine}
               </div>
             ))}
-            <div className="onb-why-foot">Nothing leaves this Mac.</div>
+            <div className="onb-why-foot">
+              Nothing leaves this Mac except an optional OpenAI call when you Finish.
+            </div>
           </div>
         )}
       </div>
@@ -261,11 +267,11 @@ function PendingRow({ n, title }: { n: number; title: string }) {
 }
 
 function CompleteCard({
-  micGranted,
+  axGranted,
   onDone,
   onRecord
 }: {
-  micGranted: boolean
+  axGranted: boolean
   onDone: () => void
   onRecord: () => void
 }) {
@@ -278,7 +284,10 @@ function CompleteCard({
         </div>
         <div className="onb-title">You’re all set</div>
       </div>
-      <p className="onb-sub">yuh can watch, act, and listen — only when you ask it to.</p>
+      <p className="onb-sub">
+        yuh can watch which app you’re in
+        {axGranted ? ' and what you click' : ''} — only when you start recording.
+      </p>
 
       <div className="onb-gap-sm" />
 
@@ -289,13 +298,8 @@ function CompleteCard({
       </div>
       <div className="onb-row onb-row-done">
         <span className="onb-row-num">2</span>
-        <span className="onb-row-title">Move the cursor</span>
-        <CheckGlyph />
-      </div>
-      <div className="onb-row onb-row-done">
-        <span className="onb-row-num">3</span>
-        <span className="onb-row-title">Hear your voice</span>
-        {micGranted ? <CheckGlyph /> : <span className="onb-dash" />}
+        <span className="onb-row-title">See what you click</span>
+        {axGranted ? <CheckGlyph /> : <span className="onb-dash" />}
       </div>
 
       <div className="onb-gap-sm" />

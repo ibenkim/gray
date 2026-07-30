@@ -6,11 +6,13 @@ import {
   type TelemetryEventType
 } from '../../shared/telemetry/schema'
 import { redactEvent, sanitizeLabel, sanitizeUrl, sanitizeWindowTitle } from '../../shared/telemetry/sanitize'
+import { ClipboardWatcher, inferPaste } from './clipboard'
 import {
   DisabledScreenshotProvider,
   NoopInteractionProvider,
   type InteractionPartial,
   type InteractionProvider,
+  type KeyframeReason,
   type ScreenshotProvider
 } from './providers'
 import { TelemetryQueue } from './queue'
@@ -63,7 +65,8 @@ const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
 ]
 
 /**
- * Main-process recorder: active-win polling + globalShortcut chords.
+ * Main-process recorder: active-win polling + globalShortcut chords +
+ * optional Accessibility (JXA) + clipboard watcher + sparse keyframes.
  * Structurally cannot capture printable keystrokes.
  */
 export class TelemetryRecorder {
@@ -76,25 +79,31 @@ export class TelemetryRecorder {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private registeredShortcuts: string[] = []
   private lastAppKey: string | null = null
+  private lastBounds: ActiveWinResult['bounds'] | null = null
   private opts: CaptureOptions = {}
   private onEventListeners = new Set<(event: TelemetryEvent) => void>()
   private onStatusListeners = new Set<(status: RecordingStatus) => void>()
   private interaction: InteractionProvider
+  private screenshot: ScreenshotProvider
   private screenStates: ScreenStateTracker
+  private clipboard: ClipboardWatcher
   private queue: TelemetryQueue | null = null
   private activeWin: ActiveWinModule | null = null
+  private lastFieldLength: number | null = null
+  private settleTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly store: TelemetryStore | null,
     providers?: {
       interaction?: InteractionProvider
       screenshot?: ScreenshotProvider
+      clipboard?: ClipboardWatcher
     }
   ) {
     this.interaction = providers?.interaction ?? new NoopInteractionProvider()
-    this.screenStates = new ScreenStateTracker(
-      providers?.screenshot ?? new DisabledScreenshotProvider()
-    )
+    this.screenshot = providers?.screenshot ?? new DisabledScreenshotProvider()
+    this.screenStates = new ScreenStateTracker(this.screenshot)
+    this.clipboard = providers?.clipboard ?? new ClipboardWatcher()
   }
 
   getRecordingStatus(): RecordingStatus {
@@ -138,6 +147,8 @@ export class TelemetryRecorder {
     this.recording = true
     this.processing = false
     this.lastAppKey = null
+    this.lastBounds = null
+    this.lastFieldLength = null
     this.screenStates.reset()
 
     await this.store.ensureReady()
@@ -161,6 +172,7 @@ export class TelemetryRecorder {
     await this.ensureActiveWin()
     this.startPolling()
     this.registerShortcuts()
+    this.startClipboard()
 
     if (this.interaction.enabled) {
       this.interaction.start((partial) => this.ingestInteraction(partial))
@@ -178,6 +190,11 @@ export class TelemetryRecorder {
     this.stopPolling()
     this.unregisterShortcuts()
     this.interaction.stop()
+    this.clipboard.stop()
+    if (this.settleTimer) {
+      clearTimeout(this.settleTimer)
+      this.settleTimer = null
+    }
 
     this.recordEvent('session_stopped', {
       data: { message: 'Recording stopped' }
@@ -195,10 +212,11 @@ export class TelemetryRecorder {
 
   recordEvent(
     type: TelemetryEventType,
-    partial: Partial<Pick<TelemetryEvent, 'page' | 'route' | 'viewport' | 'target' | 'data' | 'screenStateId'>> = {}
+    partial: Partial<
+      Pick<TelemetryEvent, 'page' | 'route' | 'viewport' | 'target' | 'data' | 'screenStateId'>
+    > = {}
   ): TelemetryEvent | null {
     if (!this.sessionId) return null
-    // Allow session_stopped even after recording flag cleared during stop.
     if (!this.recording && type !== 'session_stopped') return null
 
     const event: TelemetryEvent = redactEvent({
@@ -257,7 +275,6 @@ export class TelemetryRecorder {
   private async ensureActiveWin(): Promise<void> {
     if (this.activeWin) return
     try {
-      // Dynamic import — active-win is optional at runtime if native bind fails.
       const mod = (await import('active-win')) as unknown as ActiveWinModule
       this.activeWin = mod
     } catch (err) {
@@ -281,6 +298,19 @@ export class TelemetryRecorder {
     }
   }
 
+  private startClipboard(): void {
+    this.clipboard.start((change) => {
+      if (!this.recording) return
+      this.recordEvent('clipboard_changed', {
+        data: {
+          clipboard: change.clipboard
+        }
+      })
+      this.interaction.poke?.()
+      void this.captureKeyframe('clipboard')
+    })
+  }
+
   private async pollActiveWindow(): Promise<void> {
     if (!this.recording || !this.activeWin) return
     try {
@@ -294,7 +324,6 @@ export class TelemetryRecorder {
         return
       }
 
-      // One-app mode: only track the selected app (UI ids like chrome/figma).
       if (this.opts.recordMode === 'one-app' && this.opts.selectedAppId && appName) {
         const selected = this.opts.selectedAppId.toLowerCase()
         const aliases: Record<string, string[]> = {
@@ -310,6 +339,8 @@ export class TelemetryRecorder {
         }
       }
 
+      if (win.bounds) this.lastBounds = win.bounds
+
       const snapshot = this.screenStates.fromActiveWindow(win)
       if (!snapshot) return
 
@@ -324,7 +355,6 @@ export class TelemetryRecorder {
       const { urlHost, urlPath } = sanitizeUrl(win.url)
       const windowTitle = sanitizeWindowTitle(win.title)
 
-      // Emit navigation on first observation or when the frontmost app changes.
       if (isFirst || appChanged) {
         this.recordEvent('navigation', {
           page: snapshot.page,
@@ -338,10 +368,13 @@ export class TelemetryRecorder {
             appName: snapshot.appName,
             appBundleId: snapshot.appBundleId,
             windowTitle,
+            documentTitle: windowTitle,
             urlHost,
             urlPath
           }
         })
+        this.interaction.poke?.()
+        void this.captureKeyframe('app_changed')
       }
 
       this.recordEvent('screen_changed', {
@@ -356,6 +389,7 @@ export class TelemetryRecorder {
           appName: snapshot.appName,
           appBundleId: snapshot.appBundleId,
           windowTitle,
+          documentTitle: windowTitle,
           urlHost,
           urlPath,
           headings: snapshot.headings,
@@ -364,9 +398,48 @@ export class TelemetryRecorder {
           loading: snapshot.loading
         }
       })
+
+      this.scheduleSettleKeyframe()
     } catch (err) {
-      // Never log sensitive window contents — only the error class.
       console.error('[telemetry] active-win poll failed', err instanceof Error ? err.name : 'error')
+    }
+  }
+
+  private scheduleSettleKeyframe(): void {
+    if (this.settleTimer) clearTimeout(this.settleTimer)
+    this.settleTimer = setTimeout(() => {
+      if (!this.recording) return
+      void this.captureKeyframe('settle')
+    }, 1500)
+  }
+
+  private async captureKeyframe(reason: KeyframeReason): Promise<void> {
+    if (!this.screenshot.enabled || !this.sessionId || !this.recording) return
+    const eventId = newId('tevt')
+    try {
+      const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
+        reason,
+        bounds: this.lastBounds
+          ? {
+              x: this.lastBounds.x ?? 0,
+              y: this.lastBounds.y ?? 0,
+              width: this.lastBounds.width ?? 0,
+              height: this.lastBounds.height ?? 0
+            }
+          : undefined,
+        sessionId: this.sessionId,
+        eventId
+      })
+      if (result?.relativePath) {
+        this.recordEvent('keyframe_captured', {
+          data: {
+            keyframePath: result.relativePath,
+            message: reason
+          }
+        })
+      }
+    } catch {
+      /* never block recording on keyframe failure */
     }
   }
 
@@ -382,7 +455,7 @@ export class TelemetryRecorder {
         })
         if (ok) this.registeredShortcuts.push(accelerator)
       } catch {
-        // Some accelerators (Cmd+Tab / Alt+Tab) may be reserved by the OS.
+        // Some accelerators may be reserved by the OS.
       }
     }
   }
@@ -400,9 +473,49 @@ export class TelemetryRecorder {
 
   private ingestInteraction(partial: InteractionPartial): void {
     if (!this.recording) return
+
+    // Paste inference: field length jumped after a recent clipboard change.
+    if (partial.type === 'focus_changed' || partial.type === 'field_completed') {
+      const len = partial.data?.field?.valueLength
+      if (typeof len === 'number') {
+        const latest = this.clipboard.getLatest()
+        if (
+          latest &&
+          this.lastFieldLength != null &&
+          len > this.lastFieldLength
+        ) {
+          const result = inferPaste({
+            fieldCharCountBefore: this.lastFieldLength,
+            fieldCharCountAfter: len,
+            clipboard: latest.clipboard,
+            clipboardAt: latest.at,
+            now: Date.now()
+          })
+          if (result.matched) {
+            this.recordEvent('paste_detected', {
+              target: partial.target,
+              data: {
+                ...partial.data,
+                clipboard: latest.clipboard,
+                matchedClipboardHash: latest.clipboard.contentHash,
+                charCountDelta: result.charCountDelta,
+                inferred: true
+              }
+            })
+          }
+        }
+        this.lastFieldLength = len
+      }
+    }
+
     this.recordEvent(partial.type, {
       target: partial.target,
       data: partial.data
     })
+
+    if (partial.type === 'element_activated' || partial.type === 'click') {
+      void this.captureKeyframe('activation')
+      this.interaction.poke?.()
+    }
   }
 }

@@ -10,15 +10,18 @@ import { dirname, resolve, sep } from 'path'
 import {
   SCHEMA_VERSION,
   SessionIdSchema,
+  StoredVariablesSchema,
   StoredWorkflowResultSchema,
   TelemetryEventSchema,
   PolishedSessionSchema,
   normalizeSessionMeta,
   type ExtractedWorkflow,
   type PolishedSession,
+  type StoredVariables,
   type StoredWorkflowResult,
   type TelemetryEvent,
-  type TelemetrySessionMeta
+  type TelemetrySessionMeta,
+  type WorkflowVariable
 } from '../../../shared/telemetry/schema'
 import { redactEvent, shouldDropEvent } from '../../../shared/telemetry/sanitize'
 import type {
@@ -63,6 +66,8 @@ export class FileTelemetryStore implements TelemetryStore {
       mkdirSync(this.subdir('polished'), { recursive: true })
       mkdirSync(this.subdir('workflows'), { recursive: true })
       mkdirSync(this.subdir('meta'), { recursive: true })
+      mkdirSync(this.subdir('variables'), { recursive: true })
+      mkdirSync(this.subdir('keyframes'), { recursive: true })
       this.ready = true
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -227,10 +232,57 @@ export class FileTelemetryStore implements TelemetryStore {
     if (!existsSync(path)) return null
     try {
       return StoredWorkflowResultSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
-    } catch (err) {
+    } catch {
       console.error('[telemetry] failed to read workflow')
       return null
     }
+  }
+
+  async saveVariables(sessionId: string, variables: WorkflowVariable[]): Promise<StoredVariables> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const stored: StoredVariables = {
+      sessionId: id,
+      schemaVersion: SCHEMA_VERSION,
+      extractedAt: new Date().toISOString(),
+      variables
+    }
+    const validated = StoredVariablesSchema.parse(stored)
+    this.writeJson(this.variablesPath(id), validated)
+    return validated
+  }
+
+  async getVariables(sessionId: string): Promise<StoredVariables | null> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.variablesPath(id)
+    if (!existsSync(path)) return null
+    try {
+      return StoredVariablesSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
+    } catch {
+      return null
+    }
+  }
+
+  async saveKeyframe(
+    sessionId: string,
+    eventId: string,
+    jpeg: Buffer
+  ): Promise<{ absolutePath: string; relativePath: string }> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    if (!/^[A-Za-z0-9_-]+$/.test(eventId) || eventId.includes('..')) {
+      throw new Error('[telemetry] invalid eventId for keyframe')
+    }
+    const relativePath = `${id}/${eventId}.jpg`
+    const absolutePath = this.safeJoin('keyframes', id, `${eventId}.jpg`)
+    mkdirSync(dirname(absolutePath), { recursive: true })
+    writeFileSync(absolutePath, jpeg)
+    return { absolutePath, relativePath }
+  }
+
+  keyframesRoot(): string {
+    return this.safeJoin('keyframes')
   }
 
   async getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null> {
@@ -261,16 +313,15 @@ export class FileTelemetryStore implements TelemetryStore {
           ? undefined
           : (patch.processingErrorCode ?? meta.processingErrorCode)
     }
-    // Never persist raw vendor errors.
     delete (next as { error?: string }).error
     delete (next as { status?: string }).status
     this.writeJson(this.metaPath(id), next)
     return next
   }
 
-  // ── path helpers ──
-
-  private subdir(name: 'normalized' | 'polished' | 'workflows' | 'meta'): string {
+  private subdir(
+    name: 'normalized' | 'polished' | 'workflows' | 'meta' | 'variables' | 'keyframes'
+  ): string {
     return this.safeJoin(name)
   }
 
@@ -284,6 +335,10 @@ export class FileTelemetryStore implements TelemetryStore {
 
   private workflowPath(sessionId: string): string {
     return this.safeJoin('workflows', `${sessionId}.json`)
+  }
+
+  private variablesPath(sessionId: string): string {
+    return this.safeJoin('variables', `${sessionId}.json`)
   }
 
   private metaPath(sessionId: string): string {

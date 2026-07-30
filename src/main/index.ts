@@ -1097,9 +1097,8 @@ function promoteOnboardingOverlay(): void {
 /** Record a granted→denied flip so the pill can arm the paused-permission UX. */
 function handlePermissionChange(prev: PermissionsState | null, next: PermissionsState) {
   if (!prev || !getSnapshot().onboardingComplete) return
-  const revoked =
-    (prev.screen === 'granted' && next.screen !== 'granted') ||
-    (prev.accessibility === 'granted' && next.accessibility !== 'granted')
+  // Only Screen Recording is required today (Accessibility is a future provider).
+  const revoked = prev.screen === 'granted' && next.screen !== 'granted'
   if (revoked) setLastPermissionRevokeAt(new Date().toISOString())
 }
 

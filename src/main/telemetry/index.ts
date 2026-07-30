@@ -1,9 +1,12 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import type { TelemetryEvent } from '../../shared/telemetry/schema'
 import { getSnapshot } from '../store'
+import { JxaAccessibilityProvider } from './ax/JxaAccessibilityProvider'
 import { TelemetryRecorder, type CaptureOptions, type RecordingStatus } from './capture'
+import { ClipboardWatcher } from './clipboard'
 import { loadTelemetryConfig, type TelemetryConfig } from './config'
 import { userMessageForCode } from './errors'
+import { SparseKeyframeProvider } from './keyframes'
 import { processSessionWorkflow } from './processSession'
 import { createTelemetryStore, type TelemetryStore } from './store'
 
@@ -50,7 +53,23 @@ export async function initTelemetry(): Promise<void> {
     console.error('[telemetry] init failed', err instanceof Error ? err.message : err)
     store = null
   }
-  recorder = new TelemetryRecorder(store)
+
+  const interaction =
+    process.platform === 'darwin' ? new JxaAccessibilityProvider() : undefined
+  const screenshot =
+    store && typeof store.saveKeyframe === 'function' && typeof store.keyframesRoot === 'function'
+      ? new SparseKeyframeProvider({
+          rootDir: store.keyframesRoot(),
+          saveKeyframe: (sessionId, eventId, jpeg) =>
+            store!.saveKeyframe!(sessionId, eventId, jpeg)
+        })
+      : undefined
+
+  recorder = new TelemetryRecorder(store, {
+    interaction,
+    screenshot,
+    clipboard: new ClipboardWatcher()
+  })
 
   recorder.onEvent((event) => {
     broadcast('telemetry:event', event)
