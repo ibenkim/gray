@@ -17,6 +17,21 @@ import type {
   Workflow,
   WorkspaceFocus
 } from '../shared/types'
+import type { ExtractedWorkflow, TelemetryEvent } from '../shared/telemetry/schema'
+
+type TelemetryRecordingStatus = {
+  recording: boolean
+  sessionId: string | null
+  sequence: number
+  startedAt: string | null
+  processing: boolean
+}
+
+type TelemetryStartOpts = {
+  recordMode?: 'one-app' | 'full-screen'
+  selectedAppId?: string
+  ownerEmail?: string
+}
 
 type ActivityHoldPayload = {
   runId: string
@@ -191,6 +206,64 @@ const ghostBridge = {
     const listener = (_e: unknown, state: PermissionsState) => cb(state)
     ipcRenderer.on('permissions:changed', listener)
     return () => ipcRenderer.removeListener('permissions:changed', listener)
+  },
+
+  // ── Telemetry / workflow recording ──
+  telemetryStart: (
+    opts?: TelemetryStartOpts
+  ): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
+    ipcRenderer.invoke('telemetry:sessionStart', opts ?? {}),
+  telemetryStop: (
+    sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean }
+  ): Promise<{
+    ok: boolean
+    sessionId?: string | null
+    error?: string
+    errorCode?: string
+    workflow?: Workflow
+    extracted?: ExtractedWorkflow
+    discarded?: boolean
+  }> => ipcRenderer.invoke('telemetry:sessionStop', sessionIdOrOpts),
+  /** Retry polish + OpenAI summarization without recording again. */
+  telemetryProcessWorkflow: (
+    sessionId: string
+  ): Promise<{
+    ok: boolean
+    sessionId?: string
+    error?: string
+    errorCode?: string
+    workflow?: Workflow
+    extracted?: ExtractedWorkflow
+  }> => ipcRenderer.invoke('telemetry:processWorkflow', sessionId),
+  getTelemetryStatus: (): Promise<TelemetryRecordingStatus> =>
+    ipcRenderer.invoke('telemetry:getStatus'),
+  getTelemetryWorkflow: (
+    sessionId: string
+  ): Promise<{ ok: boolean; result?: unknown; error?: string }> =>
+    ipcRenderer.invoke('telemetry:getWorkflow', sessionId),
+  onTelemetryEvent: (cb: (event: TelemetryEvent) => void) => {
+    const listener = (_e: unknown, event: TelemetryEvent) => cb(event)
+    ipcRenderer.on('telemetry:event', listener)
+    return () => ipcRenderer.removeListener('telemetry:event', listener)
+  },
+  onTelemetryStatus: (cb: (status: TelemetryRecordingStatus) => void) => {
+    const listener = (_e: unknown, status: TelemetryRecordingStatus) => cb(status)
+    ipcRenderer.on('telemetry:status', listener)
+    return () => ipcRenderer.removeListener('telemetry:status', listener)
+  },
+  onTelemetryWorkflowReady: (
+    cb: (payload: {
+      sessionId: string
+      workflow: Workflow
+      extracted: ExtractedWorkflow
+    }) => void
+  ) => {
+    const listener = (
+      _e: unknown,
+      payload: { sessionId: string; workflow: Workflow; extracted: ExtractedWorkflow }
+    ) => cb(payload)
+    ipcRenderer.on('telemetry:workflowReady', listener)
+    return () => ipcRenderer.removeListener('telemetry:workflowReady', listener)
   }
 }
 

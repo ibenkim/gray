@@ -17,6 +17,15 @@ import type {
   Workflow,
   WorkspaceFocus
 } from '../../shared/types'
+import type { ExtractedWorkflow, TelemetryEvent } from '../../shared/telemetry/schema'
+
+type TelemetryRecordingStatus = {
+  recording: boolean
+  sessionId: string | null
+  sequence: number
+  startedAt: string | null
+  processing: boolean
+}
 
 type ActivityHoldPayload = {
   runId: string
@@ -99,6 +108,43 @@ declare global {
       openPermissionSettings: (id: PermissionId) => Promise<void>
       restartApp: () => Promise<void>
       onPermissionsChanged: (cb: (state: PermissionsState) => void) => () => void
+      telemetryStart: (opts?: {
+        recordMode?: 'one-app' | 'full-screen'
+        selectedAppId?: string
+        ownerEmail?: string
+      }) => Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }>
+      telemetryStop: (
+        sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean }
+      ) => Promise<{
+        ok: boolean
+        sessionId?: string | null
+        error?: string
+        errorCode?: string
+        workflow?: Workflow
+        extracted?: ExtractedWorkflow
+        discarded?: boolean
+      }>
+      telemetryProcessWorkflow: (sessionId: string) => Promise<{
+        ok: boolean
+        sessionId?: string
+        error?: string
+        errorCode?: string
+        workflow?: Workflow
+        extracted?: ExtractedWorkflow
+      }>
+      getTelemetryStatus: () => Promise<TelemetryRecordingStatus>
+      getTelemetryWorkflow: (
+        sessionId: string
+      ) => Promise<{ ok: boolean; result?: unknown; error?: string }>
+      onTelemetryEvent: (cb: (event: TelemetryEvent) => void) => () => void
+      onTelemetryStatus: (cb: (status: TelemetryRecordingStatus) => void) => () => void
+      onTelemetryWorkflowReady: (
+        cb: (payload: {
+          sessionId: string
+          workflow: Workflow
+          extracted: ExtractedWorkflow
+        }) => void
+      ) => () => void
     }
   }
 }

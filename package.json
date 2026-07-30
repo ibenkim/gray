@@ -11,11 +11,16 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "start": "electron .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -b --force",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@fontsource/instrument-sans": "^5.3.0",
-    "openai": "^4.52.0"
+    "active-win": "^8.2.1",
+    "dotenv": "^17.4.2",
+    "openai": "^7.1.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.1",
@@ -29,6 +34,10 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.5.2",
-    "vite": "^5.3.1"
+    "vite": "^5.3.1",
+    "vitest": "^3.2.7"
+  },
+  "allowScripts": {
+    "active-win@8.2.1": true
   }
 }

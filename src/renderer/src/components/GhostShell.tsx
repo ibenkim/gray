@@ -23,7 +23,11 @@ export default function GhostShell() {
     permStake,
     permStakeTitle,
     fixPermission,
-    dismissPermToast
+    dismissPermToast,
+    organizeError,
+    lastTelemetrySessionId,
+    dismissOrganizeError,
+    retryOrganize
   } = useWorkflow()
   const [switchFlash, setSwitchFlash] = useState(false)
 
@@ -101,7 +105,10 @@ export default function GhostShell() {
     state === 'summary'
 
   // The revoked-permission toast floats above the pill while idle.
-  const showToast = permToastVisible && !expandedPanel && state !== 'hover'
+  const showPermToast = permToastVisible && !expandedPanel && state !== 'hover'
+  const showOrganizeError =
+    !!organizeError && !expandedPanel && state === 'idle' && !showPermToast
+  const showToast = showPermToast || showOrganizeError
 
   // Pill mode: the window is sized exactly to the pill (native blur/shadow).
   const pillMode = !expandedPanel && state !== 'hover' && !showToast
@@ -163,7 +170,7 @@ export default function GhostShell() {
             <SummaryPanel />
           </div>
         )}
-        {showToast && (
+        {showPermToast && (
           <div className="toast-slot">
             <Toast
               tone="apricot"
@@ -172,6 +179,18 @@ export default function GhostShell() {
               actionLabel="Fix in System Settings"
               onAction={fixPermission}
               onDismiss={dismissPermToast}
+            />
+          </div>
+        )}
+        {showOrganizeError && (
+          <div className="toast-slot">
+            <Toast
+              tone="error"
+              title="Couldn’t organize that recording"
+              body={organizeError ?? undefined}
+              actionLabel={lastTelemetrySessionId ? 'Retry' : undefined}
+              onAction={lastTelemetrySessionId ? () => void retryOrganize() : undefined}
+              onDismiss={dismissOrganizeError}
             />
           </div>
         )}

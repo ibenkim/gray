@@ -1,6 +1,11 @@
+import { config as loadDotenv } from 'dotenv'
 import { app, shell, BrowserWindow, ipcMain, screen, Menu, globalShortcut } from 'electron'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+
+// Load project .env into process.env before telemetry/config reads it.
+// electron-vite does not reliably inject non-VITE_ vars into the main process.
+loadDotenv({ path: resolve(process.cwd(), '.env') })
 import {
   getSnapshot,
   getWorkflow,
@@ -34,6 +39,11 @@ import {
 } from './team'
 import { newId } from '../shared/id'
 import type { DeepLink, PermissionsState } from '../shared/types'
+import {
+  flushTelemetryOnQuit,
+  initTelemetry,
+  registerTelemetryIpc
+} from './telemetry'
 
 let pillWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
@@ -1204,7 +1214,7 @@ function registerOnboardingIpc() {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.ghost')
 
   app.on('browser-window-created', (_, window) => {
@@ -1215,6 +1225,8 @@ app.whenReady().then(() => {
   registerStoreIpc()
   registerPermissionIpc()
   registerOnboardingIpc()
+  await initTelemetry()
+  registerTelemetryIpc()
   startPermissionWatch(handlePermissionChange)
 
   const onboarded = getSnapshot().onboardingComplete
@@ -1242,6 +1254,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   stopPermissionWatch()
+  void flushTelemetryOnQuit()
   setEditorScrimVisible(false)
   editorScrim?.destroy()
   editorScrim = null

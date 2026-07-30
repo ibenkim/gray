@@ -24,7 +24,9 @@ import type {
   SummaryOutcome,
   Workflow
 } from './types'
-import { createMockDraft, makeRunSteps, MOCK_WATCH_LOG } from './mockData'
+import { formatWatchEntry } from '../../../shared/telemetry/formatWatchEntry'
+import type { TelemetryEvent } from '../../../shared/telemetry/schema'
+import { createMockDraft, makeRunSteps } from './mockData'
 
 export type WatchEntry = {
   time: string
@@ -71,6 +73,12 @@ type WorkflowContextValue = {
   watchLog: WatchEntry[]
   watchExpanded: boolean
   setWatchExpanded: (v: boolean) => void
+  /** Set when organize/extract fails after Finish. */
+  organizeError: string | null
+  /** Session id preserved so summarization can be retried without re-recording. */
+  lastTelemetrySessionId: string | null
+  dismissOrganizeError: () => void
+  retryOrganize: () => Promise<void>
   // editor
   workflow: Workflow
   setWorkflow: Dispatch<SetStateAction<Workflow>>
@@ -208,6 +216,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [watchExpanded, setWatchExpanded] = useState(false)
   const watchExpandedRef = useRef(watchExpanded)
   watchExpandedRef.current = watchExpanded
+  const [organizeError, setOrganizeError] = useState<string | null>(null)
+  const [lastTelemetrySessionId, setLastTelemetrySessionId] = useState<string | null>(null)
+  const telemetrySessionRef = useRef<string | null>(null)
 
   const [workflow, setWorkflow] = useState<Workflow>(() => createMockDraft(newId('draft')))
   const [editorCollapsed, setEditorCollapsed] = useState(false)
@@ -434,7 +445,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const glassPanelH = Math.max(hoverPanelH, HOVER_PANEL_H)
     const idleSize: Size = savedConfirm
       ? { w: 210, h: 24, mode: 'pill' }
-      : permToastVisible
+      : permToastVisible || !!organizeError
         ? { w: 392, h: 232, mode: 'panel' }
         : permissionPaused
           ? { w: 224, h: 24, mode: 'pill' }
@@ -493,7 +504,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     savedConfirm,
     hoverPanelH,
     permToastVisible,
-    permissionPaused
+    permissionPaused,
+    organizeError
   ])
 
   // ── Recording timer ──
@@ -503,35 +515,37 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t)
   }, [state, recordPaused])
 
-  // ── Streaming ledger while recording ──
-  const watchIndexRef = useRef(0)
+  // ── Streaming ledger from real telemetry events ──
   useEffect(() => {
-    if (state !== 'recording' || recordPaused) return
-    const t = setInterval(() => {
-      const i = watchIndexRef.current
-      if (i >= MOCK_WATCH_LOG.length) return
-      const entry = MOCK_WATCH_LOG[i]
-      watchIndexRef.current = i + 1
-      setWatchLog((log) => [
-        ...log,
-        narrate
-          ? entry
-          : { time: entry.time, text: entry.text, app: entry.app }
-      ])
-    }, 2600)
-    return () => clearInterval(t)
-  }, [state, recordPaused, narrate])
-
-  // ── Organizing ("Thinking...") → auto-advance to editor ──
-  useEffect(() => {
-    if (state !== 'organizing') return
-    const t = setTimeout(() => {
-      setWorkflow(createMockDraft(newId('draft')))
-      setEditorCollapsed(false)
-      setState('editor')
-    }, 2000)
-    return () => clearTimeout(t)
-  }, [state])
+    const off = window.ghostBridge?.onTelemetryEvent?.((event: TelemetryEvent) => {
+      if (stateRef.current !== 'recording') return
+      if (recordPaused) return
+      const line = formatWatchEntry(event)
+      if (!line) return
+      // Skip noisy screen_changed when the previous line already covers the title.
+      setWatchLog((log) => {
+        if (
+          event.type === 'screen_changed' &&
+          log.length > 0 &&
+          (log[log.length - 1].text.includes(line.text.replace(/^Looking at /, '')) ||
+            log[log.length - 1].text.startsWith('Opened '))
+        ) {
+          return log
+        }
+        return [
+          ...log,
+          {
+            time: line.time,
+            text: line.text,
+            app: mapAppName(line.appName)
+          }
+        ]
+      })
+    })
+    return () => {
+      off?.()
+    }
+  }, [recordPaused])
 
   const [lastRunId, setLastRunId] = useState<string | null>(null)
 
@@ -776,7 +790,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setRecordPaused(false)
     setWatchLog([])
     setWatchExpanded(false)
-    watchIndexRef.current = 0
+    telemetrySessionRef.current = null
+    setOrganizeError(null)
   }, [])
 
   const openHover = useCallback(() => {
@@ -840,21 +855,96 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     draggingRef.current = false
   }, [])
 
-  const startRecording = useCallback(() => {
+  const startRecording = useCallback(async () => {
+    // Guard: cannot start twice.
+    const status = await window.ghostBridge?.getTelemetryStatus?.()
+    if (status?.recording) return
+
     runInFlightRef.current = false
     setSavedConfirm(null)
     resetRecording()
-    setState('recording')
-  }, [resetRecording])
 
-  const cancelRecording = useCallback(() => {
+    const result = await window.ghostBridge?.telemetryStart?.({
+      recordMode,
+      selectedAppId
+    })
+    if (!result?.ok) {
+      setOrganizeError(result?.error ?? 'Could not start recording')
+      setState('idle')
+      return
+    }
+    telemetrySessionRef.current = result.status?.sessionId ?? null
+    setState('recording')
+  }, [recordMode, resetRecording, selectedAppId])
+
+  const cancelRecording = useCallback(async () => {
+    const sessionId = telemetrySessionRef.current
+    if (sessionId) {
+      try {
+        await window.ghostBridge?.telemetryStop?.({ sessionId, discard: true })
+      } catch {
+        /* ignore */
+      }
+    }
     resetRecording()
     setState('idle')
   }, [resetRecording])
 
-  const finishRecording = useCallback(() => {
+  const finishRecording = useCallback(async () => {
+    setWatchExpanded(false)
     setState('organizing')
+    setOrganizeError(null)
+    const sessionId = telemetrySessionRef.current ?? undefined
+    const result = await window.ghostBridge?.telemetryStop?.(
+      sessionId ? { sessionId } : undefined
+    )
+    if (!result?.ok || !result.workflow) {
+      const sid = result?.sessionId ?? sessionId ?? null
+      if (sid) setLastTelemetrySessionId(sid)
+      setOrganizeError(
+        result?.error ??
+          'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
+      )
+      setState('idle')
+      resetRecording()
+      return
+    }
+    setLastTelemetrySessionId(null)
+    setWorkflow({
+      ...result.workflow,
+      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total'
+    })
+    setEditorCollapsed(false)
+    resetRecording()
+    setState('editor')
+  }, [resetRecording])
+
+  const dismissOrganizeError = useCallback(() => {
+    setOrganizeError(null)
   }, [])
+
+  const retryOrganize = useCallback(async () => {
+    const sessionId = lastTelemetrySessionId
+    if (!sessionId) return
+    setOrganizeError(null)
+    setState('organizing')
+    const result = await window.ghostBridge?.telemetryProcessWorkflow?.(sessionId)
+    if (!result?.ok || !result.workflow) {
+      setOrganizeError(
+        result?.error ??
+          'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
+      )
+      setState('idle')
+      return
+    }
+    setLastTelemetrySessionId(null)
+    setWorkflow({
+      ...result.workflow,
+      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total'
+    })
+    setEditorCollapsed(false)
+    setState('editor')
+  }, [lastTelemetrySessionId])
 
   const cancelEditor = useCallback(() => {
     runInFlightRef.current = false
@@ -994,6 +1084,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     watchLog,
     watchExpanded,
     setWatchExpanded,
+    organizeError,
+    lastTelemetrySessionId,
+    dismissOrganizeError,
+    retryOrganize,
     workflow,
     setWorkflow,
     editorCollapsed,
@@ -1054,4 +1148,15 @@ export function useWorkflow(): WorkflowContextValue {
   const ctx = useContext(WorkflowContext)
   if (!ctx) throw new Error('useWorkflow must be used within WorkflowProvider')
   return ctx
+}
+
+function mapAppName(name?: string): StepApp | undefined {
+  if (!name) return undefined
+  const lower = name.toLowerCase()
+  if (lower.includes('figma')) return { id: 'figma', name: 'Figma' }
+  if (lower.includes('chrome') || lower.includes('chromium')) return { id: 'chrome', name: 'Chrome' }
+  if (lower.includes('slack')) return { id: 'slack', name: 'Slack' }
+  if (lower.includes('finder')) return { id: 'finder', name: 'Finder' }
+  if (lower.includes('mail')) return { id: 'mail', name: 'Mail' }
+  return undefined
 }

@@ -5,6 +5,7 @@
     "src/preload/**/*",
     "src/shared/**/*"
   ],
+  "exclude": ["src/**/*.test.ts", "vitest.config.ts"],
   "compilerOptions": {
     "composite": true,
     "module": "ESNext",

@@ -2,7 +2,7 @@
 
 A transparent, always-on-top floating workflow recorder that lives in the bottom-right corner of your screen. Hover the bubble to configure a recording, capture a workflow across apps, review and edit the learned steps, then run it back.
 
-> This phase ships the full **UI and interaction workflow** driven by mock data. Real screen/input capture and AI (summarization + agent execution) are intentionally stubbed for a later phase.
+> Workflow **recording capture** now uses a privacy-conscious desktop telemetry pipeline (`active-win` + shortcut chords → sanitized JSONL → polish → one OpenAI extraction). Element-level Accessibility capture and agent **execution** remain stubbed. See [docs/telemetry.md](docs/telemetry.md).
 
 ## Stack
 
@@ -90,14 +90,15 @@ ghost/
 
 1. **Main process** (`src/main/index.ts`) opens a `frameless`, `transparent`, `alwaysOnTop` window pinned to the bottom-right of the primary display.
 2. `WorkflowContext` drives the state machine. On each state change it calls `window.ghostBridge.setBounds(w, h)`, and the main process resizes the window while keeping it anchored bottom-right.
-3. Mock timers simulate the AI: the watch log streams in while recording, "Organizing…" resolves into a learned workflow, and the running state advances steps on an interval.
+3. **Recording**: `Start Recording` starts main-process telemetry (`src/main/telemetry/`). Sanitized events stream into the Learning ledger; **Finish** polishes the session and extracts a workflow via one OpenAI Responses call. Dev sessions land under `development-data/telemetry/` (gitignored). See [docs/telemetry.md](docs/telemetry.md).
+4. The running state still advances steps on a mock interval until agent execution lands.
 
 ## Deferred (later phase)
 
-- Real screen + input capture (`desktopCapturer`)
-- AI summarization of recorded workflows
-- Creating and running an agent that performs the steps
-- Provider config, persistence, packaging — see `.planning/TODO.md`
+- Native Accessibility interaction provider (clicks / fields / forms)
+- Agent execution that performs learned steps
+- Production telemetry storage (file adapter is dev-only)
+- Packaging — see `.planning/TODO.md`
 
 ## Task tracking
 
