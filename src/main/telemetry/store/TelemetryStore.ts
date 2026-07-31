@@ -1,9 +1,11 @@
 import type {
+  AutomationScript,
   ExtractedWorkflow,
   PolishedSession,
   ProcessingErrorCode,
   ProcessingStatus,
   CaptureStatus,
+  StoredAutomationScript,
   StoredVariables,
   StoredWorkflowResult,
   TelemetryEvent,
@@ -45,6 +47,14 @@ export interface TelemetryStore {
   ensureReady(): Promise<void>
   saveVariables?(sessionId: string, variables: WorkflowVariable[]): Promise<StoredVariables>
   getVariables?(sessionId: string): Promise<StoredVariables | null>
+  saveAutomationScript?(
+    sessionId: string,
+    script: AutomationScript,
+    model: string,
+    opts?: { stale?: boolean }
+  ): Promise<StoredAutomationScript>
+  getAutomationScript?(sessionId: string): Promise<StoredAutomationScript | null>
+  markAutomationStale?(sessionId: string, stale: boolean): Promise<StoredAutomationScript | null>
   saveKeyframe?(
     sessionId: string,
     eventId: string,

@@ -1,5 +1,11 @@
 import { newId } from '../../shared/id'
-import type { PolishedSession, StoredWorkflowResult, TelemetrySessionMeta } from '../../shared/telemetry/schema'
+import type {
+  PolishedSession,
+  StoredAutomationScript,
+  StoredWorkflowResult,
+  TelemetrySessionMeta
+} from '../../shared/telemetry/schema'
+import { compileAutomationScript, type CompileAutomationDeps } from './automation/compile'
 import type { TelemetryConfig } from './config'
 import {
   TelemetryProcessingError,
@@ -19,6 +25,7 @@ export type ProcessWorkflowResult =
       polished: PolishedSession
       workflow: ReturnType<typeof toEditorWorkflow>
       extracted: StoredWorkflowResult['workflow']
+      automation?: StoredAutomationScript | null
       meta: TelemetrySessionMeta
     }
   | {
@@ -31,14 +38,19 @@ export type ProcessWorkflowResult =
     }
 
 /**
- * Polish (if needed) + one OpenAI summarization. Idempotent for complete sessions.
- * Preserves polished data when AI fails so callers can retry.
+ * Polish (if needed) + OpenAI summarization + non-fatal automation compile.
+ * Idempotent for complete sessions. Preserves polished data when AI fails.
  */
 export async function processSessionWorkflow(
   store: TelemetryStore,
   config: TelemetryConfig,
   sessionId: string,
-  opts: { skipPolishIfPresent?: boolean; deps?: ExtractWorkflowDeps } = {}
+  opts: {
+    skipPolishIfPresent?: boolean
+    deps?: ExtractWorkflowDeps
+    compileDeps?: CompileAutomationDeps
+    skipCompile?: boolean
+  } = {}
 ): Promise<ProcessWorkflowResult> {
   if (inFlight.has(sessionId)) {
     return {
@@ -73,7 +85,9 @@ export async function processSessionWorkflow(
 
     const existing = await store.getWorkflow(sessionId)
     if (meta.processingStatus === 'complete' && existing) {
-      const editor = toEditorWorkflow(existing.workflow, newId('wf'))
+      const editor = toEditorWorkflow(existing.workflow, newId('wf'), sessionId)
+      const automation =
+        store.getAutomationScript ? await store.getAutomationScript(sessionId) : null
       return {
         ok: true,
         sessionId,
@@ -86,6 +100,7 @@ export async function processSessionWorkflow(
         },
         workflow: editor,
         extracted: existing.workflow,
+        automation,
         meta
       }
     }
@@ -131,12 +146,33 @@ export async function processSessionWorkflow(
         processingStatus: 'complete',
         processingErrorCode: null
       })
+
+      let automation: StoredAutomationScript | null = null
+      if (!opts.skipCompile) {
+        try {
+          automation = await compileAutomationScript(
+            store,
+            config,
+            sessionId,
+            stored.workflow,
+            polished,
+            opts.compileDeps
+          )
+        } catch (compileErr) {
+          logProcessingFailure('automation-compile', compileErr)
+          automation = store.getAutomationScript
+            ? await store.getAutomationScript(sessionId)
+            : null
+        }
+      }
+
       return {
         ok: true,
         sessionId,
         polished,
-        workflow: toEditorWorkflow(stored.workflow, newId('wf')),
+        workflow: toEditorWorkflow(stored.workflow, newId('wf'), sessionId),
         extracted: stored.workflow,
+        automation,
         meta
       }
     } catch (err) {

@@ -168,7 +168,10 @@ export const ProcessingErrorCodeSchema = z.enum([
   'POLISH_FAILED',
   'WORKFLOW_EMPTY_ACTIONS',
   'WORKFLOW_ALREADY_RUNNING',
-  'SESSION_NOT_READY'
+  'SESSION_NOT_READY',
+  'AUTOMATION_COMPILE_FAILED',
+  'AUTOMATION_SCRIPT_MISSING',
+  'AUTOMATION_ACCESSIBILITY_DENIED'
 ])
 export type ProcessingErrorCode = z.infer<typeof ProcessingErrorCodeSchema>
 
@@ -380,6 +383,83 @@ export const StoredWorkflowResultSchema = z
   .strict()
 
 export type StoredWorkflowResult = z.infer<typeof StoredWorkflowResultSchema>
+
+// ── Automation script (compiled executable ops) ──
+
+export const AutomationOpKindSchema = z.enum([
+  'open_app',
+  'open_url',
+  'activate_element',
+  'keystroke',
+  'type_text',
+  'set_clipboard',
+  'wait_for',
+  'ask_user',
+  'manual'
+])
+
+export type AutomationOpKind = z.infer<typeof AutomationOpKindSchema>
+
+export const WaitForConditionSchema = z.enum([
+  'app_frontmost',
+  'window_title_contains',
+  'element_exists'
+])
+
+export type WaitForCondition = z.infer<typeof WaitForConditionSchema>
+
+/**
+ * Flat op shape (nullable fields) for OpenAI Structured Outputs.
+ * Discriminated by `op`; unused fields are null.
+ */
+export const AutomationOpSchema = z
+  .object({
+    op: AutomationOpKindSchema,
+    stepOrder: z.number().int().positive(),
+    evidenceEventIds: z.array(z.string()).min(1),
+    confidence: z.number().min(0).max(1),
+    timeoutMs: z.number().int().positive().max(120_000),
+    /** Human-readable label for the run ledger. */
+    label: z.string().max(200).nullable(),
+    appName: z.string().max(120).nullable(),
+    appBundleId: z.string().max(200).nullable(),
+    url: z.string().max(500).nullable(),
+    urlVariableKey: z.string().max(40).nullable(),
+    elementRole: z.string().max(64).nullable(),
+    elementLabel: z.string().max(120).nullable(),
+    elementPath: z.array(z.string().max(80)).max(3).nullable(),
+    chord: z.string().max(64).nullable(),
+    variableKey: z.string().max(40).nullable(),
+    waitCondition: WaitForConditionSchema.nullable(),
+    waitValue: z.string().max(200).nullable(),
+    prompt: z.string().max(300).nullable()
+  })
+  .strict()
+
+export type AutomationOp = z.infer<typeof AutomationOpSchema>
+
+export const AutomationScriptSchema = z
+  .object({
+    ops: z.array(AutomationOpSchema).min(1).max(200),
+    warnings: z.array(z.string().max(300)).max(20)
+  })
+  .strict()
+
+export type AutomationScript = z.infer<typeof AutomationScriptSchema>
+
+export const StoredAutomationScriptSchema = z
+  .object({
+    sessionId: z.string(),
+    schemaVersion: z.literal(SCHEMA_VERSION),
+    compiledAt: z.string().datetime(),
+    model: z.string().max(80),
+    script: AutomationScriptSchema,
+    /** True when editor steps changed after compile — recompile before next run. */
+    stale: z.boolean().optional()
+  })
+  .strict()
+
+export type StoredAutomationScript = z.infer<typeof StoredAutomationScriptSchema>
 
 /** Safe session id for filenames: alphanumeric, underscore, hyphen. */
 export const SessionIdSchema = z

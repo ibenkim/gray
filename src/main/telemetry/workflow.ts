@@ -144,7 +144,8 @@ export function assertEvidence(workflow: ExtractedWorkflow, polished: PolishedSe
  */
 export function toEditorWorkflow(
   extracted: ExtractedWorkflow,
-  id: string
+  id: string,
+  sessionId?: string
 ): {
   id: string
   name: string
@@ -159,6 +160,8 @@ export function toEditorWorkflow(
   runCount: 0
   hoursReturned: string
   scope: 'personal'
+  sessionId?: string
+  automationStale?: boolean
 } {
   return {
     id,
@@ -173,6 +176,8 @@ export function toEditorWorkflow(
     status: 'off',
     runCount: 0,
     hoursReturned: '0',
-    scope: 'personal'
+    scope: 'personal',
+    sessionId,
+    automationStale: false
   }
 }

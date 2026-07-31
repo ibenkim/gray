@@ -7,6 +7,7 @@ import { ClipboardWatcher } from './clipboard'
 import { loadTelemetryConfig, type TelemetryConfig } from './config'
 import { userMessageForCode } from './errors'
 import { SparseKeyframeProvider } from './keyframes'
+import { compileSessionAutomation } from './automation/compileSession'
 import { processSessionWorkflow } from './processSession'
 import { createTelemetryStore, type TelemetryStore } from './store'
 
@@ -114,6 +115,7 @@ function safeProcessResult(result: Awaited<ReturnType<typeof processSessionWorkf
       sessionId: result.sessionId,
       workflow: result.workflow,
       extracted: result.extracted,
+      hasAutomation: !!result.automation,
       meta: {
         captureStatus: result.meta.captureStatus,
         processingStatus: result.meta.processingStatus
@@ -319,6 +321,66 @@ export function registerTelemetryIpc(): void {
       } satisfies RecordingStatus)
     )
   })
+
+  /** Retry automation compile without re-extracting the workflow. */
+  ipcMain.handle('automation:compile', async (_e, sessionId: string) => {
+    if (!store) return { ok: false, error: 'Telemetry not initialized' }
+    if (!sessionId) return { ok: false, error: 'sessionId required' }
+    config = loadTelemetryConfig()
+    const meta = await store.getSessionMeta(sessionId)
+    if (!meta) return { ok: false, error: 'Unknown session' }
+    const auth = requireSessionOwner(meta.ownerEmail)
+    if (!auth.ok) return { ok: false, error: auth.error }
+
+    const result = await compileSessionAutomation(store, config, sessionId)
+    if (result.ok) {
+      broadcast('automation:compiled', {
+        sessionId,
+        opCount: result.automation.script.ops.length,
+        stale: result.automation.stale ?? false
+      })
+    }
+    return result.ok
+      ? {
+          ok: true as const,
+          sessionId,
+          opCount: result.automation.script.ops.length,
+          stale: result.automation.stale ?? false
+        }
+      : {
+          ok: false as const,
+          sessionId,
+          error: result.error,
+          errorCode: result.errorCode
+        }
+  })
+
+  ipcMain.handle('automation:getScript', async (_e, sessionId: string) => {
+    if (!store) return { ok: false, error: 'Telemetry not initialized' }
+    if (!sessionId) return { ok: false, error: 'sessionId required' }
+    if (!store.getAutomationScript) return { ok: false, error: 'Automation store unavailable' }
+    const meta = await store.getSessionMeta(sessionId)
+    if (meta) {
+      const auth = requireSessionOwner(meta.ownerEmail)
+      if (!auth.ok) return { ok: false, error: auth.error }
+    }
+    const script = await store.getAutomationScript(sessionId)
+    if (!script) return { ok: false, error: 'Script not found' }
+    return { ok: true, script }
+  })
+
+  ipcMain.handle(
+    'automation:markStale',
+    async (_e, sessionId: string, stale = true) => {
+      if (!store) return { ok: false, error: 'Telemetry not initialized' }
+      if (!sessionId) return { ok: false, error: 'sessionId required' }
+      if (!store.markAutomationStale) return { ok: false, error: 'Automation store unavailable' }
+      const updated = await store.markAutomationStale(sessionId, stale)
+      return updated
+        ? { ok: true, stale: updated.stale ?? false }
+        : { ok: false, error: 'Script not found' }
+    }
+  )
 }
 
 export async function flushTelemetryOnQuit(): Promise<void> {

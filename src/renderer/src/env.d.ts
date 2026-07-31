@@ -37,6 +37,46 @@ type ActivityHoldPayload = {
   stopReason?: string
 }
 
+type AutomationRunEvent =
+  | {
+      type: 'stepStarted'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      op: string
+    }
+  | {
+      type: 'stepDone'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+    }
+  | {
+      type: 'stepFailed'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      message: string
+      manual?: boolean
+    }
+  | {
+      type: 'question'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      prompt: string
+      variableKey: string | null
+    }
+  | {
+      type: 'finished'
+      runId: string
+      outcome: 'done' | 'stopped'
+    }
+
 declare global {
   interface Window {
     ghostBridge: {
@@ -144,6 +184,48 @@ declare global {
           workflow: Workflow
           extracted: ExtractedWorkflow
         }) => void
+      ) => () => void
+      automationCompile: (sessionId: string) => Promise<{
+        ok: boolean
+        sessionId?: string
+        opCount?: number
+        stale?: boolean
+        error?: string
+        errorCode?: string
+      }>
+      automationGetScript: (
+        sessionId: string
+      ) => Promise<{ ok: boolean; script?: unknown; error?: string }>
+      automationMarkStale: (
+        sessionId: string,
+        stale?: boolean
+      ) => Promise<{ ok: boolean; stale?: boolean; error?: string }>
+      automationRunStart: (payload: {
+        sessionId: string
+        variables?: Record<string, string>
+        recompileIfNeeded?: boolean
+      }) => Promise<{
+        ok: boolean
+        runId?: string
+        opCount?: number
+        sessionId?: string
+        error?: string
+        errorCode?: string
+      }>
+      automationRunPause: () => Promise<{ ok: boolean; error?: string }>
+      automationRunResume: () => Promise<{ ok: boolean; error?: string }>
+      automationRunStop: () => Promise<{ ok: boolean; error?: string }>
+      automationRunRetryStep: () => Promise<{ ok: boolean; error?: string }>
+      automationRunSkipStep: () => Promise<{ ok: boolean; error?: string }>
+      automationRunTakeOver: () => Promise<{ ok: boolean; error?: string }>
+      automationRunAnswer: (payload: {
+        value: string
+        variableKey?: string | null
+      }) => Promise<{ ok: boolean; error?: string }>
+      automationRunStatus: () => Promise<{ running: boolean; runId: string | null }>
+      onAutomationRunEvent: (cb: (event: AutomationRunEvent) => void) => () => void
+      onAutomationCompiled: (
+        cb: (payload: { sessionId: string; opCount: number; stale: boolean }) => void
       ) => () => void
     }
   }

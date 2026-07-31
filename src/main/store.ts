@@ -41,7 +41,9 @@ function normalizeWorkflow(raw: unknown): Workflow | null {
     ...w,
     scope,
     sharedBy: typeof w.sharedBy === 'string' ? w.sharedBy : undefined,
-    sharedByName: typeof w.sharedByName === 'string' ? w.sharedByName : undefined
+    sharedByName: typeof w.sharedByName === 'string' ? w.sharedByName : undefined,
+    sessionId: typeof w.sessionId === 'string' ? w.sessionId : undefined,
+    automationStale: Boolean(w.automationStale)
   }
 }
 

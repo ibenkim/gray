@@ -10,13 +10,16 @@ import { dirname, resolve, sep } from 'path'
 import {
   SCHEMA_VERSION,
   SessionIdSchema,
+  StoredAutomationScriptSchema,
   StoredVariablesSchema,
   StoredWorkflowResultSchema,
   TelemetryEventSchema,
   PolishedSessionSchema,
   normalizeSessionMeta,
+  type AutomationScript,
   type ExtractedWorkflow,
   type PolishedSession,
+  type StoredAutomationScript,
   type StoredVariables,
   type StoredWorkflowResult,
   type TelemetryEvent,
@@ -67,6 +70,7 @@ export class FileTelemetryStore implements TelemetryStore {
       mkdirSync(this.subdir('workflows'), { recursive: true })
       mkdirSync(this.subdir('meta'), { recursive: true })
       mkdirSync(this.subdir('variables'), { recursive: true })
+      mkdirSync(this.subdir('automation'), { recursive: true })
       mkdirSync(this.subdir('keyframes'), { recursive: true })
       this.ready = true
     } catch (err) {
@@ -264,6 +268,52 @@ export class FileTelemetryStore implements TelemetryStore {
     }
   }
 
+  async saveAutomationScript(
+    sessionId: string,
+    script: AutomationScript,
+    model: string,
+    opts: { stale?: boolean } = {}
+  ): Promise<StoredAutomationScript> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const stored: StoredAutomationScript = {
+      sessionId: id,
+      schemaVersion: SCHEMA_VERSION,
+      compiledAt: new Date().toISOString(),
+      model,
+      script,
+      stale: opts.stale ?? false
+    }
+    const validated = StoredAutomationScriptSchema.parse(stored)
+    this.writeJson(this.automationPath(id), validated)
+    return validated
+  }
+
+  async getAutomationScript(sessionId: string): Promise<StoredAutomationScript | null> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.automationPath(id)
+    if (!existsSync(path)) return null
+    try {
+      return StoredAutomationScriptSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
+    } catch {
+      console.error('[telemetry] failed to read automation script')
+      return null
+    }
+  }
+
+  async markAutomationStale(
+    sessionId: string,
+    stale: boolean
+  ): Promise<StoredAutomationScript | null> {
+    const existing = await this.getAutomationScript(sessionId)
+    if (!existing) return null
+    const next: StoredAutomationScript = { ...existing, stale }
+    const validated = StoredAutomationScriptSchema.parse(next)
+    this.writeJson(this.automationPath(this.assertSessionId(sessionId)), validated)
+    return validated
+  }
+
   async saveKeyframe(
     sessionId: string,
     eventId: string,
@@ -320,7 +370,14 @@ export class FileTelemetryStore implements TelemetryStore {
   }
 
   private subdir(
-    name: 'normalized' | 'polished' | 'workflows' | 'meta' | 'variables' | 'keyframes'
+    name:
+      | 'normalized'
+      | 'polished'
+      | 'workflows'
+      | 'meta'
+      | 'variables'
+      | 'automation'
+      | 'keyframes'
   ): string {
     return this.safeJoin(name)
   }
@@ -339,6 +396,10 @@ export class FileTelemetryStore implements TelemetryStore {
 
   private variablesPath(sessionId: string): string {
     return this.safeJoin('variables', `${sessionId}.json`)
+  }
+
+  private automationPath(sessionId: string): string {
+    return this.safeJoin('automation', `${sessionId}.json`)
   }
 
   private metaPath(sessionId: string): string {

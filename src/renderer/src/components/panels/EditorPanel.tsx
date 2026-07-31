@@ -118,7 +118,15 @@ export default function EditorPanel() {
           <div className="section-label">STEPS</div>
           <StepList
             steps={workflow.steps}
-            onChange={(updater) => setWorkflow((w) => ({ ...w, steps: updater(w.steps) }))}
+            onChange={(updater) =>
+              setWorkflow((w) => {
+                const nextSteps = updater(w.steps)
+                if (w.sessionId) {
+                  void window.ghostBridge?.automationMarkStale?.(w.sessionId, true)
+                }
+                return { ...w, steps: nextSteps, automationStale: true }
+              })
+            }
           />
         </div>
       </div>

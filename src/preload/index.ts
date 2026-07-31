@@ -43,6 +43,46 @@ type ActivityHoldPayload = {
   stopReason?: string
 }
 
+export type AutomationRunEvent =
+  | {
+      type: 'stepStarted'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      op: string
+    }
+  | {
+      type: 'stepDone'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+    }
+  | {
+      type: 'stepFailed'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      message: string
+      manual?: boolean
+    }
+  | {
+      type: 'question'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      label: string
+      prompt: string
+      variableKey: string | null
+    }
+  | {
+      type: 'finished'
+      runId: string
+      outcome: 'done' | 'stopped'
+    }
+
 const ghostBridge = {
   /** Resize the pill window; returns the panel placement ('above' | 'below'). */
   setBounds: (
@@ -264,6 +304,73 @@ const ghostBridge = {
     ) => cb(payload)
     ipcRenderer.on('telemetry:workflowReady', listener)
     return () => ipcRenderer.removeListener('telemetry:workflowReady', listener)
+  },
+
+  // ── Automation compile + run ──
+  automationCompile: (
+    sessionId: string
+  ): Promise<{
+    ok: boolean
+    sessionId?: string
+    opCount?: number
+    stale?: boolean
+    error?: string
+    errorCode?: string
+  }> => ipcRenderer.invoke('automation:compile', sessionId),
+  automationGetScript: (
+    sessionId: string
+  ): Promise<{ ok: boolean; script?: unknown; error?: string }> =>
+    ipcRenderer.invoke('automation:getScript', sessionId),
+  automationMarkStale: (
+    sessionId: string,
+    stale?: boolean
+  ): Promise<{ ok: boolean; stale?: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:markStale', sessionId, stale ?? true),
+  automationRunStart: (payload: {
+    sessionId: string
+    variables?: Record<string, string>
+    recompileIfNeeded?: boolean
+  }): Promise<{
+    ok: boolean
+    runId?: string
+    opCount?: number
+    sessionId?: string
+    error?: string
+    errorCode?: string
+  }> => ipcRenderer.invoke('automation:runStart', payload),
+  automationRunPause: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runPause'),
+  automationRunResume: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runResume'),
+  automationRunStop: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runStop'),
+  automationRunRetryStep: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runRetryStep'),
+  automationRunSkipStep: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runSkipStep'),
+  automationRunTakeOver: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runTakeOver'),
+  automationRunAnswer: (payload: {
+    value: string
+    variableKey?: string | null
+  }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('automation:runAnswer', payload),
+  automationRunStatus: (): Promise<{ running: boolean; runId: string | null }> =>
+    ipcRenderer.invoke('automation:runStatus'),
+  onAutomationRunEvent: (cb: (event: AutomationRunEvent) => void) => {
+    const listener = (_e: unknown, event: AutomationRunEvent) => cb(event)
+    ipcRenderer.on('run:event', listener)
+    return () => ipcRenderer.removeListener('run:event', listener)
+  },
+  onAutomationCompiled: (
+    cb: (payload: { sessionId: string; opCount: number; stale: boolean }) => void
+  ) => {
+    const listener = (
+      _e: unknown,
+      payload: { sessionId: string; opCount: number; stale: boolean }
+    ) => cb(payload)
+    ipcRenderer.on('automation:compiled', listener)
+    return () => ipcRenderer.removeListener('automation:compiled', listener)
   }
 }
 

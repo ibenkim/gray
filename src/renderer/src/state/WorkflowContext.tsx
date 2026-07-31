@@ -630,6 +630,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }
   }, [state, hasErrorHold, runSteps, workflow.name])
 
+  // True when this run is driven by the main-process automation runner.
+  const automationRunRef = useRef(false)
+  const automationVarKeyRef = useRef<string | null>(null)
+
   // ── Run engine (flat ledger) ──
   useEffect(() => {
     if (state !== 'running' || runPaused) return
@@ -637,8 +641,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t)
   }, [state, runPaused])
 
+  // Mock timer engine — only for seeded workflows without a compiled script.
   useEffect(() => {
     if (state !== 'running' || runPaused || holdActive) return
+    if (automationRunRef.current) return
     const t = setInterval(() => {
       setRunSteps((steps) => {
         const next = steps.map((s) => ({ ...s }))
@@ -675,6 +681,88 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t)
   }, [state, runPaused, holdActive])
 
+  // Automation runner → ledger
+  useEffect(() => {
+    if (state !== 'running' || !automationRunRef.current) return
+    const off = window.ghostBridge?.onAutomationRunEvent?.((event) => {
+      if (activeRunRef.current && event.runId !== activeRunRef.current.id) {
+        // Allow main-assigned runId to replace the provisional id.
+        if (event.type === 'stepStarted' || event.type === 'finished') {
+          activeRunRef.current.id = event.runId
+        } else if (event.runId !== activeRunRef.current.id) {
+          return
+        }
+      }
+
+      if (event.type === 'finished') {
+        setSummaryOutcome(event.outcome === 'done' ? 'done' : 'stopped')
+        setTimeout(() => setState('summary'), 400)
+        automationRunRef.current = false
+        return
+      }
+
+      setRunSteps((steps) => {
+        const next = steps.map((s) => ({ ...s }))
+        const byOrder = (order: number) =>
+          next.find((s) => s.index === order) ?? next[order - 1]
+
+        if (event.type === 'stepStarted') {
+          for (const s of next) {
+            if (s.status === 'active') s.status = 'done'
+          }
+          const target = byOrder(event.stepOrder)
+          if (target && target.status !== 'done' && target.status !== 'skipped') {
+            target.status = 'active'
+            target.label = event.label || target.label
+            target.error = undefined
+          }
+          return next
+        }
+
+        if (event.type === 'stepDone') {
+          const target = byOrder(event.stepOrder)
+          if (target) {
+            target.status = 'done'
+            target.error = undefined
+            if (event.label) target.doneLabel = event.label
+          }
+          return next
+        }
+
+        if (event.type === 'stepFailed') {
+          const target = byOrder(event.stepOrder)
+          if (target) {
+            target.status = 'error'
+            target.error = { message: event.message }
+            setRunCollapsed(false)
+          }
+          return next
+        }
+
+        if (event.type === 'question') {
+          const target = byOrder(event.stepOrder)
+          automationVarKeyRef.current = event.variableKey
+          if (target) {
+            target.status = 'question'
+            target.question = {
+              prompt: event.prompt,
+              options: [
+                { id: 'custom', label: 'Enter value', kind: 'other' },
+                { id: 'skip', label: 'Skip', kind: 'suggested' }
+              ],
+              answerId: null
+            }
+            setRunCollapsed(false)
+          }
+          return next
+        }
+
+        return steps
+      })
+    })
+    return () => off?.()
+  }, [state])
+
   const answerQuestion = useCallback((stepId: string, optionId: string, custom?: string) => {
     setRunSteps((steps) => {
       const target = steps.find((s) => s.id === stepId)
@@ -699,10 +787,33 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           : s
       )
     })
+    if (automationRunRef.current) {
+      if (optionId === 'skip') {
+        void window.ghostBridge?.automationRunSkipStep?.()
+      } else {
+        void window.ghostBridge?.automationRunAnswer?.({
+          value: custom?.trim() || optionId,
+          variableKey: automationVarKeyRef.current
+        })
+      }
+    }
   }, [])
 
   /** Skip any not-done step — including steps later than the current one. */
   const skipStep = useCallback((stepId: string) => {
+    if (automationRunRef.current) {
+      setRunSteps((steps) => {
+        const next = steps.map((s) => ({ ...s }))
+        const target = next.find((s) => s.id === stepId)
+        if (target) {
+          target.status = 'skipped'
+          target.error = undefined
+        }
+        return next
+      })
+      void window.ghostBridge?.automationRunSkipStep?.()
+      return
+    }
     setRunSteps((steps) => {
       const next = steps.map((s) => ({ ...s }))
       const target = next.find((s) => s.id === stepId)
@@ -742,6 +853,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
               : s
           )
         )
+        if (automationRunRef.current) {
+          void window.ghostBridge?.automationRunRetryStep?.()
+        }
         return
       }
       // Take over — pause; resume continues from the next step.
@@ -751,13 +865,18 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         if (!target) return steps
         target.status = 'done'
         target.error = undefined
-        const pending = next.find((s) => s.status === 'pending')
-        if (pending) {
-          pending.status =
-            pending.question && pending.question.answerId === null ? 'question' : 'active'
+        if (!automationRunRef.current) {
+          const pending = next.find((s) => s.status === 'pending')
+          if (pending) {
+            pending.status =
+              pending.question && pending.question.answerId === null ? 'question' : 'active'
+          }
         }
         return next
       })
+      if (automationRunRef.current) {
+        void window.ghostBridge?.automationRunTakeOver?.()
+      }
       setRunPaused(true)
     },
     [skipStep]
@@ -906,7 +1025,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setLastTelemetrySessionId(null)
     setWorkflow({
       ...result.workflow,
-      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total'
+      sessionId: result.workflow.sessionId ?? result.sessionId ?? undefined,
+      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total',
+      automationStale: false
     })
     setEditorCollapsed(false)
     resetRecording()
@@ -934,7 +1055,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setLastTelemetrySessionId(null)
     setWorkflow({
       ...result.workflow,
-      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total'
+      sessionId: result.workflow.sessionId ?? sessionId,
+      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total',
+      automationStale: false
     })
     setEditorCollapsed(false)
     setState('editor')
@@ -947,15 +1070,20 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const beginRun = useCallback((wf: Workflow) => {
     const steps = makeRunSteps(wf)
-    if (steps.length > 0) steps[0].status = 'active'
+    const useAutomation = !!wf.sessionId
+    automationRunRef.current = useAutomation
+    automationVarKeyRef.current = null
+    if (steps.length > 0 && !useAutomation) steps[0].status = 'active'
+    // Automation: leave all pending until the runner emits stepStarted.
     setWorkflow(wf)
     setRunSteps(steps)
     setRunPaused(false)
     setRunCollapsed(false)
     setRunElapsed(0)
     setSavedConfirm(null)
+    const provisionalId = newId('run')
     activeRunRef.current = {
-      id: newId('run'),
+      id: provisionalId,
       workflowId: wf.id,
       startedAt: new Date().toISOString(),
       questionReceipts: []
@@ -963,6 +1091,39 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     holdMirroredRef.current = null
     runPersistedRef.current = false
     setState('running')
+
+    if (useAutomation && wf.sessionId) {
+      void window.ghostBridge
+        ?.automationRunStart?.({
+          sessionId: wf.sessionId,
+          recompileIfNeeded: !!wf.automationStale
+        })
+        .then((result) => {
+          if (!result?.ok) {
+            automationRunRef.current = false
+            setRunSteps((prev) => {
+              const next = prev.map((s) => ({ ...s }))
+              if (next[0]) {
+                next[0].status = 'error'
+                next[0].error = {
+                  message:
+                    result?.error ??
+                    'Could not start automation. Accessibility permission may be required.'
+                }
+              }
+              return next
+            })
+            setRunCollapsed(false)
+            return
+          }
+          if (result.runId && activeRunRef.current) {
+            activeRunRef.current.id = result.runId
+          }
+          if (wf.automationStale) {
+            setWorkflow((w) => ({ ...w, automationStale: false }))
+          }
+        })
+    }
   }, [])
 
   const runWorkflow = useCallback(() => {
@@ -971,10 +1132,20 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setRunPaused(false)
       setEditorCollapsed(false)
       setState('running')
+      if (automationRunRef.current) {
+        void window.ghostBridge?.automationRunResume?.()
+      }
       return
     }
-    // Preflight Screen Recording — missing routes to recovery instead of running.
-    if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
+    // Preflight: automation needs Accessibility; mock runs need Screen.
+    if (workflow.sessionId) {
+      if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
+        window.ghostBridge?.openPermissionSettings?.('accessibility')
+        setToastArmed(true)
+        void computeStake()
+        return
+      }
+    } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
       window.ghostBridge?.openPermissionSettings?.('screen')
       setToastArmed(true)
       void computeStake()
@@ -995,16 +1166,30 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const editFromRunning = useCallback(() => {
     runInFlightRef.current = true
     setRunPaused(true)
+    if (automationRunRef.current) {
+      void window.ghostBridge?.automationRunPause?.()
+    }
     setEditorCollapsed(false)
     setState('editor')
   }, [])
 
   const toggleRunPause = useCallback(() => {
-    setRunPaused((p) => !p)
+    setRunPaused((p) => {
+      const next = !p
+      if (automationRunRef.current) {
+        if (next) void window.ghostBridge?.automationRunPause?.()
+        else void window.ghostBridge?.automationRunResume?.()
+      }
+      return next
+    })
   }, [])
 
   const stopRunning = useCallback(() => {
     runInFlightRef.current = false
+    if (automationRunRef.current) {
+      void window.ghostBridge?.automationRunStop?.()
+      automationRunRef.current = false
+    }
     if (activeRunRef.current) activeRunRef.current.stopReason = undefined
     setSummaryOutcome('stopped')
     setState('summary')
@@ -1033,15 +1218,22 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     })
     const offRun = window.ghostBridge?.onRunWorkflow?.(async (workflowId) => {
       runInFlightRef.current = false
-      if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
-        window.ghostBridge?.openPermissionSettings?.('screen')
-        setToastArmed(true)
-        void computeStake()
-        return
-      }
       const fromStore = await window.ghostBridge?.getWorkflow?.(workflowId)
       if (!fromStore) {
         console.warn(`[pill] runWorkflow: workflow ${workflowId} not in store`)
+        return
+      }
+      if (fromStore.sessionId) {
+        if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
+          window.ghostBridge?.openPermissionSettings?.('accessibility')
+          setToastArmed(true)
+          void computeStake()
+          return
+        }
+      } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
+        window.ghostBridge?.openPermissionSettings?.('screen')
+        setToastArmed(true)
+        void computeStake()
         return
       }
       beginRun(fromStore)

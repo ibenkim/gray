@@ -24,7 +24,13 @@ export const SAFE_USER_MESSAGES: Record<ProcessingErrorCode, string> = {
   POLISH_FAILED: 'Could not polish this recording. Try recording again.',
   WORKFLOW_EMPTY_ACTIONS: 'Not enough recorded actions to summarize a workflow.',
   WORKFLOW_ALREADY_RUNNING: 'Workflow processing is already running for this session.',
-  SESSION_NOT_READY: 'This session is not ready for workflow processing.'
+  SESSION_NOT_READY: 'This session is not ready for workflow processing.',
+  AUTOMATION_COMPILE_FAILED:
+    'Could not compile an automation script for this workflow. You can retry compile later.',
+  AUTOMATION_SCRIPT_MISSING:
+    'No automation script is available for this workflow yet. Recompile or run with the mock engine.',
+  AUTOMATION_ACCESSIBILITY_DENIED:
+    'Accessibility permission is required to run automated workflows.'
 }
 
 export function userMessageForCode(code: ProcessingErrorCode): string {

@@ -97,6 +97,13 @@ export type Workflow = {
   sharedBy?: string
   /** Display name for the Shared page "shared by …" chip. */
   sharedByName?: string
+  /**
+   * Telemetry session that produced this workflow. Links to the compiled
+   * automation script under development-data/telemetry/automation/.
+   */
+  sessionId?: string
+  /** True when editor steps changed after the last successful compile. */
+  automationStale?: boolean
 }
 
 // ── Running (ephemeral ledger in the pill) ──

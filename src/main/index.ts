@@ -44,6 +44,7 @@ import {
   initTelemetry,
   registerTelemetryIpc
 } from './telemetry'
+import { registerAutomationIpc, stopActiveAutomationRun } from './automation'
 
 let pillWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
@@ -1226,6 +1227,7 @@ app.whenReady().then(async () => {
   registerOnboardingIpc()
   await initTelemetry()
   registerTelemetryIpc()
+  registerAutomationIpc()
   startPermissionWatch(handlePermissionChange)
 
   const onboarded = getSnapshot().onboardingComplete
@@ -1253,6 +1255,7 @@ app.whenReady().then(async () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   stopPermissionWatch()
+  stopActiveAutomationRun()
   void flushTelemetryOnQuit()
   setEditorScrimVisible(false)
   editorScrim?.destroy()

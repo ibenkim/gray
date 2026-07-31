@@ -1,7 +1,9 @@
 import {
   SCHEMA_VERSION,
+  type AutomationScript,
   type ExtractedWorkflow,
   type PolishedSession,
+  type StoredAutomationScript,
   type StoredVariables,
   type StoredWorkflowResult,
   type TelemetryEvent,
@@ -22,6 +24,7 @@ export class InMemoryTelemetryStore implements TelemetryStore {
   polished = new Map<string, PolishedSession>()
   workflows = new Map<string, StoredWorkflowResult>()
   variables = new Map<string, StoredVariables>()
+  automation = new Map<string, StoredAutomationScript>()
   keyframes = new Map<string, Buffer>()
 
   async ensureReady(): Promise<void> {
@@ -116,6 +119,39 @@ export class InMemoryTelemetryStore implements TelemetryStore {
 
   async getVariables(sessionId: string): Promise<StoredVariables | null> {
     return this.variables.get(sessionId) ?? null
+  }
+
+  async saveAutomationScript(
+    sessionId: string,
+    script: AutomationScript,
+    model: string,
+    opts: { stale?: boolean } = {}
+  ): Promise<StoredAutomationScript> {
+    const stored: StoredAutomationScript = {
+      sessionId,
+      schemaVersion: SCHEMA_VERSION,
+      compiledAt: new Date().toISOString(),
+      model,
+      script,
+      stale: opts.stale ?? false
+    }
+    this.automation.set(sessionId, stored)
+    return stored
+  }
+
+  async getAutomationScript(sessionId: string): Promise<StoredAutomationScript | null> {
+    return this.automation.get(sessionId) ?? null
+  }
+
+  async markAutomationStale(
+    sessionId: string,
+    stale: boolean
+  ): Promise<StoredAutomationScript | null> {
+    const existing = this.automation.get(sessionId)
+    if (!existing) return null
+    const next = { ...existing, stale }
+    this.automation.set(sessionId, next)
+    return next
   }
 
   async saveKeyframe(

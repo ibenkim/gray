@@ -329,6 +329,34 @@ describe('processSessionWorkflow', () => {
       }
     }))
 
+    const compileParse = vi.fn(async () => ({
+      output_parsed: {
+        ops: [
+          {
+            op: 'open_app',
+            stepOrder: 1,
+            evidenceEventIds: ['tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'],
+            confidence: 0.9,
+            timeoutMs: 10000,
+            label: 'Open Terminal',
+            appName: 'Terminal',
+            appBundleId: null,
+            url: null,
+            urlVariableKey: null,
+            elementRole: null,
+            elementLabel: null,
+            elementPath: null,
+            chord: null,
+            variableKey: null,
+            waitCondition: null,
+            waitValue: null,
+            prompt: null
+          }
+        ],
+        warnings: []
+      }
+    }))
+
     const result = await processSessionWorkflow(
       store,
       {
@@ -342,12 +370,18 @@ describe('processSessionWorkflow', () => {
       'tsess_sparse',
       {
         skipPolishIfPresent: true,
-        deps: { createClient: () => ({ responses: { parse } }) }
+        deps: { createClient: () => ({ responses: { parse } }) },
+        compileDeps: { createClient: () => ({ responses: { parse: compileParse } }) }
       }
     )
 
     expect(result.ok).toBe(true)
     expect(parse).toHaveBeenCalledTimes(1)
+    expect(compileParse).toHaveBeenCalledTimes(1)
+    if (result.ok) {
+      expect(result.workflow.sessionId).toBe('tsess_sparse')
+      expect(result.automation?.script.ops[0].op).toBe('open_app')
+    }
     const meta = await store.getSessionMeta('tsess_sparse')
     expect(meta?.captureStatus).toBe('stopped')
     expect(meta?.processingStatus).toBe('complete')
