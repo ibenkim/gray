@@ -5,7 +5,15 @@ import {
   type PolishedSession
 } from '../../../shared/telemetry/schema'
 import { InMemoryTelemetryStore } from '../store/InMemoryTelemetryStore'
-import { compileAutomationScript, validateAndGroundScript } from './compile'
+import {
+  applyEditorIntentToOps,
+  collapseRedundantBrowserNav,
+  compileAutomationScript,
+  ensureBrowserNewTab,
+  injectClickOpsFromEvidence,
+  recoverInferredActions,
+  validateAndGroundScript
+} from './compile'
 
 const polished: PolishedSession = {
   sessionId: 'tsess_auto',
@@ -61,7 +69,696 @@ const workflow: ExtractedWorkflow = {
   variables: null
 }
 
+describe('recoverInferredActions', () => {
+  it('turns Google Drive manual into open_url', () => {
+    const warnings: string[] = []
+    const ops = recoverInferredActions(
+      [
+        {
+          op: 'manual',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.5,
+          timeoutMs: 10000,
+          label: 'Navigate to Google Drive',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: 'Could not ground navigation',
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          {
+            order: 1,
+            action: 'Open a new Chrome tab and navigate to Google Drive.',
+            category: 'navigation',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_nav'],
+            confidence: 0.9
+          }
+        ]
+      },
+      polished,
+      warnings
+    )
+    expect(ops[0]?.op).toBe('open_url')
+    expect(ops[0]?.url).toBe('https://drive.google.com/')
+    expect(warnings.some((w) => /Inferred open_url/i.test(w))).toBe(true)
+  })
+
+  it('rewrites Drive homepage open_url into create-doc when step says create', () => {
+    const warnings: string[] = []
+    const ops = recoverInferredActions(
+      [
+        {
+          op: 'open_url',
+          stepOrder: 2,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Open Google Drive',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: 'https://drive.google.com/',
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          workflow.steps[0]!,
+          {
+            order: 2,
+            action: 'Navigate to Google Drive and Create a new Google Docs document titling "Untitled"',
+            category: 'navigation',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_nav'],
+            confidence: 0.9
+          }
+        ]
+      },
+      polished,
+      warnings
+    )
+    expect(ops[0]?.op).toBe('open_url')
+    expect(ops[0]?.url).toBe('https://docs.google.com/document/create')
+  })
+
+  it('rewrites open-document ops into click+rename when step says rename', () => {
+    const warnings: string[] = []
+    const renamePolished: PolishedSession = {
+      ...polished,
+      actions: [
+        ...polished.actions,
+        {
+          order: 3,
+          text: 'Clicked document title',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:48.000Z',
+          sourceEventIds: ['tevt_title'],
+          appName: 'Google Chrome',
+          documentTitle: 'Untitled document - Google Docs',
+          clickX: 120,
+          clickY: 48
+        }
+      ]
+    }
+    const ops = recoverInferredActions(
+      [
+        {
+          op: 'type_text',
+          stepOrder: 4,
+          evidenceEventIds: ['tevt_title'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Open “workflow logs”',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: 'workflow logs',
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'keystroke',
+          stepOrder: 4,
+          evidenceEventIds: ['tevt_title'],
+          confidence: 0.8,
+          timeoutMs: 3000,
+          label: 'Open selected document',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: 'Enter',
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          ...workflow.steps,
+          {
+            order: 4,
+            action: 'Rename to workflow logs document in Google Docs.',
+            category: 'data_entry',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_title'],
+            confidence: 0.9
+          }
+        ]
+      },
+      renamePolished,
+      warnings
+    )
+    expect(ops.map((o) => o.op)).toEqual(['click_at', 'type_text', 'keystroke'])
+    expect(ops[0]?.clickX).toBe(120)
+    expect(ops[0]?.clickY).toBe(48)
+    expect(ops[1]?.literalText).toBe('workflow logs')
+    expect(ops[2]?.label).toMatch(/confirm rename/i)
+  })
+
+  it('injectClickOpsFromEvidence inserts missing click_at into the owning step', () => {
+    const warnings: string[] = []
+    const clickPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        ...polished.actions,
+        {
+          order: 3,
+          text: 'Clicked New',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:48.000Z',
+          sourceEventIds: ['tevt_new'],
+          appName: 'Google Chrome',
+          elementLabel: 'New',
+          clickX: 80,
+          clickY: 200
+        },
+        {
+          order: 4,
+          text: 'Clicked cell A1',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:49.000Z',
+          sourceEventIds: ['tevt_cell'],
+          appName: 'Google Chrome',
+          elementLabel: 'A1',
+          clickX: 240,
+          clickY: 320
+        }
+      ]
+    }
+    const ops = injectClickOpsFromEvidence(
+      [
+        {
+          op: 'open_url',
+          stepOrder: 2,
+          evidenceEventIds: ['tevt_click'],
+          confidence: 0.9,
+          timeoutMs: 10000,
+          label: 'Create sheet',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: 'https://docs.google.com/spreadsheets/create',
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'wait_for',
+          stepOrder: 2,
+          evidenceEventIds: ['tevt_click'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Wait',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: 'window_title_contains',
+          waitValue: 'Sheet',
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          workflow.steps[0]!,
+          {
+            order: 2,
+            action: 'Create a new Google Sheets and create a table',
+            category: 'data_entry',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_click', 'tevt_new', 'tevt_cell'],
+            confidence: 0.9
+          }
+        ]
+      },
+      clickPolished,
+      warnings
+    )
+    expect(ops.filter((o) => o.op === 'click_at')).toHaveLength(2)
+    expect(ops.map((o) => o.op)).toEqual(['open_url', 'click_at', 'click_at', 'wait_for'])
+    expect(warnings.some((w) => /Injected 2 click_at/i.test(w))).toBe(true)
+  })
+
+  it('applyEditorIntentToOps forces “Rename the document to X” over Untitled literal', () => {
+    const warnings: string[] = []
+    const ops = applyEditorIntentToOps(
+      [
+        {
+          op: 'type_text',
+          stepOrder: 4,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Rename to “Untitled,”',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: 'Untitled,',
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'keystroke',
+          stepOrder: 4,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.8,
+          timeoutMs: 3000,
+          label: 'Confirm rename',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: 'Enter',
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          ...workflow.steps,
+          {
+            order: 4,
+            action: 'Rename the document to Workflow Logs.',
+            category: 'data_entry',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_nav'],
+            confidence: 0.9
+          }
+        ]
+      },
+      polished,
+      warnings
+    )
+    const typed = ops.find((o) => o.op === 'type_text')
+    expect(typed?.literalText).toBe('Workflow Logs')
+    expect(typed?.label).toBe('Rename the document to Workflow Logs.')
+    expect(warnings.some((w) => /Applied editor rename/i.test(w))).toBe(true)
+  })
+
+  it('drops Cmd+T and Cmd+L before open_url to avoid double tabs', () => {
+    const warnings: string[] = []
+    const ops = collapseRedundantBrowserNav(
+      [
+        {
+          op: 'keystroke',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 3000,
+          label: 'Open a new tab',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: 'Cmd+T',
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'keystroke',
+          stepOrder: 2,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 3000,
+          label: 'Focus the address bar',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: 'Cmd+L',
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'open_url',
+          stepOrder: 2,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 10000,
+          label: 'Open Google Drive',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: 'https://drive.google.com/',
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      warnings
+    )
+    expect(ops.map((o) => o.op)).toEqual(['open_url'])
+    expect(warnings.some((w) => /two tabs/i.test(w))).toBe(true)
+  })
+
+  it('converts address-bar activate_element to Cmd+L', () => {
+    const warnings: string[] = []
+    const ops = recoverInferredActions(
+      [
+        {
+          op: 'activate_element',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Focus the address bar',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: 'AXTextField',
+          elementLabel: 'Address and search bar',
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      workflow,
+      polished,
+      warnings
+    )
+    expect(ops[0]?.op).toBe('keystroke')
+    expect(ops[0]?.chord).toBe('Cmd+L')
+  })
+})
+
+describe('ensureBrowserNewTab', () => {
+  it('injects Cmd+T after open_app when the recording used a New Tab', () => {
+    const browserPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Opened New Tab in Google Chrome',
+          category: 'navigation',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_nav'],
+          appName: 'Google Chrome',
+          documentTitle: 'New Tab'
+        }
+      ]
+    }
+    const ops = ensureBrowserNewTab(
+      [
+        {
+          op: 'open_app',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 10000,
+          label: 'Open Chrome',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        },
+        {
+          op: 'type_text',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.8,
+          timeoutMs: 10000,
+          label: 'Type query',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: 'how to use ai',
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      browserPolished,
+      []
+    )
+    expect(ops.map((o) => o.op)).toEqual(['open_app', 'keystroke', 'type_text'])
+    expect(ops[1]?.chord).toBe('Cmd+T')
+  })
+})
+
 describe('validateAndGroundScript', () => {
+  it('replaces invented type_text literal with searchQuery from evidence', () => {
+    const searchPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Typed ai',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_type'],
+          appName: 'Google Chrome',
+          documentTitle: 'how to use ai - Google Search',
+          typedText: 'ai'
+        }
+      ]
+    }
+    const searchWorkflow: ExtractedWorkflow = {
+      ...workflow,
+      steps: [
+        {
+          order: 1,
+          action: 'Type the search query',
+          category: 'data_entry',
+          appName: 'Google Chrome',
+          evidenceEventIds: ['tevt_type'],
+          confidence: 0.8
+        }
+      ]
+    }
+    const script = validateAndGroundScript(
+      {
+        ops: [
+          {
+            op: 'type_text',
+            stepOrder: 1,
+            evidenceEventIds: ['tevt_type'],
+            confidence: 0.8,
+            timeoutMs: 10000,
+            label: 'Type query',
+            appName: 'Google Chrome',
+            appBundleId: null,
+            url: null,
+            urlVariableKey: null,
+            elementRole: null,
+            elementLabel: null,
+            elementPath: null,
+            chord: null,
+            variableKey: null,
+            literalText: 'aiaiai',
+            waitCondition: null,
+            waitValue: null,
+            prompt: null,
+            clickX: null,
+            clickY: null,
+          }
+        ],
+        warnings: []
+      },
+      searchWorkflow,
+      searchPolished
+    )
+    expect(script.ops[0]?.op).toBe('type_text')
+    expect(script.ops[0]?.literalText).toBe('how to use ai')
+  })
+
+  it('fills set_clipboard literalText from in-memory clipboard map', () => {
+    const clipPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Copied text',
+          category: 'clipboard',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_clip'],
+          clipboard: {
+            contentType: 'text',
+            charCount: 11,
+            contentHash: 'abc123'
+          }
+        }
+      ]
+    }
+    const clipWorkflow: ExtractedWorkflow = {
+      ...workflow,
+      steps: [
+        {
+          order: 1,
+          action: 'Copy text',
+          category: 'interaction',
+          appName: null,
+          evidenceEventIds: ['tevt_clip'],
+          confidence: 0.7
+        }
+      ]
+    }
+    const script = validateAndGroundScript(
+      {
+        ops: [
+          {
+            op: 'set_clipboard',
+            stepOrder: 1,
+            evidenceEventIds: ['tevt_clip'],
+            confidence: 0.7,
+            timeoutMs: 5000,
+            label: 'Set clipboard',
+            appName: null,
+            appBundleId: null,
+            url: null,
+            urlVariableKey: null,
+            elementRole: null,
+            elementLabel: null,
+            elementPath: null,
+            chord: null,
+            variableKey: null,
+            literalText: null,
+            waitCondition: null,
+            waitValue: null,
+            prompt: null,
+            clickX: null,
+            clickY: null,
+          }
+        ],
+        warnings: []
+      },
+      clipWorkflow,
+      clipPolished,
+      new Map([['abc123', 'hello world']])
+    )
+    expect(script.ops[0]?.op).toBe('set_clipboard')
+    expect(script.ops[0]?.literalText).toBe('hello world')
+  })
+
   it('keeps grounded activate_element ops', () => {
     const script = validateAndGroundScript(
       {
@@ -82,9 +779,12 @@ describe('validateAndGroundScript', () => {
             elementPath: null,
             chord: null,
             variableKey: null,
+            literalText: null,
             waitCondition: null,
             waitValue: null,
-            prompt: null
+            prompt: null,
+            clickX: null,
+            clickY: null,
           },
           {
             op: 'activate_element',
@@ -102,9 +802,12 @@ describe('validateAndGroundScript', () => {
             elementPath: null,
             chord: null,
             variableKey: null,
+            literalText: null,
             waitCondition: null,
             waitValue: null,
-            prompt: null
+            prompt: null,
+            clickX: null,
+            clickY: null,
           }
         ],
         warnings: []
@@ -136,9 +839,12 @@ describe('validateAndGroundScript', () => {
             elementPath: null,
             chord: null,
             variableKey: null,
+            literalText: null,
             waitCondition: null,
             waitValue: null,
-            prompt: null
+            prompt: null,
+            clickX: null,
+            clickY: null,
           }
         ],
         warnings: []
@@ -171,9 +877,12 @@ describe('validateAndGroundScript', () => {
               elementPath: null,
               chord: null,
               variableKey: null,
+              literalText: null,
               waitCondition: null,
               waitValue: null,
-              prompt: null
+              prompt: null,
+              clickX: null,
+              clickY: null,
             }
           ],
           warnings: []
@@ -211,9 +920,12 @@ describe('compileAutomationScript', () => {
             elementPath: null,
             chord: null,
             variableKey: null,
+            literalText: null,
             waitCondition: null,
             waitValue: null,
-            prompt: null
+            prompt: null,
+            clickX: null,
+            clickY: null,
           }
         ],
         warnings: []

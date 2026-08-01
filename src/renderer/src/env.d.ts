@@ -198,12 +198,14 @@ declare global {
       ) => Promise<{ ok: boolean; script?: unknown; error?: string }>
       automationMarkStale: (
         sessionId: string,
-        stale?: boolean
+        stale?: boolean,
+        editorSteps?: Array<{ index: number; title: string }>
       ) => Promise<{ ok: boolean; stale?: boolean; error?: string }>
       automationRunStart: (payload: {
         sessionId: string
         variables?: Record<string, string>
         recompileIfNeeded?: boolean
+        editorSteps?: Array<{ index: number; title: string }>
       }) => Promise<{
         ok: boolean
         runId?: string

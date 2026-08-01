@@ -1,7 +1,15 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { newId } from '../../shared/id'
+import type { ExtractedWorkflow } from '../../shared/telemetry/schema'
+import {
+  applyEditorIntentToOps,
+  collapseRedundantBrowserNav,
+  injectClickOpsFromEvidence,
+  recoverInferredActions
+} from '../telemetry/automation/compile'
 import { compileSessionAutomation } from '../telemetry/automation/compileSession'
-import { getTelemetryConfig, getTelemetryStore } from '../telemetry'
+import { syncEditorStepsToStoredWorkflow } from '../telemetry/automation/syncEditorSteps'
+import { getTelemetryConfig, getTelemetryRecorder, getTelemetryStore } from '../telemetry'
 import { JxaActuator } from './JxaActuator'
 import { AutomationRunner } from './runner'
 import type { RunEvent, RunnerControl } from './types'
@@ -29,6 +37,8 @@ export function registerAutomationIpc(): void {
         variables?: Record<string, string>
         /** Recompile if script is stale or missing. */
         recompileIfNeeded?: boolean
+        /** Pill/workspace step titles — synced into ExtractedWorkflow before compile. */
+        editorSteps?: Array<{ index: number; title: string }>
       }
     ) => {
       const store = getTelemetryStore()
@@ -57,12 +67,19 @@ export function registerAutomationIpc(): void {
         }
       }
 
+      const synced = await syncEditorStepsToStoredWorkflow(store, sessionId, payload.editorSteps)
       let script = await store.getAutomationScript(sessionId)
-      const needsCompile = !script || !!script.stale || !!payload.recompileIfNeeded
+      const needsCompile =
+        !script || !!script.stale || !!payload.recompileIfNeeded || synced.changed
+      let storedWorkflow: ExtractedWorkflow | null =
+        synced.workflow ?? (await store.getWorkflow(sessionId))?.workflow ?? null
 
       if (needsCompile) {
         const config = getTelemetryConfig()
-        const compiled = await compileSessionAutomation(store, config, sessionId)
+        const clipboardByHash = getTelemetryRecorder()?.getClipboardSessionValues()
+        const compiled = await compileSessionAutomation(store, config, sessionId, {
+          clipboardByHash
+        })
         if (!compiled.ok) {
           return {
             ok: false,
@@ -71,6 +88,40 @@ export function registerAutomationIpc(): void {
           }
         }
         script = compiled.automation
+        storedWorkflow =
+          (await store.getWorkflow(sessionId))?.workflow ?? storedWorkflow
+      } else if (script && storedWorkflow && store.saveAutomationScript) {
+        // Deterministic recovery: replace leftover manuals with inferred open_url / Cmd+L
+        // without paying for another LLM compile.
+        const polished = await store.readPolishedSession(sessionId)
+        if (polished) {
+          const warnings: string[] = [...script.script.warnings]
+          const recovered = collapseRedundantBrowserNav(
+            injectClickOpsFromEvidence(
+              applyEditorIntentToOps(
+                recoverInferredActions(script.script.ops, storedWorkflow, polished, warnings),
+                storedWorkflow,
+                polished,
+                warnings
+              ),
+              storedWorkflow,
+              polished,
+              warnings
+            ),
+            warnings
+          )
+          const changed =
+            recovered.length !== script.script.ops.length ||
+            recovered.some((op, i) => op.op !== script!.script.ops[i]?.op)
+          if (changed) {
+            script = await store.saveAutomationScript(
+              sessionId,
+              { ops: recovered, warnings: warnings.slice(0, 20) },
+              script.model,
+              { stale: false }
+            )
+          }
+        }
       }
 
       if (!script) {

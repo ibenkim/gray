@@ -24,9 +24,12 @@ const script: AutomationScript = {
       elementPath: null,
       chord: null,
       variableKey: null,
+      literalText: null,
       waitCondition: null,
       waitValue: null,
-      prompt: null
+      prompt: null,
+      clickX: null,
+      clickY: null,
     }
   ],
   warnings: []

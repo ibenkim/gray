@@ -1,9 +1,26 @@
 /**
  * Long-lived JXA actuator: reads JSON command lines from stdin, writes JSON result lines.
  * Commands: activateApp, openUrl, pressElement, keystroke, query, ping, quit.
+ *
+ * Replies go through writeLine (NSFileHandle stdout). `console.log` must never be
+ * used here: under `osascript -l JavaScript` it writes to stderr, so the host would
+ * never see a single reply.
  */
 export const JXA_ACTUATOR_SCRIPT = `
 ObjC.import('stdlib');
+ObjC.import('Cocoa');
+ObjC.import('ApplicationServices');
+
+var STDOUT = $.NSFileHandle.fileHandleWithStandardOutput;
+
+function writeLine(text) {
+  try {
+    var str = $.NSString.alloc.initWithUTF8String(text + "\\n");
+    STDOUT.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
+  } catch (e) {
+    /* nothing useful to do — host will time out the command */
+  }
+}
 
 function attr(el, name) {
   try {
@@ -34,6 +51,53 @@ function shellQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\\\''") + "'";
 }
 
+/**
+ * Open URL in a fresh tab when the browser exposes AppleScript tabs.
+ * Falls back to {ok:false} so the caller can use \`open\`.
+ */
+function openUrlInNewTab(url, preferredApp) {
+  /* Chrome-family AppleScript can create a tab without reusing the front one. */
+  var candidates = [];
+  if (preferredApp) candidates.push(String(preferredApp));
+  candidates.push('Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Arc');
+  var seen = {};
+  for (var i = 0; i < candidates.length; i++) {
+    var name = candidates[i];
+    if (!name || seen[name]) continue;
+    seen[name] = 1;
+    try {
+      var app = Application(name);
+      app.activate();
+      if (!app.windows().length) {
+        app.Window().make();
+      }
+      var win = app.windows[0];
+      win.tabs.push(app.Tab({ url: url }));
+      try { win.activeTabIndex = win.tabs().length; } catch (eIdx) {}
+      return { ok: true };
+    } catch (e) {
+      /* try next browser */
+    }
+  }
+  return { ok: false };
+}
+
+function clickAtPoint(x, y, button) {
+  try {
+    var pt = $.CGPointMake(x, y);
+    var downType = button === 'right' ? $.kCGEventRightMouseDown : $.kCGEventLeftMouseDown;
+    var upType = button === 'right' ? $.kCGEventRightMouseUp : $.kCGEventLeftMouseUp;
+    var buttonType = button === 'right' ? $.kCGMouseButtonRight : $.kCGMouseButtonLeft;
+    var down = $.CGEventCreateMouseEvent($(), downType, pt, buttonType);
+    var up = $.CGEventCreateMouseEvent($(), upType, pt, buttonType);
+    $.CGEventPost($.kCGHIDEventTap, down);
+    $.CGEventPost($.kCGHIDEventTap, up);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'click_failed' };
+  }
+}
+
 function frontProcess() {
   var se = Application('System Events');
   var procs = se.applicationProcesses.whose({ frontmost: true });
@@ -57,7 +121,7 @@ function findProcess(appName, bundleId) {
   return null;
 }
 
-function walkPress(root, role, label, maxDepth) {
+function walkPressOnce(root, role, label, maxDepth, requireRole) {
   var queue = [{ el: root, depth: 0 }];
   while (queue.length) {
     var item = queue.shift();
@@ -65,13 +129,16 @@ function walkPress(root, role, label, maxDepth) {
     if (!el || item.depth > maxDepth) continue;
     var elRole = attr(el, 'AXRole');
     var elLabel = labelOf(el);
-    var roleOk = !role || (elRole && String(elRole).toLowerCase() === String(role).toLowerCase());
+    var roleOk =
+      !requireRole ||
+      !role ||
+      (elRole && String(elRole).toLowerCase() === String(role).toLowerCase());
     if (roleOk && labelMatches(elLabel, label)) {
       try {
         el.actions.byName('AXPress').perform();
         return { ok: true, matchedLabel: elLabel, matchedRole: elRole };
       } catch (e) {
-        return { ok: false, error: 'press_failed' };
+        /* keep searching — another match may press */
       }
     }
     try {
@@ -79,12 +146,23 @@ function walkPress(root, role, label, maxDepth) {
       if (kids) {
         var arr = kids.value();
         if (arr) {
-          for (var i = 0; i < Math.min(arr.length, 80); i++) {
+          for (var i = 0; i < Math.min(arr.length, 120); i++) {
             queue.push({ el: arr[i], depth: item.depth + 1 });
           }
         }
       }
     } catch (e2) {}
+  }
+  return null;
+}
+
+function walkPress(root, role, label, maxDepth) {
+  /* Prefer exact role+label, then label-only — Chrome omnibox roles drift. */
+  var hit = walkPressOnce(root, role, label, maxDepth, true);
+  if (hit) return hit;
+  if (role) {
+    hit = walkPressOnce(root, role, label, maxDepth, false);
+    if (hit) return hit;
   }
   return { ok: false, error: 'element_not_found' };
 }
@@ -188,10 +266,24 @@ function handle(cmd) {
       if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
         return { id: id, ok: false, error: 'invalid_url' };
       }
+      /* Prefer a NEW browser tab — \`open <url>\` reuses the frontmost tab. */
+      var opened = openUrlInNewTab(url, cmd.appName || null);
+      if (opened.ok) return { id: id, ok: true };
       var cur = Application.currentApplication();
       cur.includeStandardAdditions = true;
       cur.doShellScript('open ' + shellQuote(url));
       return { id: id, ok: true };
+    }
+
+    if (type === 'clickAt') {
+      var cx = cmd.x;
+      var cy = cmd.y;
+      if (typeof cx !== 'number' || typeof cy !== 'number') {
+        return { id: id, ok: false, error: 'missing_point' };
+      }
+      var clicked = clickAtPoint(cx, cy, cmd.button === 'right' ? 'right' : 'left');
+      clicked.id = id;
+      return clicked;
     }
 
     if (type === 'pressElement') {
@@ -200,7 +292,7 @@ function handle(cmd) {
       try { proc.frontmost = true; } catch (e) {}
       var wins = proc.windows();
       if (!wins || wins.length === 0) return { id: id, ok: false, error: 'no_window' };
-      var result = walkPress(wins[0], cmd.elementRole || null, cmd.elementLabel || '', 8);
+      var result = walkPress(wins[0], cmd.elementRole || null, cmd.elementLabel || '', 12);
       result.id = id;
       return result;
     }
@@ -209,6 +301,24 @@ function handle(cmd) {
       var ks = doKeystroke(cmd.chord);
       ks.id = id;
       return ks;
+    }
+
+    /* Type literal characters via System Events — never touches the clipboard. */
+    if (type === 'typeText') {
+      var text = cmd.text;
+      if (typeof text !== 'string' || !text.length) {
+        return { id: id, ok: false, error: 'missing_text' };
+      }
+      if (text.length > 500) {
+        return { id: id, ok: false, error: 'text_too_long' };
+      }
+      try {
+        var seType = Application('System Events');
+        seType.keystroke(text);
+        return { id: id, ok: true };
+      } catch (eType) {
+        return { id: id, ok: false, error: 'type_failed' };
+      }
     }
 
     if (type === 'query') {
@@ -259,7 +369,7 @@ while (true) {
     var cmd;
     try { cmd = JSON.parse(chunk); } catch (e) { continue; }
     var result = handle(cmd);
-    console.log(JSON.stringify(result));
+    writeLine(JSON.stringify(result));
     if (cmd.type === 'quit') {
       $.exit(0);
     }

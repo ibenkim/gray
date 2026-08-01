@@ -50,9 +50,12 @@ type ActiveWinResult = {
 const POLL_MS = 800
 
 /**
- * Meaningful shortcut chords — never ordinary printable typing.
- * Omits C/V/X so copy-paste is not stolen from the target app while recording
- * (Electron globalShortcut claims the chord system-wide when registered).
+ * Fallback shortcut chords, used only when the interaction provider cannot
+ * observe key presses passively (no Accessibility permission, or non-macOS).
+ *
+ * Registering an accelerator claims the chord system-wide, so the recorded app
+ * never receives it — hence C/V/X are omitted and the whole mechanism is skipped
+ * whenever passive capture is available.
  */
 const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
   { accelerator: 'CommandOrControl+S', label: 'Cmd/Ctrl+S' },
@@ -65,9 +68,11 @@ const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
 ]
 
 /**
- * Main-process recorder: active-win polling + globalShortcut chords +
- * optional Accessibility (JXA) + clipboard watcher + sparse keyframes.
- * Structurally cannot capture printable keystrokes.
+ * Main-process recorder: active-win polling + clipboard watcher + sparse
+ * keyframes + an interaction provider that supplies clicks, typing and chords.
+ *
+ * Typed text is captured, but only ever in redacted form and never from secure
+ * fields or from Ghost's own windows.
  */
 export class TelemetryRecorder {
   private sessionId: string | null = null
@@ -131,6 +136,11 @@ export class TelemetryRecorder {
     this.emitStatus()
   }
 
+  /** In-session clipboard plaintext (hash → text). Survives stop until next start. */
+  getClipboardSessionValues(): Map<string, string> {
+    return this.clipboard.snapshotSessionValues()
+  }
+
   async startRecording(opts: CaptureOptions = {}): Promise<RecordingStatus> {
     if (this.recording) {
       return this.getRecordingStatus()
@@ -171,12 +181,17 @@ export class TelemetryRecorder {
 
     await this.ensureActiveWin()
     this.startPolling()
-    this.registerShortcuts()
     this.startClipboard()
 
     if (this.interaction.enabled) {
       this.interaction.start((partial) => this.ingestInteraction(partial))
+      this.interaction.onCapabilityChange?.(({ capturesKeys }) => {
+        // The provider only learns whether the OS will deliver key events after
+        // its child reports in; register the fallback if it will not.
+        if (this.recording && !capturesKeys) this.registerShortcuts()
+      })
     }
+    this.registerShortcuts()
 
     this.emitStatus()
     return this.getRecordingStatus()
@@ -189,6 +204,8 @@ export class TelemetryRecorder {
 
     this.stopPolling()
     this.unregisterShortcuts()
+    // Flush before stop so a half-typed entry still lands in the session.
+    this.interaction.flush?.()
     this.interaction.stop()
     this.clipboard.stop()
     if (this.settleTimer) {
@@ -319,25 +336,7 @@ export class TelemetryRecorder {
       if (!win) return
 
       const appName = sanitizeLabel(win.owner?.name)
-      const ignore = this.opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']
-      if (appName && ignore.some((n) => appName.toLowerCase() === n.toLowerCase())) {
-        return
-      }
-
-      if (this.opts.recordMode === 'one-app' && this.opts.selectedAppId && appName) {
-        const selected = this.opts.selectedAppId.toLowerCase()
-        const aliases: Record<string, string[]> = {
-          chrome: ['google chrome', 'chrome', 'chromium'],
-          figma: ['figma'],
-          slack: ['slack'],
-          finder: ['finder'],
-          mail: ['mail']
-        }
-        const names = aliases[selected] ?? [selected]
-        if (!names.some((n) => appName.toLowerCase().includes(n))) {
-          return
-        }
-      }
+      if (this.shouldIgnoreApp(appName)) return
 
       if (win.bounds) this.lastBounds = win.bounds
 
@@ -405,6 +404,34 @@ export class TelemetryRecorder {
     }
   }
 
+  /**
+   * Whether events from this app must be discarded — either it is Ghost itself
+   * (never record the user interacting with the recorder) or the session is
+   * scoped to a single other app.
+   */
+  private shouldIgnoreApp(appName?: string): boolean {
+    if (!appName) return false
+    const lower = appName.toLowerCase()
+
+    const ignore = this.opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']
+    if (ignore.some((n) => lower === n.toLowerCase())) return true
+
+    if (this.opts.recordMode === 'one-app' && this.opts.selectedAppId) {
+      const selected = this.opts.selectedAppId.toLowerCase()
+      const aliases: Record<string, string[]> = {
+        chrome: ['google chrome', 'chrome', 'chromium'],
+        figma: ['figma'],
+        slack: ['slack'],
+        finder: ['finder'],
+        mail: ['mail']
+      }
+      const names = aliases[selected] ?? [selected]
+      if (!names.some((n) => lower.includes(n))) return true
+    }
+
+    return false
+  }
+
   private scheduleSettleKeyframe(): void {
     if (this.settleTimer) clearTimeout(this.settleTimer)
     this.settleTimer = setTimeout(() => {
@@ -444,7 +471,10 @@ export class TelemetryRecorder {
   }
 
   private registerShortcuts(): void {
-    this.unregisterShortcuts()
+    // Passive observation is strictly better: it sees every chord (including
+    // Cmd+C/V/X) without intercepting it from the app being recorded.
+    if (this.interaction.capturesKeys) return
+    if (this.registeredShortcuts.length > 0) return
     for (const { accelerator, label } of SHORTCUTS) {
       try {
         const ok = globalShortcut.register(accelerator, () => {
@@ -473,6 +503,23 @@ export class TelemetryRecorder {
 
   private ingestInteraction(partial: InteractionPartial): void {
     if (!this.recording) return
+    if (this.shouldIgnoreApp(partial.data?.appName ?? partial.target?.appName)) return
+
+    // An observed paste chord is direct evidence — no length heuristics needed.
+    if (partial.type === 'keyboard_shortcut' && isPasteChord(partial.data?.shortcut)) {
+      const latest = this.clipboard.getLatest()
+      if (latest) {
+        this.recordEvent('paste_detected', {
+          target: partial.target,
+          data: {
+            ...partial.data,
+            clipboard: latest.clipboard,
+            matchedClipboardHash: latest.clipboard.contentHash
+          }
+        })
+        return
+      }
+    }
 
     // Paste inference: field length jumped after a recent clipboard change.
     if (partial.type === 'focus_changed' || partial.type === 'field_completed') {
@@ -518,4 +565,10 @@ export class TelemetryRecorder {
       this.interaction.poke?.()
     }
   }
+}
+
+/** Cmd+V / Ctrl+V, including Shift+Cmd+V ("paste and match style"). */
+function isPasteChord(shortcut?: string): boolean {
+  if (!shortcut) return false
+  return /^(?:Cmd|Ctrl)(?:\+(?:Alt|Shift))*\+V$/i.test(shortcut)
 }

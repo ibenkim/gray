@@ -1096,7 +1096,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       void window.ghostBridge
         ?.automationRunStart?.({
           sessionId: wf.sessionId,
-          recompileIfNeeded: !!wf.automationStale
+          recompileIfNeeded: !!wf.automationStale,
+          editorSteps: wf.steps.map((s) => ({ index: s.index, title: s.title }))
         })
         .then((result) => {
           if (!result?.ok) {

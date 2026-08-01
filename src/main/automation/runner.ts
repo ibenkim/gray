@@ -179,27 +179,49 @@ export class AutomationRunner {
           op.url ??
           (op.urlVariableKey ? this.variables[op.urlVariableKey] : undefined)
         if (!url) return { ok: false, error: 'missing_url' }
-        return this.actuator.openUrl(url)
+        return this.actuator.openUrl(url, op.appName)
       }
-      case 'activate_element':
+      case 'activate_element': {
         if (!op.elementLabel) return { ok: false, error: 'missing_label' }
-        return this.actuator.pressElement({
+        const pressed = await this.actuator.pressElement({
           appName: op.appName,
           appBundleId: op.appBundleId,
           elementRole: op.elementRole,
           elementLabel: op.elementLabel,
           elementPath: op.elementPath
         })
+        if (pressed.ok) return pressed
+        // Infer fallbacks when a single AX label cannot be found.
+        const addressBar = /address|omnibox|search bar|\burl\b/i.test(op.elementLabel)
+        if (addressBar) {
+          const focus = await this.actuator.keystroke('Cmd+L')
+          if (focus.ok) return focus
+        }
+        if (op.clickX != null && op.clickY != null && this.actuator.clickAt) {
+          return this.actuator.clickAt(op.clickX, op.clickY)
+        }
+        return pressed
+      }
+      case 'click_at': {
+        if (op.clickX == null || op.clickY == null) {
+          return { ok: false, error: 'missing_point' }
+        }
+        if (!this.actuator.clickAt) return { ok: false, error: 'click_unsupported' }
+        return this.actuator.clickAt(op.clickX, op.clickY)
+      }
       case 'keystroke':
         if (!op.chord) return { ok: false, error: 'missing_chord' }
         return this.actuator.keystroke(op.chord)
       case 'type_text': {
         const key = op.variableKey
-        if (!key || !this.variables[key]) return { ok: false, error: 'missing_variable' }
-        if (this.actuator.typeText) return this.actuator.typeText(this.variables[key])
-        // Fallback: clipboard + paste via keystroke
-        if (this.actuator instanceof JxaActuator) {
-          const clip = this.actuator.setClipboard(this.variables[key])
+        // A supplied variable wins; otherwise fall back to text captured during
+        // the recording.
+        const text = (key ? this.variables[key] : undefined) ?? op.literalText ?? undefined
+        if (!text) return { ok: false, error: 'missing_variable' }
+        if (this.actuator.typeText) return this.actuator.typeText(text)
+        // Last resort only — prefer System Events typing from JxaActuator.typeText.
+        if (this.actuator.setClipboard) {
+          const clip = this.actuator.setClipboard(text)
           if (!clip.ok) return clip
           return this.actuator.keystroke('Cmd+V')
         }
@@ -207,9 +229,11 @@ export class AutomationRunner {
       }
       case 'set_clipboard': {
         const key = op.variableKey
-        if (!key || !this.variables[key]) return { ok: false, error: 'missing_variable' }
-        if (this.actuator instanceof JxaActuator) {
-          return this.actuator.setClipboard(this.variables[key])
+        const text =
+          (key ? this.variables[key] : undefined) ?? op.literalText ?? undefined
+        if (!text) return { ok: false, error: 'missing_variable' }
+        if (this.actuator.setClipboard) {
+          return this.actuator.setClipboard(text)
         }
         return { ok: false, error: 'clipboard_unsupported' }
       }
@@ -314,7 +338,10 @@ export class AutomationRunner {
         return 'retry'
       }
       if (cmd.kind === 'takeOver') {
+        // User finishes this op by hand; pause until they resume so the next
+        // automated op does not race ahead while they are still working.
         this.hold = null
+        this.paused = true
         return 'done'
       }
       if (cmd.kind === 'pause') this.paused = true
@@ -367,10 +394,12 @@ function defaultLabel(op: AutomationOp): string {
       return 'Open URL'
     case 'activate_element':
       return `Click ${op.elementLabel ?? 'element'}`
+    case 'click_at':
+      return 'Click at position'
     case 'keystroke':
       return `Press ${op.chord ?? 'keys'}`
     case 'type_text':
-      return 'Type text'
+      return op.literalText ? `Type "${truncateLabel(op.literalText)}"` : 'Type text'
     case 'set_clipboard':
       return 'Copy to clipboard'
     case 'wait_for':
@@ -382,6 +411,11 @@ function defaultLabel(op: AutomationOp): string {
     default:
       return 'Step'
   }
+}
+
+function truncateLabel(text: string, max = 40): string {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean
 }
 
 function humanError(code?: string): string {

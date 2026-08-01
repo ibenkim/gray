@@ -148,6 +148,45 @@ export async function polishSession(
         })
         break
       }
+      case 'text_input': {
+        const typed = event.data?.typedText
+        const label =
+          event.data?.elementLabel ||
+          event.target?.accessibleLabel ||
+          event.target?.visibleLabel
+        if (!typed) {
+          // Nothing but a submit key survived redaction — record the keypress.
+          if (event.data?.submitKey) {
+            push({
+              text: label
+                ? `Pressed ${event.data.submitKey} in ${label}`
+                : `Pressed ${event.data.submitKey}`,
+              category: 'input',
+              timestamp: event.timestamp,
+              sourceEventIds: [event.eventId],
+              appName: event.data?.appName,
+              documentTitle: event.data?.documentTitle,
+              elementLabel: label,
+              elementRole: event.data?.elementRole
+            })
+          }
+          break
+        }
+        pendingField = event
+        const shown = typed.length > 120 ? `${typed.slice(0, 119)}…` : typed
+        push({
+          text: label ? `Typed "${shown}" into ${label}` : `Typed "${shown}"`,
+          category: 'input',
+          timestamp: event.timestamp,
+          sourceEventIds: [event.eventId],
+          appName: event.data?.appName,
+          documentTitle: event.data?.documentTitle,
+          elementLabel: label,
+          elementRole: event.data?.elementRole,
+          typedText: shown
+        })
+        break
+      }
       case 'click':
       case 'element_activated': {
         const key = targetKey(event)
@@ -204,8 +243,11 @@ export async function polishSession(
           break
         }
 
+        // "Clicked" is only honest for an observed mouse press; a focus-transition
+        // guess stays vaguer on purpose.
+        const verb = isSend ? 'Activated' : event.type === 'click' ? 'Clicked' : 'Selected'
         push({
-          text: isSend ? `Activated ${name}` : `Selected ${name}`,
+          text: `${verb} ${name}`,
           category: isSend ? 'submission' : 'interaction',
           timestamp: event.timestamp,
           sourceEventIds: [event.eventId],
@@ -214,7 +256,11 @@ export async function polishSession(
           elementLabel: name,
           elementRole: event.data?.elementRole || event.target?.role,
           inferred: inferred || undefined,
-          verified: isSend ? detectVerified(events, i) : undefined
+          verified: isSend ? detectVerified(events, i) : undefined,
+          clickButton: event.data?.clickButton,
+          clickCount: event.data?.clickCount,
+          clickX: event.data?.clickX,
+          clickY: event.data?.clickY
         })
         break
       }

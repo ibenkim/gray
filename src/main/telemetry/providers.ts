@@ -1,8 +1,8 @@
 import type { TelemetryEvent, TelemetryEventType, TelemetryTarget } from '../../shared/telemetry/schema'
 
 /**
- * Optional element-level interaction source (macOS Accessibility, etc.).
- * Disabled by default — active-win capture does not produce click/field events.
+ * Optional element-level interaction source (macOS input monitors + Accessibility).
+ * Disabled by default — active-win capture alone produces no click/typing events.
  */
 export interface InteractionProvider {
   readonly enabled: boolean
@@ -10,12 +10,27 @@ export interface InteractionProvider {
   stop(): void
   /** Force an immediate sample (e.g. after app/window or clipboard change). */
   poke?(): void
+  /**
+   * Whether this provider observes real key presses. When true the recorder skips
+   * registering global shortcut accelerators, which would otherwise swallow those
+   * chords from the app being recorded.
+   */
+  readonly capturesKeys?: boolean
+  /** Flush any buffered in-progress typing (called before the session stops). */
+  flush?(): void
+  /**
+   * Report capabilities discovered after start — the provider cannot know whether
+   * the OS will actually deliver input events until its child process reports back.
+   */
+  onCapabilityChange?(cb: (info: { capturesKeys: boolean }) => void): void
 }
 
 export type InteractionPartial = {
   type: Extract<
     TelemetryEventType,
     | 'click'
+    | 'text_input'
+    | 'keyboard_shortcut'
     | 'field_completed'
     | 'selection_changed'
     | 'form_submitted'

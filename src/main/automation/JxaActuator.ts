@@ -101,8 +101,16 @@ export class JxaActuator implements Actuator {
     return this.send({ type: 'activateApp', appName, appBundleId })
   }
 
-  async openUrl(url: string): Promise<ActuatorResult> {
-    return this.send({ type: 'openUrl', url })
+  async openUrl(url: string, appName?: string | null): Promise<ActuatorResult> {
+    return this.send({ type: 'openUrl', url, appName: appName ?? null })
+  }
+
+  async clickAt(
+    x: number,
+    y: number,
+    button: 'left' | 'right' = 'left'
+  ): Promise<ActuatorResult> {
+    return this.send({ type: 'clickAt', x, y, button })
   }
 
   async pressElement(params: {
@@ -139,11 +147,15 @@ export class JxaActuator implements Actuator {
   }
 
   async typeText(text: string): Promise<ActuatorResult> {
-    // Prefer clipboard + Cmd+V for reliability with Unicode / special chars.
+    // Type through System Events so ordinary data_entry never depends on the
+    // clipboard (and never fails with clipboard_write_failed).
+    const typed = await this.send({ type: 'typeText', text })
+    if (typed.ok) return typed
+    // Fallback for odd Unicode / apps that swallow keystroke(): paste once.
     try {
       clipboard.writeText(text)
     } catch {
-      return { ok: false, error: 'clipboard_write_failed' }
+      return { ok: false, error: typed.error ?? 'type_failed' }
     }
     return this.keystroke('Cmd+V')
   }

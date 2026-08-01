@@ -22,7 +22,7 @@ export interface Actuator {
   start(): Promise<void>
   stop(): void
   activateApp(appName: string | null, appBundleId: string | null): Promise<ActuatorResult>
-  openUrl(url: string): Promise<ActuatorResult>
+  openUrl(url: string, appName?: string | null): Promise<ActuatorResult>
   pressElement(params: {
     appName: string | null
     appBundleId: string | null
@@ -33,6 +33,8 @@ export interface Actuator {
   keystroke(chord: string): Promise<ActuatorResult>
   query(params: QueryParams): Promise<ActuatorResult>
   typeText?(text: string): Promise<ActuatorResult>
+  setClipboard?(text: string): ActuatorResult
+  clickAt?(x: number, y: number, button?: 'left' | 'right'): Promise<ActuatorResult>
 }
 
 export type RunEvent =

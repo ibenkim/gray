@@ -323,13 +323,15 @@ const ghostBridge = {
     ipcRenderer.invoke('automation:getScript', sessionId),
   automationMarkStale: (
     sessionId: string,
-    stale?: boolean
+    stale?: boolean,
+    editorSteps?: Array<{ index: number; title: string }>
   ): Promise<{ ok: boolean; stale?: boolean; error?: string }> =>
-    ipcRenderer.invoke('automation:markStale', sessionId, stale ?? true),
+    ipcRenderer.invoke('automation:markStale', sessionId, stale ?? true, editorSteps),
   automationRunStart: (payload: {
     sessionId: string
     variables?: Record<string, string>
     recompileIfNeeded?: boolean
+    editorSteps?: Array<{ index: number; title: string }>
   }): Promise<{
     ok: boolean
     runId?: string

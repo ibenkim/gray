@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, systemPreferences } from 'electron'
 import type { TelemetryEvent } from '../../shared/telemetry/schema'
 import { getSnapshot } from '../store'
 import { JxaAccessibilityProvider } from './ax/JxaAccessibilityProvider'
@@ -30,6 +30,15 @@ export function getTelemetryConfig(): TelemetryConfig {
   return config
 }
 
+function isAccessibilityTrusted(): boolean {
+  if (process.platform !== 'darwin') return false
+  try {
+    return systemPreferences.isTrustedAccessibilityClient(false)
+  } catch {
+    return false
+  }
+}
+
 export async function initTelemetry(): Promise<void> {
   config = loadTelemetryConfig()
   try {
@@ -56,7 +65,26 @@ export async function initTelemetry(): Promise<void> {
   }
 
   const interaction =
-    process.platform === 'darwin' ? new JxaAccessibilityProvider() : undefined
+    process.platform === 'darwin'
+      ? new JxaAccessibilityProvider({ isAccessibilityTrusted })
+      : undefined
+
+  if (interaction) {
+    // Clicks, typing and element labels all come from the Accessibility API, so
+    // say so loudly at startup rather than recording a hollow session.
+    console.log(
+      `[telemetry] interaction capture — accessibility=${
+        isAccessibilityTrusted() ? 'granted' : 'DENIED'
+      }`
+    )
+    if (!isAccessibilityTrusted()) {
+      console.warn(
+        '[telemetry] Accessibility permission missing: recordings will only contain ' +
+          'app switches, clipboard changes and a few shortcuts. Grant it in System ' +
+          'Settings › Privacy & Security › Accessibility.'
+      )
+    }
+  }
   const screenshot =
     store && typeof store.saveKeyframe === 'function' && typeof store.keyframesRoot === 'function'
       ? new SparseKeyframeProvider({
@@ -232,7 +260,10 @@ export function registerTelemetryIpc(): void {
           stoppedAt: new Date().toISOString()
         })
 
-        const result = await processSessionWorkflow(store, config, stoppedId)
+        const clipboardByHash = recorder.getClipboardSessionValues()
+        const result = await processSessionWorkflow(store, config, stoppedId, {
+          compileDeps: { clipboardByHash }
+        })
         recorder.setProcessing(false)
         broadcast('telemetry:status', {
           ...recorder.getRecordingStatus(),
@@ -371,9 +402,22 @@ export function registerTelemetryIpc(): void {
 
   ipcMain.handle(
     'automation:markStale',
-    async (_e, sessionId: string, stale = true) => {
+    async (
+      _e,
+      sessionId: string,
+      stale = true,
+      editorSteps?: Array<{ index: number; title: string }>
+    ) => {
       if (!store) return { ok: false, error: 'Telemetry not initialized' }
       if (!sessionId) return { ok: false, error: 'sessionId required' }
+      // Persist edited step titles immediately so the next compile cannot
+      // still see the pre-edit ExtractedWorkflow.
+      if (editorSteps?.length) {
+        const { syncEditorStepsToStoredWorkflow } = await import(
+          './automation/syncEditorSteps'
+        )
+        await syncEditorStepsToStoredWorkflow(store, sessionId, editorSteps)
+      }
       if (!store.markAutomationStale) return { ok: false, error: 'Automation store unavailable' }
       const updated = await store.markAutomationStale(sessionId, stale)
       return updated

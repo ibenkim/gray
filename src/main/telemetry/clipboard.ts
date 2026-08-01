@@ -77,7 +77,8 @@ export class ClipboardWatcher {
       this.timer = null
     }
     this.onChange = null
-    this.sessionValues.clear()
+    // Keep sessionValues until the next start() so stop→process can still
+    // resolve clipboard hashes into set_clipboard literals for replay.
     this.latest = null
     this.lastHash = null
   }
@@ -85,6 +86,11 @@ export class ClipboardWatcher {
   /** In-memory session value for workflow variable promotion. */
   getRawValue(contentHash: string): string | undefined {
     return this.sessionValues.get(contentHash)
+  }
+
+  /** Snapshot of in-session clipboard plaintext (never persisted to JSONL). */
+  snapshotSessionValues(): Map<string, string> {
+    return new Map(this.sessionValues)
   }
 
   getLatest(): { at: number; clipboard: ClipboardData } | null {

@@ -122,7 +122,11 @@ export default function EditorPanel() {
               setWorkflow((w) => {
                 const nextSteps = updater(w.steps)
                 if (w.sessionId) {
-                  void window.ghostBridge?.automationMarkStale?.(w.sessionId, true)
+                  void window.ghostBridge?.automationMarkStale?.(
+                    w.sessionId,
+                    true,
+                    nextSteps.map((s) => ({ index: s.index, title: s.title }))
+                  )
                 }
                 return { ...w, steps: nextSteps, automationStale: true }
               })

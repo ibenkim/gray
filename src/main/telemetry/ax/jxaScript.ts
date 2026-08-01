@@ -1,15 +1,174 @@
 /**
- * Long-lived JXA script for Accessibility sampling.
- * Samples every 400ms (or immediately when stdin receives a poke byte).
- * Writes one JSON line per *changed* sample to stdout.
- * Never includes AXValue contents — only length.
+ * Long-lived JXA sensor for macOS input + Accessibility.
+ *
+ * Emits one NDJSON line per observation on **real stdout**. `console.log` must
+ * never be used here: under `osascript -l JavaScript` it writes to stderr, so the
+ * host would never receive a single line.
+ *
+ * Line kinds:
+ *   {k:'ready', trusted, monitors}   — handshake + capability report
+ *   {k:'ax', …, valueTail?}          — focused element / window sample (on change)
+ *   {k:'key', code, chars, base, …}  — a physical key press
+ *   {k:'click', x, y, role, label, …}— a mouse press with its Accessibility target
+ *   {k:'stats', keys, clicks}        — monitor callback counters (debug heartbeat)
+ *
+ * Non-secure text fields include `valueTail` (last ≤160 chars of AXValue) so the
+ * host can recover typing when NSEvent monitors are silent. Secure fields never
+ * include a tail. The host aggregates and redacts before storage.
  */
-export const JXA_AX_SCRIPT = `
-ObjC.import('stdlib');
+export const JXA_SENSOR_SCRIPT = `
+ObjC.import('Cocoa');
+ObjC.import('ApplicationServices');
 
-var lastKey = null;
-var INTERVAL_MS = 400;
+var STDOUT = $.NSFileHandle.fileHandleWithStandardOutput;
 
+function writeLine(text) {
+  try {
+    var str = $.NSString.alloc.initWithUTF8String(text + "\\n");
+    STDOUT.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
+  } catch (e) {
+    /* host will notice the silence */
+  }
+}
+
+function emit(obj) {
+  try { writeLine(JSON.stringify(obj)); } catch (e) {}
+}
+
+var SAMPLE_MS = 400;
+/* ~60Hz so short clicks are not missed between polls. */
+var PUMP_SECONDS = 0.016;
+var MAX_ANCESTORS = 3;
+
+/* Roles whose AXValue is user-entered text. Secure fields: length only. Others: length + tail. */
+var TEXT_ROLES = {
+  AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1, AXSecureTextField: 1
+};
+/* Roles whose AXValue is a safe label (e.g. a button's own title). */
+var LABEL_VALUE_ROLES = {
+  AXButton: 1, AXMenuItem: 1, AXMenuButton: 1, AXPopUpButton: 1, AXRadioButton: 1,
+  AXCheckBox: 1, AXLink: 1, AXStaticText: 1, AXTab: 1
+};
+
+/* ── secure input (password fields) ── */
+var secureBound = false;
+try {
+  ObjC.bindFunction('IsSecureEventInputEnabled', ['bool', []]);
+  secureBound = true;
+} catch (e) {}
+
+function secureInputActive() {
+  if (!secureBound) return false;
+  try { return $.IsSecureEventInputEnabled() ? true : false; } catch (e) { return false; }
+}
+
+/* ── frontmost app via NSWorkspace (no Apple Events, safe per-keystroke) ── */
+function frontApp() {
+  try {
+    var app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!app) return { name: null, bundleId: null };
+    var name = null, bundleId = null;
+    try { name = String(app.localizedName.js); } catch (e) {}
+    try { bundleId = String(app.bundleIdentifier.js); } catch (e2) {}
+    return { name: name || null, bundleId: bundleId || null };
+  } catch (e3) {
+    return { name: null, bundleId: null };
+  }
+}
+
+/* ── Accessibility C API: resolves the element under the pointer ── */
+var CF_UTF8 = 0x08000100;
+var systemWideEl = null;
+
+function systemWide() {
+  if (!systemWideEl) {
+    try { systemWideEl = $.AXUIElementCreateSystemWide(); } catch (e) { systemWideEl = null; }
+  }
+  return systemWideEl;
+}
+
+function cfstr(text) {
+  return $.CFStringCreateWithCString($(), text, CF_UTF8);
+}
+
+function axCopy(el, name) {
+  if (!el) return null;
+  try {
+    var out = Ref();
+    if ($.AXUIElementCopyAttributeValue(el, cfstr(name), out) !== 0) return null;
+    return out[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+function axString(el, name) {
+  var raw = axCopy(el, name);
+  if (!raw) return null;
+  try {
+    var unwrapped = ObjC.unwrap(raw);
+    if (unwrapped === null || unwrapped === undefined) return null;
+    var text = String(unwrapped);
+    return text.length ? text : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function elementAtPoint(x, y) {
+  var sys = systemWide();
+  if (!sys) return null;
+  try {
+    var out = Ref();
+    if ($.AXUIElementCopyElementAtPosition(sys, x, y, out) !== 0) return null;
+    return out[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Identity of a clicked element: role + best label + a little ancestor context. */
+function describeElement(el) {
+  if (!el) return null;
+  var role = axString(el, 'AXRole');
+  if (!role) return null;
+
+  var label =
+    axString(el, 'AXTitle') ||
+    axString(el, 'AXDescription') ||
+    axString(el, 'AXIdentifier');
+
+  /* A button's AXValue is its caption; a text field's AXValue is private content. */
+  if (!label && LABEL_VALUE_ROLES[role] && !TEXT_ROLES[role]) {
+    var asLabel = axString(el, 'AXValue');
+    if (asLabel && asLabel.length <= 80) label = asLabel;
+  }
+
+  var valueLength = null;
+  if (TEXT_ROLES[role]) {
+    var val = axString(el, 'AXValue');
+    valueLength = val ? val.length : 0;
+  }
+
+  var path = [];
+  var cur = el;
+  for (var i = 0; i < MAX_ANCESTORS + 2 && path.length < MAX_ANCESTORS; i++) {
+    cur = axCopy(cur, 'AXParent');
+    if (!cur) break;
+    var pLabel = axString(cur, 'AXTitle') || axString(cur, 'AXDescription');
+    if (pLabel) path.push(pLabel.slice(0, 80));
+  }
+
+  return {
+    role: role,
+    subrole: axString(el, 'AXSubrole'),
+    label: label ? label.slice(0, 120) : null,
+    valueLength: valueLength,
+    path: path
+  };
+}
+
+/* ── periodic focus/selection sample via System Events ── */
 function attr(el, name) {
   try {
     if (!el) return null;
@@ -31,6 +190,23 @@ function attrLen(el, name) {
     var val = v.value();
     if (val === undefined || val === null) return null;
     return String(val).length;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Last chars of a text field — host diffs these when key monitors are silent. */
+var VALUE_TAIL_MAX = 160;
+function attrTail(el, name) {
+  try {
+    if (!el) return null;
+    var v = el.attributes.byName(name);
+    if (!v) return null;
+    var val = v.value();
+    if (val === undefined || val === null) return null;
+    var text = String(val);
+    if (!text.length) return '';
+    return text.length > VALUE_TAIL_MAX ? text.slice(-VALUE_TAIL_MAX) : text;
   } catch (e) {
     return null;
   }
@@ -118,28 +294,45 @@ function sample() {
     } catch (e3) {}
 
     var role = focused ? attr(focused, 'AXRole') : null;
-    var subrole = focused ? attr(focused, 'AXSubrole') : null;
-    var elementLabel = focused ? labelOf(focused) : null;
-    var valueLength = focused ? attrLen(focused, 'AXValue') : null;
-    var elementPath = focused ? collectAncestors(focused, 3) : [];
-    var selected = selectedLabels(win);
+    var secure = role === 'AXSecureTextField' || secureInputActive();
+    var valueLength = null;
+    var valueTail = null;
+    if (focused && TEXT_ROLES[role]) {
+      if (secure) {
+        valueLength = attrLen(focused, 'AXValue');
+      } else {
+        valueTail = attrTail(focused, 'AXValue');
+        if (valueTail == null) {
+          valueLength = null;
+        } else if (valueTail.length < VALUE_TAIL_MAX) {
+          valueLength = valueTail.length;
+        } else {
+          valueLength = attrLen(focused, 'AXValue');
+        }
+      }
+    }
 
     return {
+      k: 'ax',
       appName: appName,
       appBundleId: bundleId,
       windowTitle: windowTitle,
       documentTitle: documentTitle,
       elementRole: role,
-      elementSubrole: subrole,
-      elementLabel: elementLabel,
+      elementSubrole: focused ? attr(focused, 'AXSubrole') : null,
+      elementLabel: focused ? labelOf(focused) : null,
       valueLength: valueLength,
-      elementPath: elementPath,
-      selectedLabels: selected
+      valueTail: secure ? null : valueTail,
+      elementPath: focused ? collectAncestors(focused, MAX_ANCESTORS) : [],
+      selectedLabels: selectedLabels(win),
+      secure: secure
     };
   } catch (err) {
-    return { error: String(err) };
+    return { k: 'ax', error: String(err) };
   }
 }
+
+var lastKey = null;
 
 function keyOf(s) {
   if (!s || s.error) return null;
@@ -157,41 +350,276 @@ function keyOf(s) {
   ].join('\\x1f');
 }
 
-function emit() {
+function emitSample() {
   var s = sample();
-  if (!s || s.error) return;
+  if (!s) return;
+  if (s.error) {
+    emit({ k: 'fault', where: 'ax_sample' });
+    return;
+  }
   var k = keyOf(s);
   if (!k || k === lastKey) return;
   lastKey = k;
-  console.log(JSON.stringify(s));
+  emit(s);
 }
 
-function tick() {
-  emit();
-  delay(INTERVAL_MS / 1000);
-  tick();
+/* ── input monitors ── */
+var monitors = [];
+/* JXA GC's anonymous handler blocks unless we keep JS refs — tokens alone are not enough. */
+var monitorHandlers = [];
+var monitorsOk = false;
+var pendingSampleAt = 0;
+var keyCallbacks = 0;
+var clickCallbacks = 0;
+
+/** Ask for a fresh AX sample shortly after input, once the UI has settled. */
+function scheduleSample(delayMs) {
+  var at = Date.now() + delayMs;
+  if (!pendingSampleAt || at < pendingSampleAt) pendingSampleAt = at;
 }
 
-// Initial sample then loop. Pokes via stdin are handled by restarting emit from
-// the host writing a newline — we also poll stdin with a short delay.
-ObjC.import('Foundation');
-var stdin = $.NSFileHandle.fileHandleWithStandardInput;
-function drainPokes() {
+function onKey(evt) {
   try {
-    var data = stdin.availableData;
-    if (data && data.length > 0) {
-      lastKey = null;
-      emit();
+    keyCallbacks += 1;
+    var flags = 0;
+    try { flags = evt.modifierFlags; } catch (e) {}
+    var secure = secureInputActive();
+
+    var chars = null;
+    var base = null;
+    if (!secure) {
+      try { var c = evt.characters; if (c) chars = String(c.js); } catch (e2) {}
+      try { var b = evt.charactersIgnoringModifiers; if (b) base = String(b.js); } catch (e3) {}
     }
+
+    var front = frontApp();
+    emit({
+      k: 'key',
+      code: evt.keyCode,
+      chars: chars,
+      base: base,
+      cmd: (flags & $.NSEventModifierFlagCommand) !== 0,
+      opt: (flags & $.NSEventModifierFlagOption) !== 0,
+      ctrl: (flags & $.NSEventModifierFlagControl) !== 0,
+      shift: (flags & $.NSEventModifierFlagShift) !== 0,
+      repeat: evt.isARepeat ? true : false,
+      secure: secure,
+      app: front.name,
+      appBundleId: front.bundleId
+    });
+    scheduleSample(140);
+  } catch (err) {
+    emit({ k: 'fault', where: 'key' });
+  }
+}
+
+function pointOf(evt) {
+  try {
+    var loc = $.CGEventGetLocation(evt.CGEvent);
+    return { x: Math.round(loc.x), y: Math.round(loc.y) };
   } catch (e) {}
+  try {
+    /* Fallback: NSEvent coordinates are bottom-left origin; AX/CG are top-left. */
+    var m = $.NSEvent.mouseLocation;
+    var h = $.CGDisplayBounds($.CGMainDisplayID()).size.height;
+    return { x: Math.round(m.x), y: Math.round(h - m.y) };
+  } catch (e2) {}
+  return null;
 }
 
-function loop() {
-  emit();
-  drainPokes();
-  delay(INTERVAL_MS / 1000);
-  loop();
+function onMouse(evt, button) {
+  try {
+    clickCallbacks += 1;
+    var pt = pointOf(evt);
+    var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
+    var front = frontApp();
+    var count = 1;
+    try { count = evt.clickCount || 1; } catch (e) {}
+
+    emit({
+      k: 'click',
+      button: button,
+      count: count,
+      x: pt ? pt.x : null,
+      y: pt ? pt.y : null,
+      app: front.name,
+      appBundleId: front.bundleId,
+      role: target ? target.role : null,
+      subrole: target ? target.subrole : null,
+      label: target ? target.label : null,
+      valueLength: target ? target.valueLength : null,
+      path: target ? target.path : []
+    });
+    scheduleSample(160);
+  } catch (err) {
+    emit({ k: 'fault', where: 'click' });
+  }
 }
 
-loop();
+function installMonitors() {
+  try {
+    var keyHandler = function (evt) { onKey(evt); };
+    var mouseHandler = function (evt) {
+      var button = 'left';
+      try { if (evt.type === $.NSEventTypeRightMouseDown) button = 'right'; } catch (e) {}
+      onMouse(evt, button);
+    };
+    monitorHandlers.push(keyHandler);
+    monitorHandlers.push(mouseHandler);
+
+    var keyMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(
+      $.NSEventMaskKeyDown,
+      keyHandler
+    );
+    var mouseMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(
+      $.NSEventMaskLeftMouseDown | $.NSEventMaskRightMouseDown,
+      mouseHandler
+    );
+    /* Retain tokens AND handlers: releasing either removes/breaks the monitor. */
+    if (keyMonitor) monitors.push(keyMonitor);
+    if (mouseMonitor) monitors.push(mouseMonitor);
+    monitorsOk = monitors.length === 2;
+  } catch (e) {
+    monitorsOk = false;
+  }
+  return monitorsOk;
+}
+
+/* Global event monitors are delivered on a run loop, which needs an app object. */
+try {
+  $.NSApplication.sharedApplication;
+  /*
+   * Accessory (not Prohibited): some macOS versions silently drop NSEvent global
+   * monitor callbacks for prohibited-policy helpers even when AXIsProcessTrusted.
+   * Accessory stays dock-icon-free and never steals focus.
+   */
+  try {
+    $.NSApp.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  } catch (ePol) {
+    try { $.NSApp.setActivationPolicy($.NSApplicationActivationPolicyProhibited); } catch (e2) {}
+  }
+  try { $.NSApp.finishLaunching(); } catch (e3) {}
+} catch (e) {}
+
+var trusted = false;
+try { trusted = $.AXIsProcessTrusted() ? true : false; } catch (e) {}
+
+installMonitors();
+emit({ k: 'ready', trusted: trusted, monitors: monitorsOk, secureApi: secureBound });
+
+function sleepSeconds(seconds) {
+  try { $.NSThread.sleepForTimeInterval(seconds); } catch (e) {}
+}
+
+var nextSampleAt = 0;
+var nextStatsAt = Date.now() + 2500;
+/*
+ * Fallback when NSEvent global mouse monitors install but never fire (common for
+ * osascript helpers): poll pressedMouseButtons and synthesize click edges.
+ */
+var lastMouseButtons = 0;
+var pollClicks = 0;
+
+function readMouseButtons() {
+  /* NSEvent.pressedMouseButtons is often an NSNumber under JXA — coerce carefully. */
+  try {
+    var raw = $.NSEvent.pressedMouseButtons;
+    var n = Number(ObjC.unwrap(raw));
+    if (isFinite(n)) return n;
+    n = Number(raw);
+    if (isFinite(n)) return n;
+  } catch (e) {}
+  /* HID system state sees clicks even when NSEvent poll is blind. */
+  try {
+    var left = $.CGEventSourceButtonState(1, 0) ? 1 : 0;
+    var right = $.CGEventSourceButtonState(1, 1) ? 2 : 0;
+    return left | right;
+  } catch (e2) {}
+  return null;
+}
+
+function emitPolledClick(button) {
+  pollClicks += 1;
+  clickCallbacks += 1;
+  var pt = null;
+  try {
+    var m = $.NSEvent.mouseLocation;
+    var h = $.CGDisplayBounds($.CGMainDisplayID()).size.height;
+    pt = { x: Math.round(m.x), y: Math.round(h - m.y) };
+  } catch (ePt) {}
+  var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
+  var front = frontApp();
+  emit({
+    k: 'click',
+    button: button,
+    count: 1,
+    x: pt ? pt.x : null,
+    y: pt ? pt.y : null,
+    app: front.name,
+    appBundleId: front.bundleId,
+    role: target ? target.role : null,
+    subrole: target ? target.subrole : null,
+    label: target ? target.label : null,
+    valueLength: target ? target.valueLength : null,
+    path: target ? target.path : [],
+    via: 'poll'
+  });
+  scheduleSample(160);
+}
+
+function pollMouseButtons() {
+  try {
+    var buttons = readMouseButtons();
+    if (buttons === null) return;
+    var leftDown = (buttons & 1) !== 0;
+    var rightDown = (buttons & 2) !== 0;
+    var wasLeft = (lastMouseButtons & 1) !== 0;
+    var wasRight = (lastMouseButtons & 2) !== 0;
+    if (leftDown && !wasLeft) emitPolledClick('left');
+    if (rightDown && !wasRight) emitPolledClick('right');
+    lastMouseButtons = buttons;
+  } catch (ePoll) {}
+}
+
+while (true) {
+  if (monitorsOk) {
+    /*
+     * Pump the run loop so monitor callbacks fire. runUntilDate can return early
+     * when no input source is ready, so top up the remainder with a real sleep to
+     * avoid spinning the CPU.
+     */
+    var began = Date.now();
+    try {
+      $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(PUMP_SECONDS));
+    } catch (e) {
+      monitorsOk = false;
+    }
+    var spent = Date.now() - began;
+    if (spent < PUMP_SECONDS * 1000) sleepSeconds((PUMP_SECONDS * 1000 - spent) / 1000);
+  } else {
+    sleepSeconds(PUMP_SECONDS);
+  }
+
+  pollMouseButtons();
+
+  var now = Date.now();
+  if (pendingSampleAt && now >= pendingSampleAt) {
+    pendingSampleAt = 0;
+    emitSample();
+    nextSampleAt = now + SAMPLE_MS;
+  } else if (now >= nextSampleAt) {
+    emitSample();
+    nextSampleAt = now + SAMPLE_MS;
+  }
+  if (now >= nextStatsAt) {
+    emit({
+      k: 'stats',
+      keys: keyCallbacks,
+      clicks: clickCallbacks,
+      pollClicks: pollClicks,
+      monitors: monitorsOk
+    });
+    nextStatsAt = now + 2500;
+  }
+}
 `

@@ -296,7 +296,19 @@ export default function WorkflowDetail({
             <StepList
               steps={workflow.steps}
               initialEditStepId={initialEditStepId}
-              onChange={(updater) => onUpdate((w) => ({ ...w, steps: updater(w.steps) }))}
+              onChange={(updater) =>
+                onUpdate((w) => {
+                  const nextSteps = updater(w.steps)
+                  if (w.sessionId) {
+                    void window.ghostBridge?.automationMarkStale?.(
+                      w.sessionId,
+                      true,
+                      nextSteps.map((s) => ({ index: s.index, title: s.title }))
+                    )
+                  }
+                  return { ...w, steps: nextSteps, automationStale: true }
+                })
+              }
             />
           </div>
         </div>

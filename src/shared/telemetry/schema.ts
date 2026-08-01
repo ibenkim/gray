@@ -7,6 +7,7 @@ export const TelemetryEventTypeSchema = z.enum([
   'session_stopped',
   'navigation',
   'click',
+  'text_input',
   'field_completed',
   'selection_changed',
   'form_submitted',
@@ -120,7 +121,23 @@ export const TelemetryEventDataSchema = z
     inferred: z.boolean().optional(),
     verified: z.boolean().optional(),
     /** Relative path only — never base64, never absolute. */
-    keyframePath: z.string().max(300).optional()
+    keyframePath: z.string().max(300).optional(),
+    /**
+     * Text the user typed, after redaction. Absent when the target was a
+     * password/secure field or the text redacted down to nothing.
+     */
+    typedText: z.string().max(500).optional(),
+    /** True when redaction removed part of the typed text. */
+    typedTextRedacted: z.boolean().optional(),
+    /** Physical key presses behind a text_input event (includes edits). */
+    keyCount: z.number().int().nonnegative().optional(),
+    /** Key that ended the entry, e.g. "Return" or "Tab". */
+    submitKey: z.string().max(24).optional(),
+    clickButton: z.enum(['left', 'right']).optional(),
+    clickCount: z.number().int().positive().max(10).optional(),
+    /** Screen coordinates of a click (top-left origin), when observed. */
+    clickX: z.number().int().optional(),
+    clickY: z.number().int().optional()
   })
   .strict()
 
@@ -290,7 +307,13 @@ export const PolishedActionSchema = z
     clipboard: ClipboardDataSchema.optional(),
     keyframePath: z.string().max(300).optional(),
     inferred: z.boolean().optional(),
-    verified: z.boolean().optional()
+    verified: z.boolean().optional(),
+    /** Redacted text the user typed during this action, when captured. */
+    typedText: z.string().max(300).optional(),
+    clickButton: z.enum(['left', 'right']).optional(),
+    clickCount: z.number().int().positive().max(10).optional(),
+    clickX: z.number().int().optional(),
+    clickY: z.number().int().optional()
   })
   .strict()
 
@@ -390,6 +413,7 @@ export const AutomationOpKindSchema = z.enum([
   'open_app',
   'open_url',
   'activate_element',
+  'click_at',
   'keystroke',
   'type_text',
   'set_clipboard',
@@ -430,9 +454,17 @@ export const AutomationOpSchema = z
     elementPath: z.array(z.string().max(80)).max(3).nullable(),
     chord: z.string().max(64).nullable(),
     variableKey: z.string().max(40).nullable(),
+    /**
+     * Constant text to type when the recording showed the same text every time.
+     * Ignored when `variableKey` is set — variables always win.
+     */
+    literalText: z.string().max(500).nullable(),
     waitCondition: WaitForConditionSchema.nullable(),
     waitValue: z.string().max(200).nullable(),
-    prompt: z.string().max(300).nullable()
+    prompt: z.string().max(300).nullable(),
+    /** Absolute screen point for click_at (top-left origin). */
+    clickX: z.number().int().nullable(),
+    clickY: z.number().int().nullable()
   })
   .strict()
 

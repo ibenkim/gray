@@ -30,7 +30,8 @@ const MAX_TEXT = 100
  *
  * i = order, t = text, c = category code, ids = short evidence ids,
  * a = app, d = document, e = element label, r = role,
- * h = clipboard host, ct = clipboard type, inf = inferred, v = verified
+ * h = clipboard host, ct = clipboard type, tx = typed text,
+ * inf = inferred, v = verified
  */
 export type CompactModelAction = {
   i: number
@@ -43,6 +44,7 @@ export type CompactModelAction = {
   r?: string
   h?: string
   ct?: string
+  tx?: string
   inf?: true
   v?: true
 }
@@ -137,6 +139,8 @@ export function prepareWorkflowModelInput(
     if (el) row.e = el
     if (role && role !== 'AXUnknown') row.r = role
     if (host) row.h = host
+    const typed = sanitizeModelString(a.typedText ?? null, 120)
+    if (typed) row.tx = typed
     if (a.clipboard?.contentType && a.clipboard.contentType !== 'text') {
       row.ct = a.clipboard.contentType
     }

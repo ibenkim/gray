@@ -53,7 +53,22 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
         event.target?.accessibleLabel ||
         event.target?.analyticsId ||
         'a control'
-      return { time, text: `Selected ${name}`, appName }
+      const verb = event.type === 'click' ? 'Clicked' : 'Selected'
+      return { time, text: `${verb} ${name}`, appName }
+    }
+    case 'text_input': {
+      const typed = event.data?.typedText
+      const label = event.data?.elementLabel || event.target?.accessibleLabel
+      if (!typed) {
+        if (!event.data?.submitKey) return null
+        return {
+          time,
+          text: label ? `Pressed ${event.data.submitKey} in ${label}` : `Pressed ${event.data.submitKey}`,
+          appName
+        }
+      }
+      const shown = typed.length > 60 ? `${typed.slice(0, 59)}…` : typed
+      return { time, text: label ? `Typed "${shown}" into ${label}` : `Typed "${shown}"`, appName }
     }
     case 'field_completed': {
       const label =

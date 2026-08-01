@@ -16,8 +16,9 @@ type PermMeta = {
 }
 
 /**
- * Screen Recording is required. Accessibility is optional — richer click/focus/
- * selection capture via JXA. Microphone stays deferred until narration ships.
+ * Screen Recording is required. Accessibility is skippable but not really
+ * optional: clicks, typing and element labels all come from it, and automated
+ * playback cannot run without it. Microphone stays deferred until narration ships.
  */
 const PERMISSIONS: PermMeta[] = [
   {
@@ -38,18 +39,19 @@ const PERMISSIONS: PermMeta[] = [
   {
     id: 'accessibility',
     n: 2,
-    title: 'See what you click',
+    title: 'See what you click and type',
     allow: 'Allow accessibility',
     optional: true,
-    why: 'Richer recording — focused controls, selected conversations, and field activity. Optional; recording still works without it.',
-    deniedTitle: 'yuh can’t see controls yet',
-    deniedSub: 'Optional — turn it on in System Settings for richer workflows, or skip for now.',
+    why: 'This is what makes a recording usable — the buttons you click, the text you type, and the names of the fields you type it into. Without it a recording only shows which apps you opened, and yuh cannot replay the workflow for you.',
+    deniedTitle: 'yuh can’t see what you do yet',
+    deniedSub:
+      'Until this is on, recordings only capture app switches — not the clicks and typing needed to rebuild a workflow.',
     settingsPath: [
       'Open System Settings  →  Privacy & Security',
       'Click Accessibility',
       'Turn on yuh, then come back'
     ],
-    whyLine: 'See what you click — focused controls and selections (optional, richer recording)'
+    whyLine: 'See what you click and type — the clicks, text and field names that make a workflow replayable'
   }
 ]
 
@@ -143,7 +145,7 @@ export default function PermissionsStep({
         {denied
           ? current.deniedSub
           : current.optional
-            ? 'Optional — skip if you prefer thinner recordings.'
+            ? 'Strongly recommended — recordings capture very little without it.'
             : 'macOS asks once. yuh only looks when you start recording.'}
       </p>
 
@@ -167,7 +169,9 @@ export default function PermissionsStep({
               <span className="onb-block-num">{perm.n}</span>
               <span className="onb-block-title">{perm.title}</span>
               {denied && <span className="onb-block-tag">Needs your permission</span>}
-              {!denied && perm.optional && <span className="onb-block-optional">Optional</span>}
+              {!denied && perm.optional && (
+                <span className="onb-block-optional">Recommended</span>
+              )}
             </div>
 
             {denied ? (
@@ -285,8 +289,9 @@ function CompleteCard({
         <div className="onb-title">You’re all set</div>
       </div>
       <p className="onb-sub">
-        yuh can watch which app you’re in
-        {axGranted ? ' and what you click' : ''} — only when you start recording.
+        {axGranted
+          ? 'yuh can watch which app you’re in, what you click and what you type — only when you start recording.'
+          : 'yuh can only see which app you’re in. Turn on Accessibility later to capture clicks and typing, which workflows need to replay.'}
       </p>
 
       <div className="onb-gap-sm" />
@@ -298,7 +303,7 @@ function CompleteCard({
       </div>
       <div className="onb-row onb-row-done">
         <span className="onb-row-num">2</span>
-        <span className="onb-row-title">See what you click</span>
+        <span className="onb-row-title">See what you click and type</span>
         {axGranted ? <CheckGlyph /> : <span className="onb-dash" />}
       </div>
 

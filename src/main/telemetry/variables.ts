@@ -84,6 +84,7 @@ export function extractWorkflowVariables(
       (u) =>
         (u.type === 'focus_changed' ||
           u.type === 'paste_detected' ||
+          u.type === 'text_input' ||
           u.type === 'field_completed') &&
         (u.data?.appName ?? app) === app
     )

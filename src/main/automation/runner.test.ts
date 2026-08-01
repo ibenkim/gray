@@ -33,8 +33,13 @@ class FakeActuator implements Actuator {
     return { ok: true }
   }
 
-  async openUrl(url: string): Promise<ActuatorResult> {
-    this.calls.push(`openUrl:${url}`)
+  async openUrl(url: string, appName?: string | null): Promise<ActuatorResult> {
+    this.calls.push(`openUrl:${url}:${appName ?? ''}`)
+    return { ok: true }
+  }
+
+  async clickAt(x: number, y: number): Promise<ActuatorResult> {
+    this.calls.push(`clickAt:${x},${y}`)
     return { ok: true }
   }
 
@@ -61,6 +66,11 @@ class FakeActuator implements Actuator {
     this.calls.push(`type:${text}`)
     return { ok: true }
   }
+
+  setClipboard(text: string): ActuatorResult {
+    this.calls.push(`clipboard:${text}`)
+    return { ok: true }
+  }
 }
 
 function baseOp(
@@ -81,9 +91,12 @@ function baseOp(
     elementPath: null,
     chord: null,
     variableKey: null,
+    literalText: null,
     waitCondition: null,
     waitValue: null,
     prompt: null,
+    clickX: null,
+    clickY: null,
     ...overrides
   }
 }
@@ -203,6 +216,70 @@ describe('AutomationRunner', () => {
     expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
   })
 
+  it('set_clipboard uses recorded literalText when no variable is supplied', async () => {
+    const actuator = new FakeActuator()
+    const runner = new AutomationRunner({
+      runId: 'run_clip',
+      sessionId: 'tsess_1',
+      script: {
+        ops: [baseOp({ op: 'set_clipboard', literalText: 'paste me', label: null })],
+        warnings: []
+      },
+      actuator,
+      onEvent: () => {}
+    })
+    await runner.start()
+    expect(actuator.calls).toContain('clipboard:paste me')
+  })
+
+  it('types text recorded during the session when no variable is supplied', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [baseOp({ op: 'type_text', literalText: 'Q3 report', label: null })],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_literal',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      onEvent: (e) => events.push(e)
+    })
+    await runner.start()
+
+    expect(actuator.calls).toContain('type:Q3 report')
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+    // The ledger shows what will be typed.
+    expect(events.find((e) => e.type === 'stepStarted')).toMatchObject({
+      label: 'Type "Q3 report"'
+    })
+  })
+
+  it('prefers a supplied variable over recorded literal text', async () => {
+    const actuator = new FakeActuator()
+    const script: AutomationScript = {
+      ops: [
+        baseOp({ op: 'type_text', variableKey: 'subject', literalText: 'recorded', label: null })
+      ],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_var',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      variables: { subject: 'live value' },
+      onEvent: () => {}
+    })
+    await runner.start()
+
+    expect(actuator.calls).toContain('type:live value')
+    expect(actuator.calls).not.toContain('type:recorded')
+  })
+
   it('manual op holds for takeOver', async () => {
     const actuator = new FakeActuator()
     const events: RunEvent[] = []
@@ -212,6 +289,12 @@ describe('AutomationRunner', () => {
           op: 'manual',
           prompt: 'Finish this by hand',
           label: 'Manual'
+        }),
+        baseOp({
+          op: 'open_app',
+          stepOrder: 2,
+          appName: 'Slack',
+          label: 'Open Slack'
         })
       ],
       warnings: []
@@ -225,13 +308,49 @@ describe('AutomationRunner', () => {
       onEvent: (e) => {
         events.push(e)
         if (e.type === 'stepFailed' && e.manual) {
-          setTimeout(() => runner.control({ kind: 'takeOver' }), 5)
+          setTimeout(() => {
+            runner.control({ kind: 'takeOver' })
+            // Resume after the user finishes the takeover work.
+            setTimeout(() => runner.control({ kind: 'resume' }), 5)
+          }, 5)
         }
       }
     })
 
     await runner.start()
     expect(events.some((e) => e.type === 'stepFailed' && e.manual)).toBe(true)
+    expect(actuator.calls).toContain('activateApp:Slack')
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+  })
+
+  it('activate_element falls back to Cmd+L for address bar', async () => {
+    const actuator = new FakeActuator()
+    actuator.failNext = 'press'
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({
+          op: 'activate_element',
+          elementLabel: 'Address and search bar',
+          elementRole: 'AXTextField',
+          appName: 'Google Chrome',
+          label: 'Focus omnibox'
+        })
+      ],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_addr',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      onEvent: (e) => events.push(e)
+    })
+
+    await runner.start()
+    expect(actuator.calls).toContain('press:Address and search bar')
+    expect(actuator.calls).toContain('keystroke:Cmd+L')
     expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
   })
 

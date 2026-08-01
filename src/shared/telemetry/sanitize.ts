@@ -125,6 +125,75 @@ export function sanitizeFieldValue(opts: {
   return result
 }
 
+const MAX_TYPED = 500
+
+/**
+ * Structural redactions applied to captured keystrokes. Ordered: the most
+ * specific patterns run first so a token is not partly eaten by a later rule.
+ */
+const TYPED_REDACTIONS: Array<{ re: RegExp; with: string }> = [
+  { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, with: '[email]' },
+  // Vendor-prefixed credentials (OpenAI, GitHub, Slack, Stripe, …).
+  {
+    re: /\b(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|xox[abpsr])[-_][A-Za-z0-9_-]{10,}/gi,
+    with: '[token]'
+  },
+  // Bare high-entropy strings: long, mixed letters *and* digits.
+  {
+    re: /\b(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b/g,
+    with: '[token]'
+  }
+]
+
+/** Digit runs long enough to be a card / account / SSN, ignoring separators. */
+const DIGIT_GROUP_RE = /\d(?:[\d\s-]{7,}\d)?/g
+
+/**
+ * Redact a captured keystroke sequence so it is safe to persist.
+ *
+ * Keeps ordinary prose (that is the point — the recording needs to know what was
+ * typed) while removing credentials, addresses, and long numbers. Callers must
+ * still drop the text entirely for secure/sensitive fields.
+ */
+export function sanitizeTypedText(raw: string | undefined | null): {
+  text?: string
+  redacted: boolean
+} {
+  if (raw == null) return { redacted: false }
+
+  // Normalize whitespace/control characters into single spaces.
+  let text = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) return { redacted: false }
+
+  let redacted = false
+
+  for (const rule of TYPED_REDACTIONS) {
+    text = text.replace(rule.re, () => {
+      redacted = true
+      return rule.with
+    })
+  }
+
+  text = text.replace(DIGIT_GROUP_RE, (match) => {
+    const digits = match.replace(/\D/g, '')
+    if (digits.length < 9) return match
+    redacted = true
+    // Preserve surrounding spacing so the sentence still reads correctly.
+    const lead = /^\s/.test(match) ? ' ' : ''
+    const tail = /\s$/.test(match) ? ' ' : ''
+    return `${lead}[number]${tail}`
+  })
+
+  text = text.replace(/\s+/g, ' ').trim()
+  if (!text) return { redacted }
+
+  if (text.length > MAX_TYPED) {
+    text = `${text.slice(0, MAX_TYPED - 1)}…`
+  }
+
+  return { text, redacted }
+}
+
 /** Strip query/hash and keep host + limited path from a URL. */
 export function sanitizeUrl(raw?: string | null): { urlHost?: string; urlPath?: string } {
   if (!raw) return {}
@@ -228,6 +297,33 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
       }
     }
 
+    // Typed text: drop outright for sensitive targets, otherwise re-redact.
+    if (data.typedText != null) {
+      const targetSensitive =
+        isSensitiveField({
+          label: data.elementLabel ?? target?.accessibleLabel ?? target?.visibleLabel,
+          fieldType: data.field?.fieldType ?? target?.fieldType,
+          analyticsId: target?.analyticsId
+        }) ||
+        data.elementRole === 'AXSecureTextField' ||
+        data.field?.valueCategory === 'sensitive' ||
+        data.field?.valueCategory === 'redacted'
+
+      if (targetSensitive) {
+        delete data.typedText
+        data.typedTextRedacted = true
+      } else {
+        const { text, redacted } = sanitizeTypedText(data.typedText)
+        if (text) {
+          data.typedText = text
+          if (redacted) data.typedTextRedacted = true
+        } else {
+          delete data.typedText
+          if (redacted) data.typedTextRedacted = true
+        }
+      }
+    }
+
     if (data.field) {
       const field = { ...data.field }
       const sensitive =
@@ -289,6 +385,10 @@ export function shouldDropEvent(event: TelemetryEvent): boolean {
     !event.data?.appName &&
     !event.page
   ) {
+    return true
+  }
+  // Typing that redacted away entirely carries no signal beyond "something happened".
+  if (event.type === 'text_input' && !event.data?.typedText && !event.data?.submitKey) {
     return true
   }
   return false
