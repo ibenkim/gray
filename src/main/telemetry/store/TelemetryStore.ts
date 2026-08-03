@@ -10,6 +10,7 @@ import type {
   StoredWorkflowResult,
   TelemetryEvent,
   TelemetrySessionMeta,
+  TokenUsage,
   WorkflowVariable
 } from '../../../shared/telemetry/schema'
 
@@ -40,7 +41,12 @@ export interface TelemetryStore {
   readSessionEvents(sessionId: string): Promise<TelemetryEvent[]>
   readPolishedSession(sessionId: string): Promise<PolishedSession | null>
   savePolishedSession(sessionId: string, polished: PolishedSession): Promise<void>
-  saveWorkflow(sessionId: string, workflow: ExtractedWorkflow, model: string): Promise<StoredWorkflowResult>
+  saveWorkflow(
+    sessionId: string,
+    workflow: ExtractedWorkflow,
+    model: string,
+    opts?: { usage?: TokenUsage }
+  ): Promise<StoredWorkflowResult>
   getWorkflow(sessionId: string): Promise<StoredWorkflowResult | null>
   getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null>
   updateSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<TelemetrySessionMeta>
@@ -51,7 +57,7 @@ export interface TelemetryStore {
     sessionId: string,
     script: AutomationScript,
     model: string,
-    opts?: { stale?: boolean }
+    opts?: { stale?: boolean; usage?: TokenUsage }
   ): Promise<StoredAutomationScript>
   getAutomationScript?(sessionId: string): Promise<StoredAutomationScript | null>
   markAutomationStale?(sessionId: string, stale: boolean): Promise<StoredAutomationScript | null>

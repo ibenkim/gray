@@ -24,7 +24,9 @@ import {
   type StoredWorkflowResult,
   type TelemetryEvent,
   type TelemetrySessionMeta,
-  type WorkflowVariable
+  type TokenUsage,
+  type WorkflowVariable,
+  normalizeExtractedWorkflow
 } from '../../../shared/telemetry/schema'
 import { redactEvent, shouldDropEvent } from '../../../shared/telemetry/sanitize'
 import type {
@@ -213,7 +215,8 @@ export class FileTelemetryStore implements TelemetryStore {
   async saveWorkflow(
     sessionId: string,
     workflow: ExtractedWorkflow,
-    model: string
+    model: string,
+    opts?: { usage?: TokenUsage }
   ): Promise<StoredWorkflowResult> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
@@ -222,7 +225,8 @@ export class FileTelemetryStore implements TelemetryStore {
       schemaVersion: SCHEMA_VERSION,
       extractedAt: new Date().toISOString(),
       model,
-      workflow
+      workflow,
+      usage: opts?.usage
     }
     const validated = StoredWorkflowResultSchema.parse(stored)
     this.writeJson(this.workflowPath(id), validated)
@@ -235,7 +239,10 @@ export class FileTelemetryStore implements TelemetryStore {
     const path = this.workflowPath(id)
     if (!existsSync(path)) return null
     try {
-      return StoredWorkflowResultSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+      const normalized = normalizeExtractedWorkflow(raw.workflow)
+      if (!normalized) return null
+      return StoredWorkflowResultSchema.parse({ ...raw, workflow: normalized })
     } catch {
       console.error('[telemetry] failed to read workflow')
       return null
@@ -272,7 +279,7 @@ export class FileTelemetryStore implements TelemetryStore {
     sessionId: string,
     script: AutomationScript,
     model: string,
-    opts: { stale?: boolean } = {}
+    opts: { stale?: boolean; usage?: TokenUsage } = {}
   ): Promise<StoredAutomationScript> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
@@ -282,7 +289,8 @@ export class FileTelemetryStore implements TelemetryStore {
       compiledAt: new Date().toISOString(),
       model,
       script,
-      stale: opts.stale ?? false
+      stale: opts.stale ?? false,
+      usage: opts.usage
     }
     const validated = StoredAutomationScriptSchema.parse(stored)
     this.writeJson(this.automationPath(id), validated)

@@ -13,8 +13,8 @@ import {
 } from '../../../shared/telemetry/schema'
 import type { TelemetryConfig } from '../config'
 import { TelemetryProcessingError, mapToProcessingError } from '../errors'
-import type { OpenAIResponsesClient } from '../workflow'
 import type { TelemetryStore } from '../store/TelemetryStore'
+import { logTokenUsage, usageFromResponse, type OpenAIResponsesClient } from '../workflow'
 import { AUTOMATION_COMPILE_INSTRUCTIONS } from './automationPrompt'
 import {
   allowedLiteralsFromPolished,
@@ -255,12 +255,145 @@ export function validateAndGroundScript(
   const withInferred = recoverInferredActions(withClicks, workflow, polished, warnings)
   const withIntent = applyEditorIntentToOps(withInferred, workflow, polished, warnings)
   const withInjected = injectClickOpsFromEvidence(withIntent, workflow, polished, warnings)
-  const withNav = collapseRedundantBrowserNav(withInjected, warnings)
+  const withWaits = injectWaitOpsFromStepSemantics(withInjected, workflow, polished, warnings)
+  const withNav = collapseRedundantBrowserNav(withWaits, warnings)
 
   return AutomationScriptSchema.parse({
     ops: withNav,
     warnings: warnings.slice(0, 20)
   })
+}
+
+/**
+ * Deterministically add wait_for ops from step.completionCheck / expectedChange
+ * and polished waitedMs when the compile model omitted them.
+ */
+export function injectWaitOpsFromStepSemantics(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  const out = [...ops]
+  const byStep = new Map<number, AutomationOp[]>()
+  for (const op of out) {
+    const list = byStep.get(op.stepOrder) ?? []
+    list.push(op)
+    byStep.set(op.stepOrder, list)
+  }
+
+  for (const step of workflow.steps) {
+    const stepOps = byStep.get(step.order) ?? []
+    if (stepOps.some((o) => o.op === 'wait_for')) continue
+
+    const hint = [step.completionCheck, step.expectedChange].filter(Boolean).join(' ')
+    const wait = inferWaitFromText(hint, step.appName)
+    if (!wait) {
+      // Fall back to polished waitedMs on evidence actions.
+      const waited = polished.actions
+        .filter((a) => step.evidenceEventIds.some((id) => a.sourceEventIds.includes(id)))
+        .map((a) => a.waitedMs ?? 0)
+        .reduce((m, v) => Math.max(m, v), 0)
+      if (waited >= 5000 && step.appName) {
+        const insertAt = out.findIndex((o) => o.stepOrder === step.order)
+        const waitOp: AutomationOp = {
+          op: 'wait_for',
+          stepOrder: step.order,
+          evidenceEventIds: step.evidenceEventIds,
+          confidence: Math.min(step.confidence, 0.7),
+          timeoutMs: Math.min(60_000, Math.max(5_000, waited)),
+          label: `Wait for ${step.appName}`,
+          appName: step.appName,
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: 'app_frontmost',
+          waitValue: step.appName,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+        if (insertAt >= 0) out.splice(insertAt + stepOps.length, 0, waitOp)
+        else out.push(waitOp)
+        warnings.push(`Injected wait_for for step ${step.order} from waitedMs`)
+      }
+      continue
+    }
+
+    const insertAt = out.findIndex((o) => o.stepOrder === step.order)
+    const waitOp: AutomationOp = {
+      op: 'wait_for',
+      stepOrder: step.order,
+      evidenceEventIds: step.evidenceEventIds,
+      confidence: Math.min(step.confidence, 0.75),
+      timeoutMs: 15_000,
+      label: wait.label,
+      appName: step.appName,
+      appBundleId: null,
+      url: null,
+      urlVariableKey: null,
+      elementRole: wait.condition === 'element_exists' ? step.targetRole : null,
+      elementLabel: wait.condition === 'element_exists' ? step.targetLabel : null,
+      elementPath: null,
+      chord: null,
+      variableKey: null,
+      literalText: null,
+      waitCondition: wait.condition,
+      waitValue: wait.value,
+      prompt: null,
+      clickX: null,
+      clickY: null
+    }
+    if (insertAt >= 0) out.splice(insertAt + stepOps.length, 0, waitOp)
+    else out.push(waitOp)
+    warnings.push(`Injected wait_for for step ${step.order} from completionCheck/expectedChange`)
+  }
+
+  return out
+}
+
+function inferWaitFromText(
+  text: string,
+  appName: string | null
+): { condition: 'app_frontmost' | 'window_title_contains' | 'element_exists'; value: string; label: string } | null {
+  if (!text.trim()) return null
+  const windowMatch = text.match(/window(?: title)?(?:\s+contains)?\s+[“"']?([^”"']+)[”"']?/i)
+  if (windowMatch?.[1]) {
+    return {
+      condition: 'window_title_contains',
+      value: windowMatch[1].slice(0, 200),
+      label: `Wait for window ${windowMatch[1].slice(0, 40)}`
+    }
+  }
+  const elementMatch = text.match(/(?:element|field|button|control)\s+[“"']?([^”"']+)[”"']?/i)
+  if (elementMatch?.[1]) {
+    return {
+      condition: 'element_exists',
+      value: elementMatch[1].slice(0, 200),
+      label: `Wait for ${elementMatch[1].slice(0, 40)}`
+    }
+  }
+  if (/frontmost|app (is )?open|application/i.test(text) && appName) {
+    return {
+      condition: 'app_frontmost',
+      value: appName,
+      label: `Wait for ${appName}`
+    }
+  }
+  if (/load|appear|finish|ready|cleared/i.test(text) && appName) {
+    return {
+      condition: 'app_frontmost',
+      value: appName,
+      label: `Wait for ${appName}`
+    }
+  }
+  return null
 }
 
 /** Well-known destinations when capture lacked a concrete URL. */
@@ -1097,7 +1230,20 @@ function prepareCompileInput(
         category: s.category,
         appName: s.appName,
         evidenceEventIds: s.evidenceEventIds,
-        confidence: s.confidence
+        confidence: s.confidence,
+        objective: s.objective ?? null,
+        actionType: s.actionType ?? null,
+        targetRole: s.targetRole ?? null,
+        targetLabel: s.targetLabel ?? null,
+        inputKind: s.inputKind ?? null,
+        inputVariableKey: s.inputVariableKey ?? null,
+        inputLiteral: s.inputLiteral ?? null,
+        preconditions: s.preconditions ?? null,
+        expectedChange: s.expectedChange ?? null,
+        completionCheck: s.completionCheck ?? null,
+        dependsOnSteps: s.dependsOnSteps ?? null,
+        retryHint: s.retryHint ?? null,
+        needsClarification: s.needsClarification ?? null
       }))
     },
     actions: polished.actions.map((a) => {
@@ -1117,6 +1263,12 @@ function prepareCompileInput(
         elementLabel: a.elementLabel ?? null,
         elementRole: a.elementRole ?? null,
         typedText: a.typedText ?? null,
+        inputKind: a.inputKind ?? null,
+        targetResolution: a.targetResolution ?? null,
+        waitedMs: a.waitedMs ?? null,
+        screenBeforeId: a.screenBeforeId ?? null,
+        screenAfterId: a.screenAfterId ?? null,
+        semanticOp: a.semanticOp ?? null,
         clickX: a.clickX ?? null,
         clickY: a.clickY ?? null,
         clickButton: a.clickButton ?? null,
@@ -1169,7 +1321,10 @@ export async function compileAutomationScript(
   const client = createClient(config.openaiApiKey)
   const model = config.openaiModel
 
-  let response: { output_parsed: unknown }
+  let response: {
+    output_parsed: unknown
+    usage?: { input_tokens?: number; output_tokens?: number }
+  }
   try {
     response = await client.responses.parse({
       model,
@@ -1194,6 +1349,9 @@ export async function compileAutomationScript(
     throw mapToProcessingError(err)
   }
 
+  const usage = usageFromResponse(response)
+  logTokenUsage('automation_compile', usage)
+
   const parsed = response.output_parsed
   if (!parsed) {
     throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
@@ -1210,5 +1368,5 @@ export async function compileAutomationScript(
     polished,
     deps.clipboardByHash
   )
-  return store.saveAutomationScript(sessionId, grounded, model, { stale: false })
+  return store.saveAutomationScript(sessionId, grounded, model, { stale: false, usage })
 }

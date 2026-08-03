@@ -138,9 +138,8 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
     expect(input.acts[0].d).toBe('Gray Design')
     expect(input.vars?.[0].k).toBe('link')
     expect(input.vars?.[0].ex).toBe('figma.com/file/abc')
-    // Compact: no null fields, no screens/clipboardEvents arrays
+    // Compact: no null fields, no legacy clipboardEvents arrays
     expect(json).not.toContain('null')
-    expect(json).not.toContain('screens')
     expect(json).not.toContain('clipboardEvents')
     expect(json).not.toContain('clipboardHost')
   })
@@ -152,5 +151,83 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
     expect(input.acts[0]).not.toHaveProperty('v')
     expect(input.mode).toBe('full-screen')
     expect(typeof input.dur).toBe('number')
+  })
+
+  it('packs segments/screens and elides low-value focus noise under budget', () => {
+    const actions = Array.from({ length: 60 }, (_, i) => {
+      const order = i + 1
+      if (i === 58) {
+        return {
+          order,
+          text: 'Activated Send',
+          category: 'submission' as const,
+          timestamp: `2026-07-29T04:28:${String(i).padStart(2, '0')}.000Z`,
+          sourceEventIds: [`tevt_sub`],
+          appName: 'Messages',
+          verified: true,
+          semanticOp: 'submit' as const
+        }
+      }
+      return {
+        order,
+        text: `Focused field ${i}`,
+        category: 'interaction' as const,
+        timestamp: `2026-07-29T04:28:${String(Math.min(i, 59)).padStart(2, '0')}.000Z`,
+        sourceEventIds: [`tevt_${i}`],
+        appName: 'Messages',
+        elementLabel: `field ${i}`
+      }
+    })
+    const long: PolishedSession = {
+      ...polished,
+      actions,
+      segments: [
+        {
+          id: 'seg_1',
+          index: 0,
+          kind: 'interaction',
+          appName: 'Messages',
+          startMs: 0,
+          endMs: 60_000,
+          actionOrders: actions.map((a) => a.order)
+        }
+      ],
+      screens: [{ id: 'ss_1', appName: 'Messages' }]
+    }
+    const prepared = prepareWorkflowModelInput(session, long)
+    expect(prepared.body.elided).toBe(true)
+    expect(prepared.body.acts.length).toBeLessThanOrEqual(48)
+    expect(prepared.body.acts.some((a) => a.v === true || a.c === 'sub')).toBe(true)
+    expect(prepared.body.segs?.length).toBeGreaterThan(0)
+    // Token reduction vs dumping full polished actions (timestamps + long ids).
+    const naive = JSON.stringify(long.actions)
+    expect(prepared.body.acts.length).toBeLessThan(long.actions.length)
+    expect(prepared.estimatedChars).toBeLessThan(naive.length)
+  })
+
+  it('dedupes redundant prose when structured fields exist', () => {
+    const rich: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Typed "hello" into Message',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_type'],
+          appName: 'Messages',
+          elementLabel: 'Message',
+          elementRole: 'AXTextArea',
+          typedText: 'hello',
+          inputKind: 'text',
+          targetResolution: 'ax'
+        }
+      ]
+    }
+    const input = createWorkflowModelInput(session, rich)
+    expect(input.acts[0].tx).toBe('hello')
+    expect(input.acts[0].e).toBe('Message')
+    // Prose restates structured fields — omit t.
+    expect(input.acts[0].t).toBeUndefined()
   })
 })

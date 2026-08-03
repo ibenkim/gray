@@ -9,6 +9,13 @@ import type { InteractionPartial, InteractionProvider } from '../providers'
 import { looksLikeShellNoise } from '../automation/groundText'
 import { JXA_SENSOR_SCRIPT } from './jxaScript'
 
+export type JxaElementBounds = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export type JxaSample = {
   appName?: string
   appBundleId?: string
@@ -24,6 +31,9 @@ export type JxaSample = {
   selectedLabels?: string[]
   secure?: boolean
   error?: string
+  bounds?: JxaElementBounds | null
+  dialogs?: string[]
+  errorState?: string | null
 }
 
 /**
@@ -68,8 +78,30 @@ export type JxaClickEvent = {
   label?: string | null
   valueLength?: number | null
   path?: string[]
+  bounds?: JxaElementBounds | null
   /** 'poll' when synthesized from pressedMouseButtons; omit for NSEvent monitor. */
   via?: string | null
+}
+
+function sanitizeBounds(raw: JxaElementBounds | null | undefined): JxaElementBounds | undefined {
+  if (!raw) return undefined
+  if (
+    typeof raw.x !== 'number' ||
+    typeof raw.y !== 'number' ||
+    typeof raw.width !== 'number' ||
+    typeof raw.height !== 'number'
+  ) {
+    return undefined
+  }
+  if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y)) return undefined
+  if (!Number.isFinite(raw.width) || !Number.isFinite(raw.height)) return undefined
+  if (raw.width < 0 || raw.height < 0) return undefined
+  return {
+    x: Math.round(raw.x),
+    y: Math.round(raw.y),
+    width: Math.round(raw.width),
+    height: Math.round(raw.height)
+  }
 }
 
 export type JxaCapabilities = {
@@ -157,6 +189,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   private faults = 0
   private lastFocusKey: string | null = null
   private lastSelectionKey: string | null = null
+  private lastDialogKey: string | null = null
   private lastField: {
     label?: string
     role?: string
@@ -225,6 +258,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.onEvent = onEvent
     this.lastFocusKey = null
     this.lastSelectionKey = null
+    this.lastDialogKey = null
     this.lastField = null
     this.pendingActivation = null
     this.faults = 0
@@ -397,6 +431,12 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       .map((l) => sanitizeLabel(l))
       .filter((l): l is string => !!l)
       .slice(0, 5)
+    const dialogs = (sample.dialogs ?? [])
+      .map((d) => sanitizeLabel(d))
+      .filter((d): d is string => !!d)
+      .slice(0, 8)
+    const errorState = sanitizeLabel(sample.errorState ?? undefined)
+    const elementBounds = sanitizeBounds(sample.bounds)
     const valueLength =
       typeof sample.valueLength === 'number' && sample.valueLength >= 0
         ? sample.valueLength
@@ -411,7 +451,10 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementSubrole,
       elementLabel,
       elementPath: elementPath.length ? elementPath : undefined,
-      selectedLabels: selectedLabels.length ? selectedLabels : undefined
+      selectedLabels: selectedLabels.length ? selectedLabels : undefined,
+      dialogs: dialogs.length ? dialogs : undefined,
+      errorState,
+      elementBounds
     }
 
     // Focus context drives keystroke attribution. Deliberately excludes
@@ -457,6 +500,23 @@ export class JxaAccessibilityProvider implements InteractionProvider {
               : undefined
         }
       })
+    }
+
+    // Surface dialogs/sheets as error signals when they newly appear.
+    const dialogKey = dialogs.join('|')
+    if (dialogKey && dialogKey !== this.lastDialogKey) {
+      this.lastDialogKey = dialogKey
+      this.onEvent({
+        type: 'error',
+        data: {
+          ...baseData,
+          message: errorState || dialogs[0],
+          errorState: errorState || dialogs[0],
+          dialogs
+        }
+      })
+    } else if (!dialogKey) {
+      this.lastDialogKey = null
     }
 
     this.ingestValueTail(sample, nextContextKey)
@@ -773,7 +833,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         clickButton: event.button === 'right' ? 'right' : 'left',
         clickCount: clampClickCount(event.count),
         clickX,
-        clickY
+        clickY,
+        elementBounds: sanitizeBounds(event.bounds)
       }
     })
   }

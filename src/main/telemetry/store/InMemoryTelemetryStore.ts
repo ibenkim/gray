@@ -89,14 +89,16 @@ export class InMemoryTelemetryStore implements TelemetryStore {
   async saveWorkflow(
     sessionId: string,
     workflow: ExtractedWorkflow,
-    model: string
+    model: string,
+    opts?: { usage?: import('../../../shared/telemetry/schema').TokenUsage }
   ): Promise<StoredWorkflowResult> {
     const stored: StoredWorkflowResult = {
       sessionId,
       schemaVersion: SCHEMA_VERSION,
       extractedAt: new Date().toISOString(),
       model,
-      workflow
+      workflow,
+      usage: opts?.usage
     }
     this.workflows.set(sessionId, stored)
     return stored
@@ -125,7 +127,7 @@ export class InMemoryTelemetryStore implements TelemetryStore {
     sessionId: string,
     script: AutomationScript,
     model: string,
-    opts: { stale?: boolean } = {}
+    opts: { stale?: boolean; usage?: import('../../../shared/telemetry/schema').TokenUsage } = {}
   ): Promise<StoredAutomationScript> {
     const stored: StoredAutomationScript = {
       sessionId,
@@ -133,7 +135,8 @@ export class InMemoryTelemetryStore implements TelemetryStore {
       compiledAt: new Date().toISOString(),
       model,
       script,
-      stale: opts.stale ?? false
+      stale: opts.stale ?? false,
+      usage: opts.usage
     }
     this.automation.set(sessionId, stored)
     return stored

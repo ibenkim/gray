@@ -36,6 +36,7 @@ export type InteractionPartial = {
     | 'form_submitted'
     | 'focus_changed'
     | 'element_activated'
+    | 'error'
   >
   target?: TelemetryTarget
   data?: TelemetryEvent['data']

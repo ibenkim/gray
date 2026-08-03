@@ -89,6 +89,78 @@ export const ClipboardDataSchema = z
 
 export type ClipboardData = z.infer<typeof ClipboardDataSchema>
 
+export const ElementBoundsSchema = z
+  .object({
+    x: z.number().int(),
+    y: z.number().int(),
+    width: z.number().int().nonnegative(),
+    height: z.number().int().nonnegative()
+  })
+  .strict()
+
+export type ElementBounds = z.infer<typeof ElementBoundsSchema>
+
+export const TargetResolutionSchema = z.enum(['ax', 'coords', 'none'])
+export type TargetResolution = z.infer<typeof TargetResolutionSchema>
+
+export const SemanticOpSchema = z.enum([
+  'copy',
+  'paste',
+  'save',
+  'submit',
+  'undo',
+  'redo',
+  'select_all',
+  'cut',
+  'other'
+])
+export type SemanticOp = z.infer<typeof SemanticOpSchema>
+
+export const ScreenAfterDeltaSchema = z
+  .object({
+    appName: z.string().max(120).optional(),
+    documentTitle: z.string().max(200).optional(),
+    urlHost: z.string().max(200).optional()
+  })
+  .strict()
+
+export type ScreenAfterDelta = z.infer<typeof ScreenAfterDeltaSchema>
+
+export const ScreenStateRefSchema = z
+  .object({
+    id: z.string().max(80),
+    appName: z.string().max(120).optional(),
+    documentTitle: z.string().max(200).optional(),
+    urlHost: z.string().max(200).optional()
+  })
+  .strict()
+
+export type ScreenStateRef = z.infer<typeof ScreenStateRefSchema>
+
+export const ActivitySegmentKindSchema = z.enum([
+  'navigation',
+  'interaction',
+  'data_transfer',
+  'waiting',
+  'review'
+])
+export type ActivitySegmentKind = z.infer<typeof ActivitySegmentKindSchema>
+
+export const ActivitySegmentSchema = z
+  .object({
+    id: z.string().min(1).max(80),
+    index: z.number().int().nonnegative(),
+    kind: ActivitySegmentKindSchema,
+    appName: z.string().max(120).optional(),
+    documentTitle: z.string().max(200).optional(),
+    startMs: z.number().int().nonnegative(),
+    endMs: z.number().int().nonnegative(),
+    actionOrders: z.array(z.number().int().positive()).min(1)
+  })
+  .strict()
+
+export type ActivitySegment = z.infer<typeof ActivitySegmentSchema>
+
 export const TelemetryEventDataSchema = z
   .object({
     appName: z.string().max(120).optional(),
@@ -137,7 +209,9 @@ export const TelemetryEventDataSchema = z
     clickCount: z.number().int().positive().max(10).optional(),
     /** Screen coordinates of a click (top-left origin), when observed. */
     clickX: z.number().int().optional(),
-    clickY: z.number().int().optional()
+    clickY: z.number().int().optional(),
+    /** Accessibility frame of the target element (top-left origin), when observed. */
+    elementBounds: ElementBoundsSchema.optional()
   })
   .strict()
 
@@ -313,7 +387,22 @@ export const PolishedActionSchema = z
     clickButton: z.enum(['left', 'right']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
     clickX: z.number().int().optional(),
-    clickY: z.number().int().optional()
+    clickY: z.number().int().optional(),
+    /** How well the click/activation target was resolved. */
+    targetResolution: TargetResolutionSchema.optional(),
+    /** Semantic classification of typed/field values (never raw secrets). */
+    inputKind: ValueCategorySchema.optional(),
+    /** Screen-state id observed immediately before this action. */
+    screenBeforeId: z.string().max(80).optional(),
+    /** Screen-state id observed as a result of this action. */
+    screenAfterId: z.string().max(80).optional(),
+    /** Changed-only fields after the action (omit unchanged). */
+    screenAfter: ScreenAfterDeltaSchema.optional(),
+    /** Idle/wait duration preceding this action (ms). */
+    waitedMs: z.number().int().nonnegative().optional(),
+    /** Semantic shortcut / clipboard operation when known. */
+    semanticOp: SemanticOpSchema.optional(),
+    elementBounds: ElementBoundsSchema.optional()
   })
   .strict()
 
@@ -328,7 +417,11 @@ export const PolishedSessionSchema = z
       min: z.number().int().nonnegative(),
       max: z.number().int().nonnegative()
     }),
-    actions: z.array(PolishedActionSchema)
+    actions: z.array(PolishedActionSchema),
+    /** Activity groups for hierarchical model packing. */
+    segments: z.array(ActivitySegmentSchema).optional(),
+    /** Compact screen-state reference table used by segments/actions. */
+    screens: z.array(ScreenStateRefSchema).optional()
   })
   .strict()
 
@@ -344,6 +437,39 @@ export const WorkflowStepCategorySchema = z.enum([
   'other'
 ])
 
+export const WorkflowActionTypeSchema = z.enum([
+  'click',
+  'type',
+  'paste',
+  'copy',
+  'navigate',
+  'select',
+  'submit',
+  'shortcut',
+  'wait',
+  'activate',
+  'other'
+])
+export type WorkflowActionType = z.infer<typeof WorkflowActionTypeSchema>
+
+export const WorkflowRetryHintSchema = z.enum([
+  'none',
+  'retry_once',
+  'retry_until',
+  'ask_user',
+  'skip'
+])
+export type WorkflowRetryHint = z.infer<typeof WorkflowRetryHintSchema>
+
+export const WorkflowStepAlternativeSchema = z
+  .object({
+    interpretation: z.string().min(1).max(300),
+    confidence: z.number().min(0).max(1)
+  })
+  .strict()
+
+export type WorkflowStepAlternative = z.infer<typeof WorkflowStepAlternativeSchema>
+
 export const WorkflowStepSchema = z
   .object({
     order: z.number().int().positive(),
@@ -351,15 +477,32 @@ export const WorkflowStepSchema = z
     category: WorkflowStepCategorySchema,
     appName: z.string().max(120).nullable(),
     evidenceEventIds: z.array(z.string()).min(1),
-    confidence: z.number().min(0).max(1)
+    confidence: z.number().min(0).max(1),
+    /** OpenAI structured outputs require nullable (not optional) for new fields. */
+    objective: z.string().max(300).nullable(),
+    actionType: WorkflowActionTypeSchema.nullable(),
+    targetRole: z.string().max(64).nullable(),
+    targetLabel: z.string().max(120).nullable(),
+    inputKind: ValueCategorySchema.nullable(),
+    inputVariableKey: z.string().max(40).nullable(),
+    inputLiteral: z.string().max(300).nullable(),
+    preconditions: z.array(z.string().max(200)).max(6).nullable(),
+    expectedChange: z.string().max(300).nullable(),
+    completionCheck: z.string().max(300).nullable(),
+    dependsOnSteps: z.array(z.number().int().positive()).max(20).nullable(),
+    retryHint: WorkflowRetryHintSchema.nullable(),
+    alternatives: z.array(WorkflowStepAlternativeSchema).max(3).nullable(),
+    needsClarification: z.boolean().nullable()
   })
   .strict()
+
+export type WorkflowStep = z.infer<typeof WorkflowStepSchema>
 
 export const WorkflowVariableSchema = z
   .object({
     key: z.string().max(40),
     label: z.string().max(120),
-    kind: z.enum(['document', 'url', 'recipient', 'text']),
+    kind: z.enum(['document', 'url', 'recipient', 'text', 'search', 'message', 'filename', 'date']),
     exampleSanitized: z.string().max(200).nullable()
   })
   .strict()
@@ -381,6 +524,56 @@ export const ExtractedWorkflowSchema = z
 
 export type ExtractedWorkflow = z.infer<typeof ExtractedWorkflowSchema>
 
+/** Fill v2 nullable fields so legacy stored steps still validate. */
+export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
+  step: T
+): T & {
+  objective: string | null
+  actionType: WorkflowActionType | null
+  targetRole: string | null
+  targetLabel: string | null
+  inputKind: ValueCategory | null
+  inputVariableKey: string | null
+  inputLiteral: string | null
+  preconditions: string[] | null
+  expectedChange: string | null
+  completionCheck: string | null
+  dependsOnSteps: number[] | null
+  retryHint: WorkflowRetryHint | null
+  alternatives: WorkflowStepAlternative[] | null
+  needsClarification: boolean | null
+} {
+  return {
+    ...step,
+    objective: (step.objective as string | null | undefined) ?? null,
+    actionType: (step.actionType as WorkflowActionType | null | undefined) ?? null,
+    targetRole: (step.targetRole as string | null | undefined) ?? null,
+    targetLabel: (step.targetLabel as string | null | undefined) ?? null,
+    inputKind: (step.inputKind as ValueCategory | null | undefined) ?? null,
+    inputVariableKey: (step.inputVariableKey as string | null | undefined) ?? null,
+    inputLiteral: (step.inputLiteral as string | null | undefined) ?? null,
+    preconditions: (step.preconditions as string[] | null | undefined) ?? null,
+    expectedChange: (step.expectedChange as string | null | undefined) ?? null,
+    completionCheck: (step.completionCheck as string | null | undefined) ?? null,
+    dependsOnSteps: (step.dependsOnSteps as number[] | null | undefined) ?? null,
+    retryHint: (step.retryHint as WorkflowRetryHint | null | undefined) ?? null,
+    alternatives: (step.alternatives as WorkflowStepAlternative[] | null | undefined) ?? null,
+    needsClarification: (step.needsClarification as boolean | null | undefined) ?? null
+  }
+}
+
+export function normalizeExtractedWorkflow(raw: unknown): ExtractedWorkflow | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Record<string, unknown>
+  const steps = Array.isArray(data.steps)
+    ? data.steps.map((s) =>
+        typeof s === 'object' && s ? withWorkflowStepDefaults(s as Record<string, unknown>) : s
+      )
+    : data.steps
+  const parsed = ExtractedWorkflowSchema.safeParse({ ...data, steps })
+  return parsed.success ? parsed.data : null
+}
+
 export const StoredVariablesSchema = z
   .object({
     sessionId: z.string(),
@@ -395,13 +588,23 @@ export type StoredVariables = z.infer<typeof StoredVariablesSchema>
 /** Alias matching the product naming in the summarizer spec. */
 export const WorkflowSchema = ExtractedWorkflowSchema
 
+export const TokenUsageSchema = z
+  .object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative()
+  })
+  .strict()
+
+export type TokenUsage = z.infer<typeof TokenUsageSchema>
+
 export const StoredWorkflowResultSchema = z
   .object({
     sessionId: z.string(),
     schemaVersion: z.literal(SCHEMA_VERSION),
     extractedAt: z.string().datetime(),
     model: z.string().max(80),
-    workflow: ExtractedWorkflowSchema
+    workflow: ExtractedWorkflowSchema,
+    usage: TokenUsageSchema.optional()
   })
   .strict()
 
@@ -487,7 +690,8 @@ export const StoredAutomationScriptSchema = z
     model: z.string().max(80),
     script: AutomationScriptSchema,
     /** True when editor steps changed after compile — recompile before next run. */
-    stale: z.boolean().optional()
+    stale: z.boolean().optional(),
+    usage: TokenUsageSchema.optional()
   })
   .strict()
 

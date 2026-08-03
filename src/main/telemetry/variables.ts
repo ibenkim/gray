@@ -6,13 +6,19 @@ import {
   type WorkflowVariable
 } from '../../shared/telemetry/schema'
 import { sanitizeLabel } from '../../shared/telemetry/sanitize'
+import { searchQueryFromTitle } from './automation/groundText'
 import { sanitizeModelString } from './modelSanitize'
 
 const MESSAGING_APPS = /^(messages|slack|mail|outlook|discord|telegram|whatsapp)/i
+const SEARCH_LABEL = /search|query|find|omnibox|address bar|google|bing|duckduckgo/i
+const MESSAGE_LABEL = /message|compose|chat|imessage|body|subject/i
+const FILENAME_LABEL = /file\s*name|filename|title|rename|name/i
+const DATE_LABEL = /date|when|deadline|due|range/i
 
 /**
  * Deterministic workflow-variable extractor (no LLM).
- * Pulls document titles, copied URLs, and messaging recipients from evidence.
+ * Pulls document titles, copied URLs, messaging recipients, and
+ * inputKind-driven parameters (search, message, filename, date) from evidence.
  */
 export function extractWorkflowVariables(
   events: TelemetryEvent[],
@@ -99,7 +105,92 @@ export function extractWorkflowVariables(
     }
   }
 
+  if (polished) {
+    for (const a of polished.actions) {
+      maybeAddTypedVar(byKey, a.typedText, a.elementLabel, a.elementRole, a.inputKind, a.documentTitle)
+    }
+  } else {
+    for (const e of events) {
+      if (e.type !== 'text_input' || !e.data?.typedText) continue
+      maybeAddTypedVar(
+        byKey,
+        e.data.typedText,
+        e.data.elementLabel || e.target?.accessibleLabel || e.target?.visibleLabel,
+        e.data.elementRole,
+        e.data.field?.valueCategory,
+        e.data.documentTitle
+      )
+    }
+  }
+
+  if (!byKey.has('search') && polished) {
+    for (const a of polished.actions) {
+      const q = searchQueryFromTitle(a.documentTitle)
+      if (q) {
+        byKey.set('search', {
+          key: 'search',
+          label: 'Search query',
+          kind: 'search',
+          exampleSanitized: sanitizeModelString(q, 200)
+        })
+        break
+      }
+    }
+  }
+
   return [...byKey.values()]
+}
+
+function resolveTypedKind(
+  typedText: string,
+  label: string | undefined,
+  role: string | undefined,
+  inputKind: string | undefined
+): WorkflowVariable['kind'] | null {
+  const field = `${label ?? ''} ${role ?? ''}`.toLowerCase()
+  if (inputKind === 'date' || DATE_LABEL.test(field)) return 'date'
+  if (SEARCH_LABEL.test(field) || role === 'AXSearchField') return 'search'
+  if (MESSAGE_LABEL.test(field)) return 'message'
+  if (FILENAME_LABEL.test(field)) return 'filename'
+  if (inputKind === 'email' || inputKind === 'phone' || inputKind === 'url') return 'text'
+  if (typedText.length >= 2 && typedText.length <= 80) return 'text'
+  return null
+}
+
+function maybeAddTypedVar(
+  byKey: Map<string, WorkflowVariable>,
+  typedText: string | undefined,
+  label: string | undefined,
+  role: string | undefined,
+  inputKind: string | undefined,
+  documentTitle: string | undefined
+): void {
+  if (!typedText) return
+  if (/^\[(email|token|number)\]$/.test(typedText.trim())) return
+
+  const resolved = resolveTypedKind(typedText, label, role, inputKind)
+  if (!resolved) return
+
+  const key = resolved === 'text' ? 'text' : resolved
+  if (byKey.has(key)) return
+
+  const example =
+    resolved === 'search' ? searchQueryFromTitle(documentTitle) || typedText : typedText
+
+  const labels: Record<string, string> = {
+    search: 'Search query',
+    message: 'Message text',
+    filename: 'File name',
+    date: 'Date value',
+    text: label ? sanitizeLabel(label) ?? 'Text' : 'Text'
+  }
+
+  byKey.set(key, {
+    key,
+    label: labels[key] ?? 'Text',
+    kind: resolved,
+    exampleSanitized: sanitizeModelString(example, 200)
+  })
 }
 
 export function toStoredVariables(

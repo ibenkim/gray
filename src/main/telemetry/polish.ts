@@ -3,21 +3,27 @@ import {
   type ClipboardData,
   type PolishedAction,
   type PolishedSession,
+  type ScreenAfterDelta,
+  type TargetResolution,
   type TelemetryEvent
 } from '../../shared/telemetry/schema'
 import { redactEvent, shouldDropEvent } from '../../shared/telemetry/sanitize'
+import { classifyInputKind, segmentActions, semanticOpFromShortcut } from './segment'
 import type { TelemetryStore } from './store/TelemetryStore'
 
 const IDLE_GAP_MS = 30_000
 const CLICK_COLLAPSE_MS = 800
 const PASTE_CHAIN_MS = 8_000
+const FOCUS_FOLD_MS = 2_000
 
 type ActionDraft = Omit<PolishedAction, 'order'> & { order?: number }
 
 /**
  * Deterministic polisher — sorts, dedupes, re-redacts, collapses noise,
  * preserves structured evidence, merges copy→paste→send chains,
- * and marks verified outcomes. Does not invent user intent.
+ * attaches state transitions / waits / target resolution, folds focus into
+ * the following interaction, and marks verified outcomes.
+ * Does not invent user intent.
  */
 export async function polishSession(
   store: TelemetryStore,
@@ -43,24 +49,80 @@ export async function polishSession(
   let lastNav: TelemetryEvent | null = null
   let lastDocKey: string | null = null
   let lastTs = 0
+  let pendingWaitMs = 0
+  let lastScreenId: string | undefined
+  let lastScreenDelta: ScreenAfterDelta | undefined
   let pendingClipboard: { event: TelemetryEvent; clip: ClipboardData; at: number } | null =
     null
   let pendingPaste: { event: TelemetryEvent; at: number } | null = null
+  let pendingFocus: { draftIndex: number; at: number; label?: string; role?: string } | null =
+    null
 
   const push = (draft: ActionDraft) => {
+    if (pendingWaitMs > 0 && draft.category !== 'idle' && draft.category !== 'session') {
+      draft.waitedMs = (draft.waitedMs ?? 0) + pendingWaitMs
+      pendingWaitMs = 0
+    }
+    if (lastScreenId && !draft.screenBeforeId && draft.category !== 'session') {
+      draft.screenBeforeId = lastScreenId
+    }
     drafts.push(draft)
+  }
+
+  const foldPendingFocus = (draft: ActionDraft, ts: number) => {
+    if (!pendingFocus) return
+    if (ts - pendingFocus.at > FOCUS_FOLD_MS) {
+      pendingFocus = null
+      return
+    }
+    const sameTarget =
+      (!!draft.elementLabel && draft.elementLabel === pendingFocus.label) ||
+      (!!draft.elementRole && draft.elementRole === pendingFocus.role)
+    if (!sameTarget && draft.category !== 'input' && draft.category !== 'submission') {
+      pendingFocus = null
+      return
+    }
+    const focusDraft = drafts[pendingFocus.draftIndex]
+    if (focusDraft && focusDraft.category === 'interaction') {
+      for (const id of focusDraft.sourceEventIds) {
+        if (!draft.sourceEventIds.includes(id)) draft.sourceEventIds.push(id)
+      }
+      if (!draft.elementLabel && focusDraft.elementLabel) draft.elementLabel = focusDraft.elementLabel
+      if (!draft.elementRole && focusDraft.elementRole) draft.elementRole = focusDraft.elementRole
+      drafts.splice(pendingFocus.draftIndex, 1)
+      // Adjust any later pendingFocus index (none currently).
+    }
+    pendingFocus = null
+  }
+
+  const noteScreen = (event: TelemetryEvent) => {
+    const id = event.screenStateId
+    if (!id) return
+    const delta: ScreenAfterDelta = {
+      appName: event.data?.appName,
+      documentTitle: event.data?.documentTitle || event.data?.windowTitle,
+      urlHost: event.data?.urlHost
+    }
+    // Attach after-state to the most recent non-session action.
+    for (let i = drafts.length - 1; i >= 0; i--) {
+      const prior = drafts[i]
+      if (prior.category === 'session' || prior.category === 'idle') continue
+      if (!prior.screenAfterId) {
+        prior.screenAfterId = id
+        prior.screenAfter = changedOnly(lastScreenDelta, delta)
+      }
+      break
+    }
+    lastScreenId = id
+    lastScreenDelta = delta
   }
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i]
     const ts = Date.parse(event.timestamp)
     if (lastTs && ts - lastTs >= IDLE_GAP_MS) {
-      push({
-        text: `Idle for ${Math.round((ts - lastTs) / 1000)}s`,
-        category: 'idle',
-        timestamp: event.timestamp,
-        sourceEventIds: [event.eventId]
-      })
+      // Preserve wait semantics on the next real action instead of a dropped idle row.
+      pendingWaitMs += ts - lastTs
     }
     lastTs = ts || lastTs
 
@@ -89,23 +151,41 @@ export async function polishSession(
         const text = doc && app ? `Opened ${doc} in ${app}` : `Opened ${label}`
         const docKey = `${app ?? ''}|${doc ?? ''}`
         lastDocKey = docKey
-        push({
+        const draft: ActionDraft = {
           text,
           category: 'navigation',
           timestamp: event.timestamp,
           sourceEventIds: [event.eventId],
           appName: app,
-          documentTitle: doc
-        })
+          documentTitle: doc,
+          screenBeforeId: lastScreenId,
+          screenAfterId: event.screenStateId,
+          screenAfter: event.screenStateId
+            ? changedOnly(lastScreenDelta, {
+                appName: app,
+                documentTitle: doc,
+                urlHost: event.data?.urlHost
+              })
+            : undefined
+        }
+        push(draft)
+        if (event.screenStateId) {
+          lastScreenId = event.screenStateId
+          lastScreenDelta = {
+            appName: app,
+            documentTitle: doc,
+            urlHost: event.data?.urlHost
+          }
+        }
         break
       }
       case 'screen_changed': {
         const doc = event.data?.documentTitle || event.data?.windowTitle
         const app = event.data?.appName
         const docKey = `${app ?? ''}|${doc ?? ''}`
+        noteScreen(event)
         if (lastNav && sameScreen(lastNav, event)) {
           lastNav = null
-          // Enrich prior nav with document title if missing.
           const prior = drafts[drafts.length - 1]
           if (prior && doc && !prior.documentTitle) prior.documentTitle = doc
           break
@@ -124,6 +204,22 @@ export async function polishSession(
             timestamp: event.timestamp,
             sourceEventIds: [event.eventId],
             appName: app,
+            documentTitle: doc,
+            screenAfterId: event.screenStateId,
+            screenAfter: {
+              appName: app,
+              documentTitle: doc,
+              urlHost: event.data?.urlHost
+            }
+          })
+        }
+        if (event.data?.errorState || (event.data?.dialogs && event.data.dialogs.length)) {
+          push({
+            text: `Encountered ${event.data.errorState || event.data.dialogs![0]}`,
+            category: 'error',
+            timestamp: event.timestamp,
+            sourceEventIds: [event.eventId],
+            appName: app,
             documentTitle: doc
           })
         }
@@ -136,7 +232,7 @@ export async function polishSession(
           event.target?.visibleLabel
         const role = event.data?.elementRole || event.target?.role
         if (!label && !role) break
-        push({
+        const draft: ActionDraft = {
           text: label ? `Focused ${label}` : `Focused ${role}`,
           category: 'interaction',
           timestamp: event.timestamp,
@@ -144,8 +240,22 @@ export async function polishSession(
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
           elementLabel: label,
-          elementRole: role
-        })
+          elementRole: role,
+          targetResolution: label || role ? 'ax' : 'none',
+          inputKind: classifyInputKind(undefined, {
+            fieldLabel: label,
+            fieldType: event.data?.field?.fieldType || event.target?.fieldType,
+            elementRole: role
+          }),
+          elementBounds: event.data?.elementBounds
+        }
+        push(draft)
+        pendingFocus = {
+          draftIndex: drafts.length - 1,
+          at: ts,
+          label,
+          role
+        }
         break
       }
       case 'text_input': {
@@ -154,10 +264,15 @@ export async function polishSession(
           event.data?.elementLabel ||
           event.target?.accessibleLabel ||
           event.target?.visibleLabel
+        const role = event.data?.elementRole
+        const inputKind = classifyInputKind(typed, {
+          fieldLabel: label,
+          fieldType: event.data?.field?.fieldType || event.target?.fieldType,
+          elementRole: role
+        })
         if (!typed) {
-          // Nothing but a submit key survived redaction — record the keypress.
           if (event.data?.submitKey) {
-            push({
+            const draft: ActionDraft = {
               text: label
                 ? `Pressed ${event.data.submitKey} in ${label}`
                 : `Pressed ${event.data.submitKey}`,
@@ -167,14 +282,21 @@ export async function polishSession(
               appName: event.data?.appName,
               documentTitle: event.data?.documentTitle,
               elementLabel: label,
-              elementRole: event.data?.elementRole
-            })
+              elementRole: role,
+              inputKind,
+              semanticOp: event.data.submitKey === 'Return' || event.data.submitKey === 'Enter'
+                ? 'submit'
+                : undefined,
+              targetResolution: label || role ? 'ax' : 'none'
+            }
+            foldPendingFocus(draft, ts)
+            push(draft)
           }
           break
         }
         pendingField = event
         const shown = typed.length > 120 ? `${typed.slice(0, 119)}…` : typed
-        push({
+        const draft: ActionDraft = {
           text: label ? `Typed "${shown}" into ${label}` : `Typed "${shown}"`,
           category: 'input',
           timestamp: event.timestamp,
@@ -182,9 +304,18 @@ export async function polishSession(
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
           elementLabel: label,
-          elementRole: event.data?.elementRole,
-          typedText: shown
-        })
+          elementRole: role,
+          typedText: shown,
+          inputKind,
+          semanticOp:
+            event.data?.submitKey === 'Return' || event.data?.submitKey === 'Enter'
+              ? 'submit'
+              : undefined,
+          targetResolution: label || role ? 'ax' : 'none',
+          elementBounds: event.data?.elementBounds
+        }
+        foldPendingFocus(draft, ts)
+        push(draft)
         break
       }
       case 'click':
@@ -200,21 +331,25 @@ export async function polishSession(
         }
         lastClickKey = key
         lastClickAt = ts
-        const name =
+        const axLabel =
           event.data?.elementLabel ||
           event.target?.visibleLabel ||
           event.target?.accessibleLabel ||
-          event.target?.analyticsId ||
-          'a control'
-        const isSend = /^(send|submit|share|post|done)$/i.test(name.trim())
+          event.target?.analyticsId
+        const resolution = resolveTarget(event, axLabel)
+        const name =
+          axLabel ||
+          (resolution === 'coords'
+            ? `point (${event.data?.clickX},${event.data?.clickY})`
+            : null)
+        // Do not invent "a control" when nothing was resolved.
+        if (!name && resolution === 'none') break
+
+        const displayName = name || 'unresolved target'
+        const isSend = /^(send|submit|share|post|done)$/i.test((axLabel ?? '').trim())
         const inferred = event.data?.inferred === true || event.type === 'element_activated'
 
-        // Merge copy→paste→send into one submission when close in time.
-        if (
-          isSend &&
-          pendingPaste &&
-          ts - pendingPaste.at < PASTE_CHAIN_MS
-        ) {
+        if (isSend && pendingPaste && ts - pendingPaste.at < PASTE_CHAIN_MS) {
           const sources = [
             ...(pendingClipboard ? [pendingClipboard.event.eventId] : []),
             pendingPaste.event.eventId,
@@ -223,7 +358,7 @@ export async function polishSession(
           const verified = detectVerified(events, i)
           const clip = pendingClipboard?.clip
           const host = clip?.urlHost
-          push({
+          const draft: ActionDraft = {
             text: host
               ? `Pasted and sent ${host} link`
               : 'Pasted clipboard content and sent',
@@ -232,36 +367,48 @@ export async function polishSession(
             sourceEventIds: sources,
             appName: event.data?.appName,
             documentTitle: event.data?.documentTitle,
-            elementLabel: name,
+            elementLabel: axLabel ?? displayName,
             elementRole: event.data?.elementRole,
             clipboard: clip,
             inferred,
-            verified
-          })
+            verified,
+            targetResolution: resolution,
+            semanticOp: 'submit',
+            clickButton: event.data?.clickButton,
+            clickCount: event.data?.clickCount,
+            clickX: event.data?.clickX,
+            clickY: event.data?.clickY,
+            elementBounds: event.data?.elementBounds
+          }
+          foldPendingFocus(draft, ts)
+          push(draft)
           pendingClipboard = null
           pendingPaste = null
           break
         }
 
-        // "Clicked" is only honest for an observed mouse press; a focus-transition
-        // guess stays vaguer on purpose.
         const verb = isSend ? 'Activated' : event.type === 'click' ? 'Clicked' : 'Selected'
-        push({
-          text: `${verb} ${name}`,
+        const draft: ActionDraft = {
+          text: `${verb} ${displayName}`,
           category: isSend ? 'submission' : 'interaction',
           timestamp: event.timestamp,
           sourceEventIds: [event.eventId],
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
-          elementLabel: name,
+          elementLabel: axLabel ?? undefined,
           elementRole: event.data?.elementRole || event.target?.role,
           inferred: inferred || undefined,
           verified: isSend ? detectVerified(events, i) : undefined,
           clickButton: event.data?.clickButton,
           clickCount: event.data?.clickCount,
           clickX: event.data?.clickX,
-          clickY: event.data?.clickY
-        })
+          clickY: event.data?.clickY,
+          targetResolution: resolution,
+          semanticOp: isSend ? 'submit' : undefined,
+          elementBounds: event.data?.elementBounds
+        }
+        foldPendingFocus(draft, ts)
+        push(draft)
         break
       }
       case 'field_completed': {
@@ -280,7 +427,13 @@ export async function polishSession(
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
           elementLabel: label,
-          elementRole: event.data?.elementRole
+          elementRole: event.data?.elementRole,
+          inputKind: classifyInputKind(undefined, {
+            fieldLabel: label,
+            fieldType: event.data?.field?.fieldType,
+            elementRole: event.data?.elementRole
+          }),
+          targetResolution: 'ax'
         })
         break
       }
@@ -296,7 +449,8 @@ export async function polishSession(
           timestamp: event.timestamp,
           sourceEventIds: sources,
           appName: event.data?.appName,
-          verified: detectVerified(events, i)
+          verified: detectVerified(events, i),
+          semanticOp: 'submit'
         })
         pendingField = null
         break
@@ -314,7 +468,8 @@ export async function polishSession(
           sourceEventIds: [event.eventId],
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
-          elementLabel: label
+          elementLabel: label,
+          targetResolution: 'ax'
         })
         break
       }
@@ -333,14 +488,15 @@ export async function polishSession(
           sourceEventIds: [event.eventId],
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
-          clipboard: clip
+          clipboard: clip,
+          semanticOp: 'copy'
         })
         break
       }
       case 'paste_detected': {
         pendingPaste = { event, at: ts }
         const host = event.data?.clipboard?.urlHost || pendingClipboard?.clip.urlHost
-        push({
+        const draft: ActionDraft = {
           text: host ? `Pasted ${host} link` : 'Pasted clipboard content',
           category: 'input',
           timestamp: event.timestamp,
@@ -351,23 +507,29 @@ export async function polishSession(
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
           clipboard: event.data?.clipboard || pendingClipboard?.clip,
-          inferred: true
-        })
+          inferred: true,
+          semanticOp: 'paste',
+          targetResolution:
+            event.data?.elementLabel || event.data?.elementRole ? 'ax' : 'none'
+        }
+        foldPendingFocus(draft, ts)
+        push(draft)
         break
       }
       case 'keyboard_shortcut': {
         const shortcut = event.data?.shortcut || 'a shortcut'
+        const semanticOp = semanticOpFromShortcut(shortcut)
         push({
           text: `Used shortcut ${shortcut}`,
           category: 'shortcut',
           timestamp: event.timestamp,
           sourceEventIds: [event.eventId],
-          appName: event.data?.appName
+          appName: event.data?.appName,
+          semanticOp
         })
         break
       }
       case 'keyframe_captured':
-        // Attach path to the most recent non-session action; don't emit a standalone step.
         if (event.data?.keyframePath && drafts.length > 0) {
           const prior = drafts[drafts.length - 1]
           if (prior.category !== 'session' && prior.category !== 'idle') {
@@ -399,6 +561,8 @@ export async function polishSession(
     order: i + 1
   }))
 
+  const { segments, screens } = segmentActions(actions)
+
   const sequenceRange = {
     min: events.length ? events[0].sequence : 0,
     max: events.length ? events[events.length - 1].sequence : 0
@@ -409,11 +573,32 @@ export async function polishSession(
     schemaVersion: SCHEMA_VERSION,
     polishedAt: new Date().toISOString(),
     sequenceRange,
-    actions
+    actions,
+    segments,
+    screens
   }
 
   await store.savePolishedSession(sessionId, polished)
   return polished
+}
+
+function resolveTarget(event: TelemetryEvent, axLabel: string | undefined): TargetResolution {
+  if (axLabel || event.data?.elementRole || event.target?.role) return 'ax'
+  if (event.data?.clickX != null && event.data?.clickY != null) return 'coords'
+  return 'none'
+}
+
+function changedOnly(
+  before: ScreenAfterDelta | undefined,
+  after: ScreenAfterDelta
+): ScreenAfterDelta | undefined {
+  const delta: ScreenAfterDelta = {}
+  if (after.appName && after.appName !== before?.appName) delta.appName = after.appName
+  if (after.documentTitle && after.documentTitle !== before?.documentTitle) {
+    delta.documentTitle = after.documentTitle
+  }
+  if (after.urlHost && after.urlHost !== before?.urlHost) delta.urlHost = after.urlHost
+  return Object.keys(delta).length ? delta : undefined
 }
 
 function targetKey(event: TelemetryEvent): string | null {
@@ -449,7 +634,6 @@ function detectVerified(events: TelemetryEvent[], index: number): boolean {
     const e = events[j]
     const ts = Date.parse(e.timestamp)
     if (ts - baseTs > 4000) break
-    // Field cleared after send.
     if (
       e.type === 'focus_changed' &&
       e.data?.field?.valueLength === 0 &&
@@ -460,15 +644,11 @@ function detectVerified(events: TelemetryEvent[], index: number): boolean {
     if (e.type === 'selection_changed' && e.data?.appName === base.data?.appName) {
       return true
     }
-    if (
-      e.type === 'screen_changed' &&
-      e.data?.successMessage
-    ) {
+    if (e.type === 'screen_changed' && e.data?.successMessage) {
       return true
     }
     if (e.data?.verified === true) return true
   }
-  // Heuristic: Send/Share button activation in Messages/Slack counts as likely sent.
   const label = base.data?.elementLabel || base.target?.visibleLabel || ''
   if (/^(send|share|post)$/i.test(label.trim())) return true
   return false

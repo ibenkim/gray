@@ -164,8 +164,33 @@ function describeElement(el) {
     subrole: axString(el, 'AXSubrole'),
     label: label ? label.slice(0, 120) : null,
     valueLength: valueLength,
-    path: path
+    path: path,
+    bounds: axFrameBounds(el)
   };
+}
+
+/** Best-effort CGRect from AXFrame (top-left origin). */
+function axFrameBounds(el) {
+  if (!el) return null;
+  try {
+    var out = Ref();
+    if ($.AXUIElementCopyAttributeValue(el, cfstr('AXFrame'), out) !== 0) return null;
+    var axv = out[0];
+    if (!axv) return null;
+    var rect = Ref();
+    /* kAXValueCGRectType === 3 */
+    if (!$.AXValueGetValue(axv, 3, rect)) return null;
+    var r = rect[0];
+    if (!r) return null;
+    var x = Math.round(r.origin.x);
+    var y = Math.round(r.origin.y);
+    var w = Math.round(r.size.width);
+    var h = Math.round(r.size.height);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h) || w < 0 || h < 0) return null;
+    return { x: x, y: y, width: w, height: h };
+  } catch (e) {
+    return null;
+  }
 }
 
 /* ── periodic focus/selection sample via System Events ── */
@@ -268,6 +293,48 @@ function selectedLabels(win) {
   return out;
 }
 
+/** Frame of a System Events UI element via AXPosition/AXSize. */
+function frameOfSe(el) {
+  if (!el) return null;
+  try {
+    var posAttr = el.attributes.byName('AXPosition');
+    var sizeAttr = el.attributes.byName('AXSize');
+    if (!posAttr || !sizeAttr) return null;
+    var pos = posAttr.value();
+    var size = sizeAttr.value();
+    if (!pos || !size) return null;
+    var x = Math.round(Number(pos.x !== undefined ? pos.x : pos[0]));
+    var y = Math.round(Number(pos.y !== undefined ? pos.y : pos[1]));
+    var w = Math.round(Number(size.width !== undefined ? size.width : size[0]));
+    var h = Math.round(Number(size.height !== undefined ? size.height : size[1]));
+    if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h) || w < 0 || h < 0) return null;
+    return { x: x, y: y, width: w, height: h };
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Collect AXSheet / AXDialog / AXDrawer titles for error/completion signals. */
+function collectDialogs(win) {
+  var out = [];
+  if (!win) return out;
+  try {
+    var kidsAttr = win.attributes.byName('AXChildren');
+    if (!kidsAttr) return out;
+    var kids = kidsAttr.value();
+    if (!kids) return out;
+    for (var i = 0; i < Math.min(kids.length, 40) && out.length < 8; i++) {
+      var kid = kids[i];
+      var role = attr(kid, 'AXRole');
+      if (role === 'AXSheet' || role === 'AXDialog' || role === 'AXDrawer' || role === 'AXPopover') {
+        var lab = labelOf(kid) || role;
+        if (lab) out.push(String(lab).slice(0, 80));
+      }
+    }
+  } catch (e) {}
+  return out;
+}
+
 function sample() {
   try {
     var se = Application('System Events');
@@ -312,6 +379,12 @@ function sample() {
       }
     }
 
+    var dialogs = collectDialogs(win);
+    var errorState = null;
+    if (dialogs.length) {
+      errorState = dialogs[0];
+    }
+
     return {
       k: 'ax',
       appName: appName,
@@ -325,7 +398,10 @@ function sample() {
       valueTail: secure ? null : valueTail,
       elementPath: focused ? collectAncestors(focused, MAX_ANCESTORS) : [],
       selectedLabels: selectedLabels(win),
-      secure: secure
+      secure: secure,
+      bounds: focused ? frameOfSe(focused) : null,
+      dialogs: dialogs,
+      errorState: errorState
     };
   } catch (err) {
     return { k: 'ax', error: String(err) };
@@ -346,7 +422,9 @@ function keyOf(s) {
     s.elementLabel || '',
     String(s.valueLength == null ? '' : s.valueLength),
     (s.selectedLabels || []).join('|'),
-    (s.elementPath || []).join('>')
+    (s.elementPath || []).join('>'),
+    (s.dialogs || []).join('|'),
+    s.errorState || ''
   ].join('\\x1f');
 }
 
@@ -448,7 +526,8 @@ function onMouse(evt, button) {
       subrole: target ? target.subrole : null,
       label: target ? target.label : null,
       valueLength: target ? target.valueLength : null,
-      path: target ? target.path : []
+      path: target ? target.path : [],
+      bounds: target ? target.bounds : null
     });
     scheduleSample(160);
   } catch (err) {
@@ -562,6 +641,7 @@ function emitPolledClick(button) {
     label: target ? target.label : null,
     valueLength: target ? target.valueLength : null,
     path: target ? target.path : [],
+    bounds: target ? target.bounds : null,
     via: 'poll'
   });
   scheduleSample(160);

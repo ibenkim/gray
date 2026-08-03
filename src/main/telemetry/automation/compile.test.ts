@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   SCHEMA_VERSION,
+  withWorkflowStepDefaults,
   type ExtractedWorkflow,
   type PolishedSession
 } from '../../../shared/telemetry/schema'
@@ -11,9 +12,23 @@ import {
   compileAutomationScript,
   ensureBrowserNewTab,
   injectClickOpsFromEvidence,
+  injectWaitOpsFromStepSemantics,
   recoverInferredActions,
   validateAndGroundScript
 } from './compile'
+
+function wfStep(
+  step: {
+    order: number
+    action: string
+    category: ExtractedWorkflow['steps'][number]['category']
+    appName: string | null
+    evidenceEventIds: string[]
+    confidence: number
+  } & Partial<ExtractedWorkflow['steps'][number]>
+): ExtractedWorkflow['steps'][number] {
+  return withWorkflowStepDefaults(step)
+}
 
 const polished: PolishedSession = {
   sessionId: 'tsess_auto',
@@ -48,26 +63,126 @@ const workflow: ExtractedWorkflow = {
   summary: 'Open Messages and send.',
   outcome: 'completed',
   steps: [
-    {
+    wfStep({
       order: 1,
       action: 'Open Messages',
       category: 'navigation',
       appName: 'Messages',
       evidenceEventIds: ['tevt_nav'],
       confidence: 0.9
-    },
-    {
+    }),
+    wfStep({
       order: 2,
       action: 'Click Send',
       category: 'interaction',
       appName: 'Messages',
       evidenceEventIds: ['tevt_click'],
       confidence: 0.85
-    }
+    })
   ],
   warnings: [],
   variables: null
 }
+
+describe('injectWaitOpsFromStepSemantics', () => {
+  it('injects wait_for from completionCheck when missing', () => {
+    const warnings: string[] = []
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      steps: [
+        wfStep({
+          order: 1,
+          action: 'Open Messages',
+          category: 'navigation',
+          appName: 'Messages',
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          completionCheck: 'Messages is frontmost',
+          expectedChange: 'App ready'
+        })
+      ]
+    }
+    const ops = injectWaitOpsFromStepSemantics(
+      [
+        {
+          op: 'open_app',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 10_000,
+          label: 'Open Messages',
+          appName: 'Messages',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      wf,
+      polished,
+      warnings
+    )
+    expect(ops.some((o) => o.op === 'wait_for' && o.waitCondition === 'app_frontmost')).toBe(true)
+    expect(warnings.some((w) => /Injected wait_for/.test(w))).toBe(true)
+  })
+
+  it('injects wait_for from polished waitedMs', () => {
+    const warnings: string[] = []
+    const waitedPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          ...polished.actions[0],
+          waitedMs: 12_000
+        }
+      ]
+    }
+    const ops = injectWaitOpsFromStepSemantics(
+      [
+        {
+          op: 'open_app',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          timeoutMs: 10_000,
+          label: 'Open Messages',
+          appName: 'Messages',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [workflow.steps[0]]
+      },
+      waitedPolished,
+      warnings
+    )
+    expect(ops.some((o) => o.op === 'wait_for')).toBe(true)
+  })
+})
 
 describe('recoverInferredActions', () => {
   it('turns Google Drive manual into open_url', () => {
