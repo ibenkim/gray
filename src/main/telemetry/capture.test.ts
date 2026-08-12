@@ -108,12 +108,25 @@ describe('TelemetryRecorder interaction filtering', () => {
 
     provider.emit!({
       type: 'text_input',
-      target: { appName: 'Messages' },
-      data: { appName: 'Messages', elementLabel: 'Message', typedText: 'on my way' }
+      target: { appName: 'Notes' },
+      data: { appName: 'Notes', elementLabel: 'Note body', typedText: 'on my way' }
     })
 
     const typed = events.find((e) => e.type === 'text_input')
     expect(typed?.data?.typedText).toBe('on my way')
+  })
+
+  it('discards interactions from denylisted messaging apps', async () => {
+    const provider = new FakeInteractionProvider()
+    const { events } = await startRecorder(provider)
+
+    provider.emit!({
+      type: 'text_input',
+      target: { appName: 'Messages' },
+      data: { appName: 'Messages', elementLabel: 'Message', typedText: 'secret chat' }
+    })
+
+    expect(events.some((e) => e.type === 'text_input')).toBe(false)
   })
 
   it('discards interactions from other apps in one-app mode', async () => {
@@ -152,7 +165,7 @@ describe('TelemetryRecorder paste detection', () => {
 
     provider.emit!({
       type: 'keyboard_shortcut',
-      data: { appName: 'Messages', shortcut: 'Cmd+V' }
+      data: { appName: 'Notes', shortcut: 'Cmd+V' }
     })
 
     const paste = events.find((e) => e.type === 'paste_detected')

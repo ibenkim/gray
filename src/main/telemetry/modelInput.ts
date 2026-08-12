@@ -1,5 +1,6 @@
 import type {
   ActivitySegment,
+  Address,
   PolishedAction,
   PolishedSession,
   ScreenStateRef,
@@ -47,6 +48,7 @@ export const MODEL_INPUT_CHAR_BUDGET = 12_000
  * e = element label, r = role, h = clipboard host, ct = clipboard type,
  * tx = typed text, k = inputKind, sb/sa = screen refs, w = waitMs,
  * tr = target resolution, op = semanticOp, inf = inferred, v = verified,
+ * nt = narrationText, mk = marker, l1 = l1Op, cp = clipboardPairId,
  * t = fallback prose when structured fields are insufficient
  */
 export type CompactModelAction = {
@@ -70,6 +72,19 @@ export type CompactModelAction = {
   op?: string
   inf?: true
   v?: true
+  nt?: string
+  mk?: string
+  l1?: string
+  cp?: string
+}
+
+export type CompactModelAddress = {
+  id: string
+  kind: string
+  t: string
+  p?: Record<string, string>
+  pol?: string
+  nr?: true
 }
 
 export type CompactModelVariable = {
@@ -103,6 +118,8 @@ export type CompactWorkflowModelInput = {
   /** Flat acts kept for backward-compatible consumers / chunking helpers. */
   acts: CompactModelAction[]
   vars?: CompactModelVariable[]
+  /** Deterministic destinations extracted before the model call. */
+  addrs?: CompactModelAddress[]
   elided?: true
 }
 
@@ -136,7 +153,11 @@ export function createWorkflowModelInput(
 export function prepareWorkflowModelInput(
   session: TelemetrySessionMeta,
   polishedSession: PolishedSession,
-  extras: { variables?: WorkflowVariable[]; maxActions?: number } = {}
+  extras: {
+    variables?: WorkflowVariable[]
+    addresses?: Address[]
+    maxActions?: number
+  } = {}
 ): PreparedWorkflowModelInput {
   const evidenceMap = new Map<string, string>()
   let nextId = 0
@@ -190,6 +211,7 @@ export function prepareWorkflowModelInput(
   const segs = packSegments(segments, orderToCompact, kept)
 
   const vars = compactVariables(extras.variables ?? [])
+  const addrs = compactAddresses(extras.addresses ?? [])
 
   // Prefer segment-shaped payload; keep flat acts for evidence remap / legacy tests.
   const body: CompactWorkflowModelInput = { acts }
@@ -198,6 +220,7 @@ export function prepareWorkflowModelInput(
   if (screenIndex.screens.length) body.screens = screenIndex.screens
   if (segs.length) body.segs = segs
   if (vars.length) body.vars = vars
+  if (addrs.length) body.addrs = addrs
   if (elided) body.elided = true
 
   const estimatedChars = JSON.stringify(body).length
@@ -278,6 +301,12 @@ function packAction(
   if (a.semanticOp) row.op = a.semanticOp
   if (a.inferred) row.inf = true
   if (a.verified) row.v = true
+  const narration = sanitizeModelString(a.narrationText ?? null, 160)
+  if (narration) row.nt = narration
+  if (a.marker) row.mk = a.marker
+  if (a.l1Op) row.l1 = a.l1Op
+  const pairId = sanitizeModelString(a.clipboardPairId ?? null, 40)
+  if (pairId) row.cp = pairId
 
   return row
 }
@@ -397,6 +426,20 @@ function compactVariables(variables: WorkflowVariable[]): CompactModelVariable[]
     if (label && label !== v.key) row.l = label
     const ex = sanitizeModelString(v.exampleSanitized, 80)
     if (ex) row.ex = ex
+    return row
+  })
+}
+
+function compactAddresses(addresses: Address[]): CompactModelAddress[] {
+  return addresses.slice(0, 20).map((a) => {
+    const row: CompactModelAddress = {
+      id: a.id,
+      kind: a.kind,
+      t: sanitizeModelString(a.template, 200) ?? a.template.slice(0, 200)
+    }
+    if (a.params && Object.keys(a.params).length) row.p = a.params
+    if (a.policy) row.pol = a.policy
+    if (a.needsReview) row.nr = true
     return row
   })
 }

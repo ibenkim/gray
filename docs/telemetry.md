@@ -24,17 +24,38 @@ Requires Screen Recording permission (onboarding gate). Accessibility is an **op
 
 ## Development file storage
 
-With `TELEMETRY_STORAGE=file` (dev only):
+With `TELEMETRY_STORAGE=file` (dev only), **new sessions** use a per-session directory:
 
 ```text
 development-data/telemetry/
-  normalized/<sessionId>.jsonl   # append-only sanitized events
-  polished/<sessionId>.json      # deterministic polished actions
-  workflows/<sessionId>.json     # validated OpenAI extraction
-  variables/<sessionId>.json     # deterministic workflow variables
-  keyframes/<sessionId>/*.jpg    # sparse local keyframes (not uploaded)
-  meta/<sessionId>.json          # session status metadata
+  sessions/<sessionId>/
+    events.jsonl        # append-only sanitized events
+    shots/              # sparse local keyframes (not uploaded)
+    narration.json      # optional voice transcript spans
+    ground_truth.md     # optional eval label (markdown or JSON)
+    meta.json
+    polished.json
+    workflow.json
+    variables.json
+    automation.json
 ```
+
+**Legacy layout** (flat folders) is still read — and written for sessions that already exist there — so older recordings keep loading:
+
+```text
+development-data/telemetry/
+  normalized/<sessionId>.jsonl
+  polished/<sessionId>.json
+  workflows/<sessionId>.json
+  variables/<sessionId>.json
+  automation/<sessionId>.json
+  keyframes/<sessionId>/*.jpg
+  meta/<sessionId>.json
+  narration/<sessionId>.json
+  ground_truth/<sessionId>.md
+```
+
+Reads prefer `sessions/<id>/…` then fall back to the legacy path. Ground-truth eval helpers live under `src/main/telemetry/eval/`.
 
 - Config: `TELEMETRY_DEV_DIR` (default `./development-data/telemetry`).
 - In development, `TELEMETRY_STORAGE` defaults to `file` even when unset (fresh clone works without `.env`).
@@ -45,7 +66,10 @@ development-data/telemetry/
 ### Inspecting JSONL
 
 ```bash
-# Pretty-print the last few events of a session
+# Pretty-print the last few events of a session (new layout)
+tail -n 5 development-data/telemetry/sessions/<sessionId>/events.jsonl | jq .
+
+# Legacy layout
 tail -n 5 development-data/telemetry/normalized/<sessionId>.jsonl | jq .
 ```
 
@@ -139,7 +163,7 @@ to **stderr**, which the host does not read — every message would be silently 
 
 **Restart required:** after editing `.env` (including `OPENAI_API_KEY`), quit and relaunch the Electron main process. Env is loaded once at startup.
 
-You do **not** need `OPENAI_API_KEY` to collect data. Without it (or with an invalid key), **Finish** still writes `normalized/` + `polished/`. Session meta keeps `captureStatus: "stopped"` and sets `processingStatus: "failed"` with a safe code such as `OPENAI_AUTHENTICATION_FAILED` — never the raw OpenAI message. Use the toast **Retry** (or `telemetry:processWorkflow`) after fixing the key.
+You do **not** need `OPENAI_API_KEY` to collect data. Without it (or with an invalid key), **Finish** still writes session `events.jsonl` + `polished.json` (or legacy `normalized/` + `polished/`). Session meta keeps `captureStatus: "stopped"` and sets `processingStatus: "failed"` with a safe code such as `OPENAI_AUTHENTICATION_FAILED` — never the raw OpenAI message. Use the toast **Retry** (or `telemetry:processWorkflow`) after fixing the key.
 
 `OPENAI_API_KEY` stays in the main process only (never renderer / preload / `VITE_*`). OpenAI is called **once per completed processing attempt**, not per event. Invalid model output is rejected and not stored.
 

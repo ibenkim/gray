@@ -13,6 +13,7 @@ import {
   ensureBrowserNewTab,
   injectClickOpsFromEvidence,
   injectWaitOpsFromStepSemantics,
+  preferAddressNavigation,
   recoverInferredActions,
   validateAndGroundScript
 } from './compile'
@@ -81,8 +82,98 @@ const workflow: ExtractedWorkflow = {
     })
   ],
   warnings: [],
-  variables: null
+  variables: null,
+  addresses: null,
+  commits: null,
+  writes: null,
+  inputs: null,
+  authorizationScope: null,
+  branches: null,
+  questions: null
 }
+
+describe('preferAddressNavigation', () => {
+  it('emits open_url from address template instead of click paths', () => {
+    const warnings: string[] = []
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      addresses: [
+        {
+          id: 'addr_1',
+          kind: 'url',
+          template: 'https://docs.google.com/spreadsheets/d/{sheet_id}/edit',
+          params: { sheet_id: 'SHEET123' },
+          identityAccount: null,
+          identityProvider: 'google',
+          stability: 'medium',
+          verify: {
+            urlMatches: 'https://docs.google.com/spreadsheets/d/*/edit',
+            elementPresent: { text: 'Invoices', role: null },
+            accountIndicator: null
+          },
+          fallback: null,
+          health: null,
+          policy: 'auto',
+          needsReview: null
+        }
+      ],
+      steps: [
+        wfStep({
+          order: 1,
+          id: 'step_1',
+          intent: 'Locate',
+          summary: 'Open invoice sheet',
+          action: 'Open the invoice spreadsheet',
+          category: 'navigation',
+          appName: 'Google Chrome',
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.9,
+          requires: [
+            {
+              ref: 'addr_1',
+              account: null,
+              noModal: null,
+              policy: 'auto',
+              description: 'Invoice sheet'
+            }
+          ]
+        })
+      ]
+    }
+    const ops = preferAddressNavigation(
+      [
+        {
+          op: 'click_at',
+          stepOrder: 1,
+          evidenceEventIds: ['tevt_nav'],
+          confidence: 0.6,
+          timeoutMs: 10_000,
+          label: 'Click Drive folder',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: 100,
+          clickY: 200
+        }
+      ],
+      wf,
+      warnings
+    )
+    expect(ops[0]?.op).toBe('open_url')
+    expect(ops[0]?.url).toBe('https://docs.google.com/spreadsheets/d/SHEET123/edit')
+    expect(warnings.some((w) => /Address addr_1/.test(w))).toBe(true)
+  })
+})
 
 describe('injectWaitOpsFromStepSemantics', () => {
   it('injects wait_for from completionCheck when missing', () => {

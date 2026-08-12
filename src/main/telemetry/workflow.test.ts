@@ -10,7 +10,14 @@ import { normalizeOpenAiApiKey } from './openaiKey'
 import { mapToProcessingError, userMessageForCode } from './errors'
 import { __resetProcessingLocksForTests, processSessionWorkflow } from './processSession'
 import { InMemoryTelemetryStore } from './store/InMemoryTelemetryStore'
-import { assertEvidence, extractWorkflow, usageFromResponse } from './workflow'
+import {
+  assertEvidence,
+  enumerateWorkflowQuestions,
+  extractWorkflow,
+  requiresSummaryForStep,
+  toEditorWorkflow,
+  usageFromResponse
+} from './workflow'
 
 const session: TelemetrySessionMeta = {
   sessionId: 'tsess_sparse',
@@ -102,7 +109,7 @@ describe('extractWorkflow', () => {
     expect(store.workflows.size).toBe(0)
   })
 
-  it('calls OpenAI once and saves through TelemetryStore', async () => {
+  it('runs staged classify→extract calls and saves through TelemetryStore', async () => {
     const store = new InMemoryTelemetryStore()
     const parse = vi.fn(async () => ({
       output_parsed: {
@@ -112,20 +119,30 @@ describe('extractWorkflow', () => {
           'The recording observed a Terminal window associated with the gray development environment before the session ended.',
         outcome: 'unknown',
         steps: [
-          {
+          withWorkflowStepDefaults({
             order: 1,
+            id: 'step_1',
+            intent: 'Locate',
+            summary: 'Open Terminal',
             action: 'Opened a Terminal window associated with the gray development environment',
             category: 'navigation',
             appName: 'Terminal',
             evidenceEventIds: ['tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'],
             confidence: 0.91
-          }
+          })
         ],
         warnings: [
           'No clicks, commands, text entry, or confirmed outcome were recorded.',
           'A screen-title change alone does not establish a distinct user action.'
         ],
-        variables: null
+        variables: null,
+        addresses: null,
+        commits: null,
+        writes: null,
+        inputs: null,
+        authorizationScope: null,
+        branches: null,
+        questions: null
       }
     }))
 
@@ -144,8 +161,9 @@ describe('extractWorkflow', () => {
       { createClient: () => ({ responses: { parse } }) }
     )
 
-    expect(parse).toHaveBeenCalledTimes(1)
+    expect(parse).toHaveBeenCalledTimes(2)
     expect(result.workflow.outcome).toBe('unknown')
+    expect(result.workflow.steps[0].intent).toBe('Locate')
     expect(result.workflow.steps[0].evidenceEventIds).toContain(
       'tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'
     )
@@ -245,7 +263,14 @@ describe('assertEvidence', () => {
             })
           ],
           warnings: [],
-          variables: null
+          variables: null,
+          addresses: null,
+          commits: null,
+          writes: null,
+          inputs: null,
+          authorizationScope: null,
+          branches: null,
+          questions: null
         },
         polished
       )
@@ -307,10 +332,150 @@ describe('usageFromResponse / v2 workflow fields', () => {
       { createClient: () => ({ responses: { parse } }) }
     )
 
-    expect(result.usage).toEqual({ inputTokens: 900, outputTokens: 220 })
+    // Staged classify + extract each report usage.
+    expect(result.usage).toEqual({ inputTokens: 1800, outputTokens: 440 })
     expect(result.workflow.steps[0].needsClarification).toBe(true)
     expect(result.workflow.steps[0].alternatives?.[0]?.interpretation).toMatch(/existing/)
     expect(result.workflow.steps[0].evidenceEventIds[0]).toMatch(/^tevt_/)
+    expect(result.workflow.questions?.some((q) => q.kind === 'branch' || q.kind === 'other')).toBe(
+      true
+    )
+  })
+
+  it('enumerates questions for absolute positions and conditionals', () => {
+    const qs = enumerateWorkflowQuestions({
+      title: 't',
+      goal: null,
+      summary: 's',
+      outcome: 'unknown',
+      steps: [
+        withWorkflowStepDefaults({
+          order: 1,
+          id: 'step_1',
+          intent: 'Fill',
+          summary: 'Fill row',
+          action: 'Fill the third row if empty',
+          category: 'data_entry',
+          appName: 'Sheets',
+          evidenceEventIds: ['tevt_1'],
+          confidence: 0.7,
+          position: { strategy: 'absolute', column: 'A', matchValue: null }
+        })
+      ],
+      warnings: [],
+      variables: null,
+      addresses: null,
+      commits: null,
+      writes: null,
+      inputs: null,
+      authorizationScope: null,
+      branches: null,
+      questions: null
+    })
+    expect(qs.some((q) => q.kind === 'absolute_position')).toBe(true)
+    expect(qs.some((q) => q.kind === 'branch')).toBe(true)
+  })
+
+  it('toEditorWorkflow surfaces summary, fix cards, and run contract', () => {
+    const extracted = {
+      title: 'Log invoices',
+      goal: 'Update the August tracker',
+      summary: 'Add emailed invoices to the August tracker and route large ones.',
+      outcome: 'completed' as const,
+      steps: [
+        withWorkflowStepDefaults({
+          order: 1,
+          id: 'step_1',
+          intent: 'Locate',
+          summary: 'Open August tracker',
+          action: 'Open sheet',
+          category: 'navigation',
+          appName: 'Chrome',
+          evidenceEventIds: ['tevt_1'],
+          confidence: 0.55,
+          needsClarification: true,
+          alternatives: [
+            { interpretation: 'August 2026 sheet', confidence: 0.7 },
+            { interpretation: 'Last month sheet', confidence: 0.4 }
+          ],
+          requires: [
+            {
+              ref: 'addr_tracker',
+              account: null,
+              noModal: null,
+              policy: 'auto',
+              description: null
+            }
+          ]
+        }),
+        withWorkflowStepDefaults({
+          order: 2,
+          id: 'step_2',
+          intent: 'Commit',
+          summary: 'Save the row',
+          action: 'Save',
+          category: 'data_entry',
+          appName: 'Chrome',
+          evidenceEventIds: ['tevt_2'],
+          confidence: 0.9
+        })
+      ],
+      warnings: [],
+      variables: null,
+      addresses: [
+        {
+          id: 'addr_tracker',
+          kind: 'url' as const,
+          template: 'https://sheets.example/august-tracker',
+          params: null,
+          identityAccount: null,
+          identityProvider: null,
+          stability: 'high' as const,
+          verify: {
+            urlMatches: null,
+            elementPresent: null,
+            accountIndicator: null
+          },
+          fallback: null,
+          health: null,
+          policy: 'auto' as const,
+          needsReview: null
+        }
+      ],
+      commits: ['step_2'],
+      writes: ['addr_tracker'],
+      inputs: ['invoice_pdf'],
+      authorizationScope: {
+        destinations: ['addr_tracker'],
+        level: 'bounded_write' as const,
+        expires: null
+      },
+      branches: null,
+      questions: [
+        {
+          id: 'q_1',
+          prompt: 'Which August tracker?',
+          relatedStepId: 'step_1',
+          kind: 'other' as const
+        }
+      ]
+    }
+
+    const editor = toEditorWorkflow(extracted, 'wf_test', 'tsess_1')
+    expect(editor.summary).toMatch(/August tracker/)
+    expect(editor.goal).toBe('Update the August tracker')
+    expect(editor.questions).toHaveLength(1)
+    expect(editor.runContract?.inputs).toContain('invoice_pdf')
+    expect(editor.runContract?.commits).toContain('step_2')
+    expect(editor.contractAccepted).toBe(false)
+    expect(editor.steps[0].intent).toBe('Locate')
+    expect(editor.steps[0].confidence).toBe(0.55)
+    expect(editor.steps[0].fix?.options.some((o) => o.label === 'Ask each time')).toBe(true)
+    expect(editor.steps[0].fix?.options.some((o) => o.label === 'August 2026 sheet')).toBe(true)
+    expect(editor.steps[0].requiresSummary).toMatch(/Gray will open/i)
+    expect(
+      requiresSummaryForStep(extracted.steps[0], extracted.addresses)
+    ).toMatch(/august tracker/i)
   })
 
   it('triggers chunked extraction when packed payload exceeds budget', async () => {
@@ -487,7 +652,7 @@ describe('processSessionWorkflow', () => {
     expect(await store.readPolishedSession('tsess_sparse')).not.toBeNull()
   })
 
-  it('retries successfully without re-recording and calls OpenAI once per attempt', async () => {
+  it('retries successfully without re-recording and runs staged OpenAI calls', async () => {
     __resetProcessingLocksForTests()
     const store = new InMemoryTelemetryStore()
     await store.createSession({ sessionId: 'tsess_sparse' })
@@ -570,7 +735,8 @@ describe('processSessionWorkflow', () => {
     )
 
     expect(result.ok).toBe(true)
-    expect(parse).toHaveBeenCalledTimes(1)
+    // Staged classify → extract (2 Responses calls) per attempt.
+    expect(parse).toHaveBeenCalledTimes(2)
     expect(compileParse).toHaveBeenCalledTimes(1)
     if (result.ok) {
       expect(result.workflow.sessionId).toBe('tsess_sparse')

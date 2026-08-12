@@ -21,6 +21,7 @@ import type { ExtractedWorkflow, TelemetryEvent } from '../shared/telemetry/sche
 
 type TelemetryRecordingStatus = {
   recording: boolean
+  paused?: boolean
   sessionId: string | null
   sequence: number
   startedAt: string | null
@@ -31,6 +32,7 @@ type TelemetryStartOpts = {
   recordMode?: 'one-app' | 'full-screen'
   selectedAppId?: string
   ownerEmail?: string
+  narrate?: boolean
 }
 
 type ActivityHoldPayload = {
@@ -58,6 +60,7 @@ export type AutomationRunEvent =
       stepOrder: number
       opIndex: number
       label: string
+      simulated?: boolean
     }
   | {
       type: 'stepFailed'
@@ -66,6 +69,7 @@ export type AutomationRunEvent =
       opIndex: number
       label: string
       message: string
+      code?: string
       manual?: boolean
     }
   | {
@@ -78,9 +82,17 @@ export type AutomationRunEvent =
       variableKey: string | null
     }
   | {
+      type: 'navigating'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      destination: string
+    }
+  | {
       type: 'finished'
       runId: string
       outcome: 'done' | 'stopped'
+      resolution?: { tier1: number; tier2: number }
     }
 
 const ghostBridge = {
@@ -253,6 +265,10 @@ const ghostBridge = {
     opts?: TelemetryStartOpts
   ): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
     ipcRenderer.invoke('telemetry:sessionStart', opts ?? {}),
+  telemetryPause: (): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
+    ipcRenderer.invoke('telemetry:sessionPause'),
+  telemetryResume: (): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
+    ipcRenderer.invoke('telemetry:sessionResume'),
   telemetryStop: (
     sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean }
   ): Promise<{
@@ -305,6 +321,24 @@ const ghostBridge = {
     ipcRenderer.on('telemetry:workflowReady', listener)
     return () => ipcRenderer.removeListener('telemetry:workflowReady', listener)
   },
+
+  // ── Narration (renderer MediaRecorder → main) ──
+  narrationStart: (
+    sessionId: string
+  ): Promise<{ ok: boolean; audioPath?: string | null; error?: string }> =>
+    ipcRenderer.invoke('narration:start', sessionId),
+  narrationAppend: (
+    sessionId: string,
+    chunk: ArrayBuffer
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('narration:append', sessionId, chunk),
+  narrationStop: (): Promise<{
+    ok: boolean
+    sessionId?: string | null
+    audioPath?: string | null
+    hadChunks?: boolean
+    error?: string
+  }> => ipcRenderer.invoke('narration:stop'),
 
   // ── Automation compile + run ──
   automationCompile: (

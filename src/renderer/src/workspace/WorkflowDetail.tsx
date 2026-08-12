@@ -9,6 +9,12 @@ import {
 import type { QuestionReceipt, Run, RunStepResult, Workflow } from '../state/types'
 import TriggerSection from '../components/shared/TriggerSection'
 import StepList from '../components/shared/StepList'
+import {
+  needsRunContract,
+  QuestionsSection,
+  RunContractPanel,
+  WorkflowSummary
+} from '../components/shared/ReviewSections'
 import { useWorkspaceDrag } from '../hooks/useWorkspaceDrag'
 
 type Tab = 'overview' | 'log'
@@ -50,9 +56,27 @@ export default function WorkflowDetail({
   const [nameDraft, setNameDraft] = useState(workflow.name)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [alwaysOffer, setAlwaysOffer] = useState<string | null>(null)
+  const [showContract, setShowContract] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
+
+  function requestRun() {
+    if (needsRunContract(workflow)) {
+      setShowContract(true)
+      setTab('overview')
+      return
+    }
+    void window.ghostBridge?.runWorkflow?.(workflow.id)
+  }
+
+  async function confirmContract() {
+    const accepted = { ...workflow, contractAccepted: true }
+    onUpdate(() => accepted)
+    setShowContract(false)
+    await window.ghostBridge?.upsertWorkflow?.(accepted)
+    void window.ghostBridge?.runWorkflow?.(accepted.id)
+  }
 
   useEffect(() => {
     if (initialRunId) {
@@ -179,7 +203,7 @@ export default function WorkflowDetail({
           <button
             className="btn-small-outline"
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => window.ghostBridge?.runWorkflow?.(workflow.id)}
+            onClick={requestRun}
           >
             Run
           </button>
@@ -286,31 +310,43 @@ export default function WorkflowDetail({
 
       {tab === 'overview' ? (
         <div className="ws-detail-body scroll">
-          <TriggerSection
-            trigger={workflow.trigger}
-            onChange={(t) => onUpdate((w) => ({ ...w, trigger: t }))}
-            onTurnOff={() => onUpdate((w) => ({ ...w, status: 'off' }))}
-          />
-          <div className="ledger-section">
-            <div className="section-label">STEPS</div>
-            <StepList
-              steps={workflow.steps}
-              initialEditStepId={initialEditStepId}
-              onChange={(updater) =>
-                onUpdate((w) => {
-                  const nextSteps = updater(w.steps)
-                  if (w.sessionId) {
-                    void window.ghostBridge?.automationMarkStale?.(
-                      w.sessionId,
-                      true,
-                      nextSteps.map((s) => ({ index: s.index, title: s.title }))
-                    )
-                  }
-                  return { ...w, steps: nextSteps, automationStale: true }
-                })
-              }
+          {showContract && workflow.runContract ? (
+            <RunContractPanel
+              contract={workflow.runContract}
+              onConfirm={confirmContract}
+              onCancel={() => setShowContract(false)}
             />
-          </div>
+          ) : (
+            <>
+              <WorkflowSummary summary={workflow.summary} goal={workflow.goal} />
+              <TriggerSection
+                trigger={workflow.trigger}
+                onChange={(t) => onUpdate((w) => ({ ...w, trigger: t }))}
+                onTurnOff={() => onUpdate((w) => ({ ...w, status: 'off' }))}
+              />
+              <QuestionsSection questions={workflow.questions} />
+              <div className="ledger-section">
+                <div className="section-label">STEPS</div>
+                <StepList
+                  steps={workflow.steps}
+                  initialEditStepId={initialEditStepId}
+                  onChange={(updater) =>
+                    onUpdate((w) => {
+                      const nextSteps = updater(w.steps)
+                      if (w.sessionId) {
+                        void window.ghostBridge?.automationMarkStale?.(
+                          w.sessionId,
+                          true,
+                          nextSteps.map((s) => ({ index: s.index, title: s.title }))
+                        )
+                      }
+                      return { ...w, steps: nextSteps, automationStale: true }
+                    })
+                  }
+                />
+              </div>
+            </>
+          )}
         </div>
       ) : selectedRun ? (
         <RunDetailView

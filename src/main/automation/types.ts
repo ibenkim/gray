@@ -1,4 +1,12 @@
-import type { AutomationOp, WaitForCondition } from '../../shared/telemetry/schema'
+import type {
+  AutomationOp,
+  IntentVerb,
+  RunFailureCode,
+  RunMode,
+  WaitForCondition
+} from '../../shared/telemetry/schema'
+
+export type { RunFailureCode, RunMode }
 
 export type ActuatorResult = {
   ok: boolean
@@ -6,6 +14,8 @@ export type ActuatorResult = {
   matched?: string
   matchedLabel?: string
   matchedRole?: string
+  /** Optional field value from readback. */
+  value?: string
 }
 
 export type QueryParams = {
@@ -35,6 +45,15 @@ export interface Actuator {
   typeText?(text: string): Promise<ActuatorResult>
   setClipboard?(text: string): ActuatorResult
   clickAt?(x: number, y: number, button?: 'left' | 'right'): Promise<ActuatorResult>
+  /** Optional readback — stub may always return ok. */
+  readField?(params: QueryParams): Promise<ActuatorResult>
+}
+
+export type ResolutionStats = {
+  /** open_url successes */
+  tier1: number
+  /** open_app / activate_element successes */
+  tier2: number
 }
 
 export type RunEvent =
@@ -52,6 +71,8 @@ export type RunEvent =
       stepOrder: number
       opIndex: number
       label: string
+      /** True when the op was skipped as a no-op under simulated mode. */
+      simulated?: boolean
     }
   | {
       type: 'stepFailed'
@@ -60,6 +81,8 @@ export type RunEvent =
       opIndex: number
       label: string
       message: string
+      /** Typed failure code for repair / UI. */
+      code?: RunFailureCode
       /** True when the op is `manual` (expected take-over). */
       manual?: boolean
     }
@@ -73,9 +96,18 @@ export type RunEvent =
       variableKey: string | null
     }
   | {
+      type: 'navigating'
+      runId: string
+      stepOrder: number
+      opIndex: number
+      /** Destination shown in the pill (app name or URL host). */
+      destination: string
+    }
+  | {
       type: 'finished'
       runId: string
       outcome: 'done' | 'stopped'
+      resolution?: ResolutionStats
     }
 
 export type RunnerControl =
@@ -86,3 +118,11 @@ export type RunnerControl =
   | { kind: 'skip' }
   | { kind: 'takeOver' }
   | { kind: 'answer'; value: string; variableKey?: string | null }
+
+/** Optional per-step intent metadata from the extracted workflow. */
+export type StepMeta = {
+  order: number
+  intent?: IntentVerb | null
+  authorization?: string | null
+  summary?: string | null
+}

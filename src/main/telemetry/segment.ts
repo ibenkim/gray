@@ -110,7 +110,15 @@ function shouldSplit(prev: PolishedAction, next: PolishedAction): boolean {
 
 function inferSegmentKind(group: PolishedAction[]): ActivitySegmentKind {
   if (group.every((a) => a.category === 'idle' || a.waitedMs)) return 'waiting'
-  if (group.some((a) => a.category === 'clipboard' || a.semanticOp === 'copy' || a.semanticOp === 'paste')) {
+  if (
+    group.some(
+      (a) =>
+        a.l1Op === 'transfer' ||
+        a.category === 'clipboard' ||
+        a.semanticOp === 'copy' ||
+        a.semanticOp === 'paste'
+    )
+  ) {
     return 'data_transfer'
   }
   if (group.every((a) => a.category === 'navigation')) return 'navigation'
@@ -122,9 +130,10 @@ function inferSegmentKind(group: PolishedAction[]): ActivitySegmentKind {
       (a) =>
         a.category === 'interaction' ||
         a.category === 'idle' ||
+        a.l1Op === 'reveal' ||
         (a.category === 'shortcut' && !a.semanticOp)
     ) &&
-    !group.some((a) => a.category === 'input' || a.category === 'submission')
+    !group.some((a) => a.category === 'input' || a.category === 'submission' || a.l1Op === 'fill_field')
   ) {
     return 'review'
   }

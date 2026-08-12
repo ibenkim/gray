@@ -11,12 +11,14 @@ vi.mock('electron', () => ({
 }))
 
 import type { AutomationScript } from '../../shared/telemetry/schema'
-import { AutomationRunner } from './runner'
+import { AutomationRunner, toFailureCode } from './runner'
 import type { Actuator, ActuatorResult, QueryParams, RunEvent } from './types'
 
 class FakeActuator implements Actuator {
   calls: string[] = []
   failNext: string | null = null
+  /** Fail pressElement this many times, then succeed. */
+  failPressTimes = 0
   started = false
 
   async start(): Promise<void> {
@@ -48,6 +50,10 @@ class FakeActuator implements Actuator {
     elementLabel: string
   }): Promise<ActuatorResult> {
     this.calls.push(`press:${params.elementLabel}`)
+    if (this.failPressTimes > 0) {
+      this.failPressTimes -= 1
+      return { ok: false, error: 'element_not_found' }
+    }
     if (this.failNext === 'press') return { ok: false, error: 'element_not_found' }
     return { ok: true }
   }
@@ -69,6 +75,11 @@ class FakeActuator implements Actuator {
 
   setClipboard(text: string): ActuatorResult {
     this.calls.push(`clipboard:${text}`)
+    return { ok: true }
+  }
+
+  async readField(params: QueryParams): Promise<ActuatorResult> {
+    this.calls.push(`readField:${params.elementLabel ?? ''}`)
     return { ok: true }
   }
 }
@@ -125,6 +136,8 @@ describe('AutomationRunner', () => {
       sessionId: 'tsess_1',
       script,
       actuator,
+      // Avoid supervised Commit gate on "Send"
+      mode: 'authorized',
       onEvent: (e) => events.push(e)
     })
 
@@ -132,10 +145,17 @@ describe('AutomationRunner', () => {
 
     expect(actuator.calls).toEqual(['activateApp:Messages', 'press:Send'])
     expect(events.filter((e) => e.type === 'stepDone')).toHaveLength(2)
-    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+    expect(events.some((e) => e.type === 'navigating' && e.destination === 'Messages')).toBe(
+      true
+    )
+    expect(events.at(-1)).toMatchObject({
+      type: 'finished',
+      outcome: 'done',
+      resolution: { tier1: 0, tier2: 2 }
+    })
   })
 
-  it('holds on failure and retries', async () => {
+  it('auto-repairs up to 2 times before holding with repair_exhausted', async () => {
     const actuator = new FakeActuator()
     actuator.failNext = 'press'
     const events: RunEvent[] = []
@@ -143,22 +163,24 @@ describe('AutomationRunner', () => {
       ops: [
         baseOp({
           op: 'activate_element',
-          elementLabel: 'Send',
+          elementLabel: 'Ok',
           appName: 'Messages',
-          label: 'Click Send'
+          label: 'Click Ok'
         })
       ],
       warnings: []
     }
 
     const runner = new AutomationRunner({
-      runId: 'run_2',
+      runId: 'run_repair',
       sessionId: 'tsess_1',
       script,
       actuator,
+      mode: 'authorized',
       onEvent: (e) => {
         events.push(e)
         if (e.type === 'stepFailed') {
+          expect(e.code).toBe('repair_exhausted')
           actuator.failNext = null
           setTimeout(() => runner.control({ kind: 'retry' }), 5)
         }
@@ -167,9 +189,158 @@ describe('AutomationRunner', () => {
 
     await runner.start()
 
-    expect(events.some((e) => e.type === 'stepFailed')).toBe(true)
+    // 1 initial + 2 auto-repairs, then user retry succeeds → 4 presses
+    expect(actuator.calls.filter((c) => c.startsWith('press:'))).toHaveLength(4)
+    expect(events.filter((e) => e.type === 'stepFailed')).toHaveLength(1)
     expect(events.filter((e) => e.type === 'stepDone')).toHaveLength(1)
     expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+  })
+
+  it('succeeds within repair budget without holding', async () => {
+    const actuator = new FakeActuator()
+    actuator.failPressTimes = 2 // fail twice, succeed on 3rd (within budget)
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({
+          op: 'activate_element',
+          elementLabel: 'Ok',
+          appName: 'Messages',
+          label: 'Click Ok'
+        })
+      ],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_repair_ok',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      mode: 'authorized',
+      onEvent: (e) => events.push(e)
+    })
+
+    await runner.start()
+
+    expect(actuator.calls.filter((c) => c.startsWith('press:'))).toHaveLength(3)
+    expect(events.some((e) => e.type === 'stepFailed')).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+  })
+
+  it('maps actuator errors to RunFailureCode', () => {
+    expect(toFailureCode('element_not_found')).toBe('target_not_found')
+    expect(toFailureCode('app_not_found')).toBe('target_not_found')
+    expect(toFailureCode('wait_timeout')).toBe('timeout')
+    expect(toFailureCode('timeout')).toBe('timeout')
+    expect(toFailureCode('missing_url')).toBe('navigation_failed')
+    expect(toFailureCode('missing_variable')).toBe('precondition_unmet')
+    expect(toFailureCode('out_of_scope')).toBe('out_of_scope')
+  })
+
+  it('simulated mode skips mutating ops but runs navigation', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({ op: 'open_app', appName: 'Safari', label: 'Open Safari' }),
+        baseOp({
+          op: 'open_url',
+          stepOrder: 2,
+          url: 'https://example.com/path',
+          label: 'Open example'
+        }),
+        baseOp({
+          op: 'type_text',
+          stepOrder: 3,
+          literalText: 'hello',
+          label: 'Type hello'
+        }),
+        baseOp({
+          op: 'activate_element',
+          stepOrder: 4,
+          elementLabel: 'Go',
+          label: 'Click Go'
+        }),
+        baseOp({
+          op: 'wait_for',
+          stepOrder: 5,
+          waitCondition: 'app_frontmost',
+          appName: 'Safari',
+          label: 'Wait frontmost'
+        })
+      ],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_sim',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      mode: 'simulated',
+      onEvent: (e) => events.push(e)
+    })
+
+    await runner.start()
+
+    expect(actuator.calls).toContain('activateApp:Safari')
+    expect(actuator.calls).toContain('openUrl:https://example.com/path:')
+    expect(actuator.calls).toContain('query:app_frontmost')
+    expect(actuator.calls).not.toContain('type:hello')
+    expect(actuator.calls).not.toContain('press:Go')
+
+    const simulatedDone = events.filter((e) => e.type === 'stepDone' && e.simulated)
+    expect(simulatedDone).toHaveLength(2)
+    expect(simulatedDone.every((e) => e.type === 'stepDone' && e.label.startsWith('[Simulated]'))).toBe(
+      true
+    )
+    expect(events.find((e) => e.type === 'navigating' && e.destination === 'example.com')).toBeTruthy()
+    expect(events.at(-1)).toMatchObject({
+      type: 'finished',
+      outcome: 'done',
+      resolution: { tier1: 1, tier2: 1 }
+    })
+  })
+
+  it('halts open_url outside allowedAddressIds with out_of_scope', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({
+          op: 'open_url',
+          url: 'https://evil.example/phish',
+          label: 'Open evil'
+        })
+      ],
+      warnings: []
+    }
+
+    const runner = new AutomationRunner({
+      runId: 'run_scope',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      mode: 'authorized',
+      allowedAddressIds: ['addr_ok'],
+      addresses: [
+        { id: 'addr_ok', kind: 'url', template: 'https://safe.example/home' }
+      ],
+      onEvent: (e) => {
+        events.push(e)
+        if (e.type === 'stepFailed') {
+          setTimeout(() => runner.control({ kind: 'stop' }), 5)
+        }
+      }
+    })
+
+    await runner.start()
+
+    expect(actuator.calls).not.toContain('openUrl:https://evil.example/phish:')
+    const failed = events.find((e) => e.type === 'stepFailed')
+    expect(failed).toMatchObject({ code: 'out_of_scope' })
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'stopped' })
   })
 
   it('ask_user holds until answered', async () => {
@@ -280,6 +451,32 @@ describe('AutomationRunner', () => {
     expect(actuator.calls).not.toContain('type:recorded')
   })
 
+  it('calls readField after fill-labeled type_text', async () => {
+    const actuator = new FakeActuator()
+    const runner = new AutomationRunner({
+      runId: 'run_fill',
+      sessionId: 'tsess_1',
+      script: {
+        ops: [
+          baseOp({
+            op: 'type_text',
+            literalText: 'Ada',
+            label: 'Fill name',
+            elementLabel: 'Name',
+            elementRole: 'AXTextField',
+            appName: 'Forms'
+          })
+        ],
+        warnings: []
+      },
+      actuator,
+      onEvent: () => {}
+    })
+    await runner.start()
+    expect(actuator.calls).toContain('type:Ada')
+    expect(actuator.calls).toContain('readField:Name')
+  })
+
   it('manual op holds for takeOver', async () => {
     const actuator = new FakeActuator()
     const events: RunEvent[] = []
@@ -345,6 +542,7 @@ describe('AutomationRunner', () => {
       sessionId: 'tsess_1',
       script,
       actuator,
+      mode: 'authorized',
       onEvent: (e) => events.push(e)
     })
 

@@ -205,6 +205,33 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
     expect(prepared.estimatedChars).toBeLessThan(naive.length)
   })
 
+  it('packs narration, marker, l1Op, and clipboardPairId compactly', () => {
+    const rich: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Filled amount',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_fill'],
+          appName: 'Chrome',
+          elementLabel: 'Amount',
+          typedText: '40',
+          l1Op: 'fill_field',
+          narrationText: 'only if the cell is empty',
+          marker: 'decision_point',
+          clipboardPairId: 'pair_1'
+        }
+      ]
+    }
+    const input = createWorkflowModelInput(session, rich)
+    expect(input.acts[0].l1).toBe('fill_field')
+    expect(input.acts[0].nt).toMatch(/empty/)
+    expect(input.acts[0].mk).toBe('decision_point')
+    expect(input.acts[0].cp).toBe('pair_1')
+  })
+
   it('dedupes redundant prose when structured fields exist', () => {
     const rich: PolishedSession = {
       ...polished,

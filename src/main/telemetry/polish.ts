@@ -8,6 +8,7 @@ import {
   type TelemetryEvent
 } from '../../shared/telemetry/schema'
 import { redactEvent, shouldDropEvent } from '../../shared/telemetry/sanitize'
+import { attachNarration } from './narration'
 import { classifyInputKind, segmentActions, semanticOpFromShortcut } from './segment'
 import type { TelemetryStore } from './store/TelemetryStore'
 
@@ -16,14 +17,37 @@ const CLICK_COLLAPSE_MS = 800
 const PASTE_CHAIN_MS = 8_000
 const FOCUS_FOLD_MS = 2_000
 
+const TEXT_FIELD_ROLES = new Set([
+  'AXTextField',
+  'AXTextArea',
+  'AXComboBox',
+  'AXSearchField'
+])
+
 type ActionDraft = Omit<PolishedAction, 'order'> & { order?: number }
+
+type PendingClipboard = {
+  event: TelemetryEvent
+  clip: ClipboardData
+  at: number
+  pairId?: string
+  sourceLabel?: string
+}
+
+type PendingPaste = {
+  event: TelemetryEvent
+  at: number
+  pairId?: string
+  transferSourceLabel?: string
+  transferDestLabel?: string
+}
 
 /**
  * Deterministic polisher — sorts, dedupes, re-redacts, collapses noise,
  * preserves structured evidence, merges copy→paste→send chains,
- * attaches state transitions / waits / target resolution, folds focus into
- * the following interaction, and marks verified outcomes.
- * Does not invent user intent.
+ * L1-denoises fill_field / transfer / reveal, attaches state transitions /
+ * waits / target resolution, folds focus into the following interaction,
+ * and marks verified outcomes. Does not invent user intent.
  */
 export async function polishSession(
   store: TelemetryStore,
@@ -52,9 +76,8 @@ export async function polishSession(
   let pendingWaitMs = 0
   let lastScreenId: string | undefined
   let lastScreenDelta: ScreenAfterDelta | undefined
-  let pendingClipboard: { event: TelemetryEvent; clip: ClipboardData; at: number } | null =
-    null
-  let pendingPaste: { event: TelemetryEvent; at: number } | null = null
+  let pendingClipboard: PendingClipboard | null = null
+  let pendingPaste: PendingPaste | null = null
   let pendingFocus: { draftIndex: number; at: number; label?: string; role?: string } | null =
     null
 
@@ -67,6 +90,26 @@ export async function polishSession(
       draft.screenBeforeId = lastScreenId
     }
     drafts.push(draft)
+  }
+
+  const adjustPendingFocusAfterSplice = (removedIndex: number) => {
+    if (!pendingFocus) return
+    if (pendingFocus.draftIndex === removedIndex) {
+      pendingFocus = null
+    } else if (pendingFocus.draftIndex > removedIndex) {
+      pendingFocus.draftIndex -= 1
+    }
+  }
+
+  const removeDraftContainingEvent = (eventId: string): ActionDraft | null => {
+    for (let i = drafts.length - 1; i >= 0; i--) {
+      if (drafts[i].sourceEventIds.includes(eventId)) {
+        const [removed] = drafts.splice(i, 1)
+        adjustPendingFocusAfterSplice(i)
+        return removed
+      }
+    }
+    return null
   }
 
   const foldPendingFocus = (draft: ActionDraft, ts: number) => {
@@ -83,14 +126,14 @@ export async function polishSession(
       return
     }
     const focusDraft = drafts[pendingFocus.draftIndex]
-    if (focusDraft && focusDraft.category === 'interaction') {
+    if (focusDraft && (focusDraft.category === 'interaction' || focusDraft.l1Op === 'fill_field')) {
       for (const id of focusDraft.sourceEventIds) {
         if (!draft.sourceEventIds.includes(id)) draft.sourceEventIds.push(id)
       }
       if (!draft.elementLabel && focusDraft.elementLabel) draft.elementLabel = focusDraft.elementLabel
       if (!draft.elementRole && focusDraft.elementRole) draft.elementRole = focusDraft.elementRole
       drafts.splice(pendingFocus.draftIndex, 1)
-      // Adjust any later pendingFocus index (none currently).
+      adjustPendingFocusAfterSplice(pendingFocus.draftIndex)
     }
     pendingFocus = null
   }
@@ -115,6 +158,97 @@ export async function polishSession(
     }
     lastScreenId = id
     lastScreenDelta = delta
+  }
+
+  const attachStateChange = (event: TelemetryEvent) => {
+    const kind = event.data?.stateChangeKind
+    const detail = event.data?.stateChangeDetail
+    for (let i = drafts.length - 1; i >= 0; i--) {
+      const prior = drafts[i]
+      if (prior.category === 'session' || prior.category === 'idle') continue
+      if (!prior.sourceEventIds.includes(event.eventId)) {
+        prior.sourceEventIds.push(event.eventId)
+      }
+      prior.screenAfter = {
+        ...(prior.screenAfter ?? {}),
+        ...(kind ? { stateChangeKind: kind } : {}),
+        ...(detail ? { stateChangeDetail: detail } : {})
+      }
+      if (event.screenStateId && !prior.screenAfterId) {
+        prior.screenAfterId = event.screenStateId
+      }
+      break
+    }
+    if (event.screenStateId) noteScreen(event)
+  }
+
+  const pushNavigation = (event: TelemetryEvent, kind: 'navigation' | 'app_switch' | 'window_switch') => {
+    if (event.data?.userInitiated === false) {
+      // Keep screen context without emitting a polished navigation row.
+      if (event.screenStateId) noteScreen(event)
+      return
+    }
+    lastNav = event
+    const doc = event.data?.documentTitle || event.data?.windowTitle
+    const app = event.data?.appName
+    const label = doc || app || event.page || 'a page'
+    const docKey = `${app ?? ''}|${doc ?? ''}`
+    if (docKey && docKey === lastDocKey && drafts.length > 0) {
+      const prior = drafts[drafts.length - 1]
+      if (prior.category === 'navigation') {
+        if (!prior.sourceEventIds.includes(event.eventId)) {
+          prior.sourceEventIds.push(event.eventId)
+        }
+        if (event.screenStateId) {
+          prior.screenAfterId = event.screenStateId
+          lastScreenId = event.screenStateId
+          lastScreenDelta = {
+            appName: app,
+            documentTitle: doc,
+            urlHost: event.data?.urlHost
+          }
+        }
+        return
+      }
+    }
+    lastDocKey = docKey
+    const verb =
+      kind === 'app_switch' ? 'Switched to' : kind === 'window_switch' ? 'Opened window' : 'Opened'
+    const text =
+      kind === 'window_switch'
+        ? doc && app
+          ? `Opened window ${doc} in ${app}`
+          : `Opened window ${label}`
+        : doc && app
+          ? `${verb} ${doc} in ${app}`
+          : `${verb} ${label}`
+    const draft: ActionDraft = {
+      text,
+      category: 'navigation',
+      timestamp: event.timestamp,
+      sourceEventIds: [event.eventId],
+      appName: app,
+      documentTitle: doc,
+      userInitiated: event.data?.userInitiated,
+      screenBeforeId: lastScreenId,
+      screenAfterId: event.screenStateId,
+      screenAfter: event.screenStateId
+        ? changedOnly(lastScreenDelta, {
+            appName: app,
+            documentTitle: doc,
+            urlHost: event.data?.urlHost
+          })
+        : undefined
+    }
+    push(draft)
+    if (event.screenStateId) {
+      lastScreenId = event.screenStateId
+      lastScreenDelta = {
+        appName: app,
+        documentTitle: doc,
+        urlHost: event.data?.urlHost
+      }
+    }
   }
 
   for (let i = 0; i < events.length; i++) {
@@ -143,42 +277,15 @@ export async function polishSession(
           sourceEventIds: [event.eventId]
         })
         break
-      case 'navigation': {
-        lastNav = event
-        const doc = event.data?.documentTitle || event.data?.windowTitle
-        const app = event.data?.appName
-        const label = doc || app || event.page || 'a page'
-        const text = doc && app ? `Opened ${doc} in ${app}` : `Opened ${label}`
-        const docKey = `${app ?? ''}|${doc ?? ''}`
-        lastDocKey = docKey
-        const draft: ActionDraft = {
-          text,
-          category: 'navigation',
-          timestamp: event.timestamp,
-          sourceEventIds: [event.eventId],
-          appName: app,
-          documentTitle: doc,
-          screenBeforeId: lastScreenId,
-          screenAfterId: event.screenStateId,
-          screenAfter: event.screenStateId
-            ? changedOnly(lastScreenDelta, {
-                appName: app,
-                documentTitle: doc,
-                urlHost: event.data?.urlHost
-              })
-            : undefined
-        }
-        push(draft)
-        if (event.screenStateId) {
-          lastScreenId = event.screenStateId
-          lastScreenDelta = {
-            appName: app,
-            documentTitle: doc,
-            urlHost: event.data?.urlHost
-          }
-        }
+      case 'navigation':
+        pushNavigation(event, 'navigation')
         break
-      }
+      case 'app_switch':
+        pushNavigation(event, 'app_switch')
+        break
+      case 'window_switch':
+        pushNavigation(event, 'window_switch')
+        break
       case 'screen_changed': {
         const doc = event.data?.documentTitle || event.data?.windowTitle
         const app = event.data?.appName
@@ -194,6 +301,9 @@ export async function polishSession(
           // Collapse repeated screen_changed within the same document.
           break
         }
+        if (event.data?.userInitiated === false) {
+          break
+        }
         lastDocKey = docKey
         if (doc || event.page || app) {
           const text =
@@ -205,6 +315,7 @@ export async function polishSession(
             sourceEventIds: [event.eventId],
             appName: app,
             documentTitle: doc,
+            userInitiated: event.data?.userInitiated,
             screenAfterId: event.screenStateId,
             screenAfter: {
               appName: app,
@@ -225,6 +336,9 @@ export async function polishSession(
         }
         break
       }
+      case 'state_change':
+        attachStateChange(event)
+        break
       case 'focus_changed': {
         const label =
           event.data?.elementLabel ||
@@ -270,12 +384,50 @@ export async function polishSession(
           fieldType: event.data?.field?.fieldType || event.target?.fieldType,
           elementRole: role
         })
+        const submitKey = event.data?.submitKey
+        const isTabOnly = !typed && submitKey === 'Tab'
+
+        // Tab after a fill_field / typed input on the same target → fold in.
+        if (isTabOnly) {
+          const prior = drafts[drafts.length - 1]
+          if (
+            prior &&
+            (prior.l1Op === 'fill_field' || prior.category === 'input') &&
+            ((!label && !prior.elementLabel) || label === prior.elementLabel) &&
+            ts - Date.parse(prior.timestamp) < FOCUS_FOLD_MS
+          ) {
+            if (!prior.sourceEventIds.includes(event.eventId)) {
+              prior.sourceEventIds.push(event.eventId)
+            }
+            prior.l1Op = 'fill_field'
+            break
+          }
+          const draft: ActionDraft = {
+            text: label ? `Pressed Tab in ${label}` : 'Pressed Tab',
+            category: 'input',
+            timestamp: event.timestamp,
+            sourceEventIds: [event.eventId],
+            appName: event.data?.appName,
+            documentTitle: event.data?.documentTitle,
+            elementLabel: label,
+            elementRole: role,
+            inputKind,
+            targetResolution: label || role ? 'ax' : 'none'
+          }
+          foldPendingFocus(draft, ts)
+          if (draft.sourceEventIds.length > 1 || isTextFieldRole(role)) {
+            draft.l1Op = 'fill_field'
+          }
+          push(draft)
+          break
+        }
+
         if (!typed) {
-          if (event.data?.submitKey) {
+          if (submitKey) {
             const draft: ActionDraft = {
               text: label
-                ? `Pressed ${event.data.submitKey} in ${label}`
-                : `Pressed ${event.data.submitKey}`,
+                ? `Pressed ${submitKey} in ${label}`
+                : `Pressed ${submitKey}`,
               category: 'input',
               timestamp: event.timestamp,
               sourceEventIds: [event.eventId],
@@ -284,9 +436,7 @@ export async function polishSession(
               elementLabel: label,
               elementRole: role,
               inputKind,
-              semanticOp: event.data.submitKey === 'Return' || event.data.submitKey === 'Enter'
-                ? 'submit'
-                : undefined,
+              semanticOp: submitKey === 'Return' || submitKey === 'Enter' ? 'submit' : undefined,
               targetResolution: label || role ? 'ax' : 'none'
             }
             foldPendingFocus(draft, ts)
@@ -308,13 +458,33 @@ export async function polishSession(
           typedText: shown,
           inputKind,
           semanticOp:
-            event.data?.submitKey === 'Return' || event.data?.submitKey === 'Enter'
-              ? 'submit'
-              : undefined,
+            submitKey === 'Return' || submitKey === 'Enter' ? 'submit' : undefined,
           targetResolution: label || role ? 'ax' : 'none',
           elementBounds: event.data?.elementBounds
         }
         foldPendingFocus(draft, ts)
+
+        // Fold a preceding click on the same text field into this fill.
+        const prior = drafts[drafts.length - 1]
+        if (
+          prior &&
+          prior.category === 'interaction' &&
+          isTextFieldRole(prior.elementRole) &&
+          ((!label && !prior.elementLabel) || label === prior.elementLabel) &&
+          ts - Date.parse(prior.timestamp) < FOCUS_FOLD_MS
+        ) {
+          for (const id of prior.sourceEventIds) {
+            if (!draft.sourceEventIds.includes(id)) draft.sourceEventIds.push(id)
+          }
+          if (!draft.elementLabel && prior.elementLabel) draft.elementLabel = prior.elementLabel
+          if (!draft.elementRole && prior.elementRole) draft.elementRole = prior.elementRole
+          drafts.pop()
+        }
+
+        // fill_field only when a preceding click/focus was folded in, or Tab ended entry.
+        if (draft.sourceEventIds.length > 1 || submitKey === 'Tab') {
+          draft.l1Op = 'fill_field'
+        }
         push(draft)
         break
       }
@@ -348,8 +518,14 @@ export async function polishSession(
         const displayName = name || 'unresolved target'
         const isSend = /^(send|submit|share|post|done)$/i.test((axLabel ?? '').trim())
         const inferred = event.data?.inferred === true || event.type === 'element_activated'
+        const role = event.data?.elementRole || event.target?.role
 
         if (isSend && pendingPaste && ts - pendingPaste.at < PASTE_CHAIN_MS) {
+          // Drop the intermediate transfer/paste row — submission supersedes it.
+          removeDraftContainingEvent(pendingPaste.event.eventId)
+          if (pendingClipboard) {
+            removeDraftContainingEvent(pendingClipboard.event.eventId)
+          }
           const sources = [
             ...(pendingClipboard ? [pendingClipboard.event.eventId] : []),
             pendingPaste.event.eventId,
@@ -368,12 +544,16 @@ export async function polishSession(
             appName: event.data?.appName,
             documentTitle: event.data?.documentTitle,
             elementLabel: axLabel ?? displayName,
-            elementRole: event.data?.elementRole,
+            elementRole: role,
             clipboard: clip,
+            clipboardPairId: pendingPaste.pairId ?? pendingClipboard?.pairId,
+            transferSourceLabel: pendingPaste.transferSourceLabel,
+            transferDestLabel: pendingPaste.transferDestLabel,
             inferred,
             verified,
             targetResolution: resolution,
             semanticOp: 'submit',
+            l1Op: 'transfer',
             clickButton: event.data?.clickButton,
             clickCount: event.data?.clickCount,
             clickX: event.data?.clickX,
@@ -396,7 +576,7 @@ export async function polishSession(
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
           elementLabel: axLabel ?? undefined,
-          elementRole: event.data?.elementRole || event.target?.role,
+          elementRole: role,
           inferred: inferred || undefined,
           verified: isSend ? detectVerified(events, i) : undefined,
           clickButton: event.data?.clickButton,
@@ -405,10 +585,23 @@ export async function polishSession(
           clickY: event.data?.clickY,
           targetResolution: resolution,
           semanticOp: isSend ? 'submit' : undefined,
-          elementBounds: event.data?.elementBounds
+          elementBounds: event.data?.elementBounds,
+          listContext: event.data?.listContext || event.target?.listContext,
+          clickModifiers: event.data?.clickModifiers,
+          elementNorm: event.data?.elementNorm
         }
         foldPendingFocus(draft, ts)
         push(draft)
+
+        // Text-field clicks are candidates for fill_field merge with following typing.
+        if (!isSend && isTextFieldRole(role)) {
+          pendingFocus = {
+            draftIndex: drafts.length - 1,
+            at: ts,
+            label: axLabel ?? undefined,
+            role
+          }
+        }
         break
       }
       case 'field_completed': {
@@ -476,7 +669,18 @@ export async function polishSession(
       case 'clipboard_changed': {
         const clip = event.data?.clipboard
         if (!clip) break
-        pendingClipboard = { event, clip, at: ts }
+        const sourceLabel =
+          event.data?.elementLabel ||
+          event.target?.accessibleLabel ||
+          event.target?.visibleLabel
+        const pairId = event.data?.clipboardPairId || clip.pairId
+        pendingClipboard = {
+          event,
+          clip,
+          at: ts,
+          pairId,
+          sourceLabel
+        }
         const desc =
           clip.contentType === 'url' && clip.urlHost
             ? `Copied ${clip.urlHost} link`
@@ -488,13 +692,81 @@ export async function polishSession(
           sourceEventIds: [event.eventId],
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
+          elementLabel: sourceLabel,
+          elementRole: event.data?.elementRole || event.target?.role,
           clipboard: clip,
+          clipboardPairId: pairId,
+          transferSourceLabel: sourceLabel,
           semanticOp: 'copy'
         })
         break
       }
       case 'paste_detected': {
-        pendingPaste = { event, at: ts }
+        const destLabel =
+          event.data?.elementLabel ||
+          event.target?.accessibleLabel ||
+          event.target?.visibleLabel
+        const pairId =
+          event.data?.clipboardPairId ||
+          event.data?.clipboard?.pairId ||
+          pendingClipboard?.pairId
+        const hashMatch =
+          !!pendingClipboard &&
+          !!event.data?.matchedClipboardHash &&
+          event.data.matchedClipboardHash === pendingClipboard.clip.contentHash &&
+          ts - pendingClipboard.at < PASTE_CHAIN_MS
+        const pairMatch =
+          !!pendingClipboard &&
+          !!pairId &&
+          (pairId === pendingClipboard.pairId ||
+            pairId === pendingClipboard.clip.pairId)
+        const matched = pairMatch || hashMatch
+
+        if (matched && pendingClipboard) {
+          removeDraftContainingEvent(pendingClipboard.event.eventId)
+          const host = event.data?.clipboard?.urlHost || pendingClipboard.clip.urlHost
+          const sourceLabel = pendingClipboard.sourceLabel
+          const draft: ActionDraft = {
+            text: host
+              ? `Transferred ${host} link${sourceLabel && destLabel ? ` from ${sourceLabel} to ${destLabel}` : destLabel ? ` to ${destLabel}` : ''}`
+              : sourceLabel && destLabel
+                ? `Transferred from ${sourceLabel} to ${destLabel}`
+                : 'Transferred clipboard content',
+            category: 'clipboard',
+            timestamp: event.timestamp,
+            sourceEventIds: [pendingClipboard.event.eventId, event.eventId],
+            appName: event.data?.appName,
+            documentTitle: event.data?.documentTitle,
+            elementLabel: destLabel,
+            elementRole: event.data?.elementRole || event.target?.role,
+            clipboard: event.data?.clipboard || pendingClipboard.clip,
+            clipboardPairId: pairId,
+            transferSourceLabel: sourceLabel,
+            transferDestLabel: destLabel,
+            inferred: event.data?.inferred,
+            semanticOp: 'paste',
+            l1Op: 'transfer',
+            targetResolution: destLabel || event.data?.elementRole ? 'ax' : 'none'
+          }
+          foldPendingFocus(draft, ts)
+          push(draft)
+          pendingPaste = {
+            event,
+            at: ts,
+            pairId,
+            transferSourceLabel: sourceLabel,
+            transferDestLabel: destLabel
+          }
+          break
+        }
+
+        pendingPaste = {
+          event,
+          at: ts,
+          pairId,
+          transferDestLabel: destLabel,
+          transferSourceLabel: pendingClipboard?.sourceLabel
+        }
         const host = event.data?.clipboard?.urlHost || pendingClipboard?.clip.urlHost
         const draft: ActionDraft = {
           text: host ? `Pasted ${host} link` : 'Pasted clipboard content',
@@ -506,14 +778,55 @@ export async function polishSession(
           ],
           appName: event.data?.appName,
           documentTitle: event.data?.documentTitle,
+          elementLabel: destLabel,
           clipboard: event.data?.clipboard || pendingClipboard?.clip,
+          clipboardPairId: pairId,
+          transferSourceLabel: pendingClipboard?.sourceLabel,
+          transferDestLabel: destLabel,
           inferred: true,
           semanticOp: 'paste',
-          targetResolution:
-            event.data?.elementLabel || event.data?.elementRole ? 'ax' : 'none'
+          targetResolution: destLabel || event.data?.elementRole ? 'ax' : 'none'
         }
         foldPendingFocus(draft, ts)
         push(draft)
+        break
+      }
+      case 'scroll': {
+        const containerRole = event.data?.scrollContainerRole
+        const containerLabel = event.data?.scrollContainerLabel
+        const containerKey = `${containerRole ?? ''}|${containerLabel ?? ''}`
+        const prior = drafts[drafts.length - 1]
+        const priorKey =
+          prior?.l1Op === 'reveal'
+            ? `${prior.elementRole ?? ''}|${prior.elementLabel ?? ''}`
+            : null
+        if (
+          prior &&
+          prior.l1Op === 'reveal' &&
+          priorKey === containerKey &&
+          (prior.appName ?? '') === (event.data?.appName ?? '')
+        ) {
+          if (!prior.sourceEventIds.includes(event.eventId)) {
+            prior.sourceEventIds.push(event.eventId)
+          }
+          // Keep the latest scroll position semantics in the text.
+          const label = containerLabel || containerRole
+          prior.text = label ? `Scrolled ${label}` : 'Scrolled'
+          break
+        }
+        const label = containerLabel || containerRole
+        push({
+          text: label ? `Scrolled ${label}` : 'Scrolled',
+          category: 'interaction',
+          timestamp: event.timestamp,
+          sourceEventIds: [event.eventId],
+          appName: event.data?.appName,
+          documentTitle: event.data?.documentTitle,
+          elementLabel: containerLabel,
+          elementRole: containerRole,
+          l1Op: 'reveal',
+          targetResolution: containerRole || containerLabel ? 'ax' : 'none'
+        })
         break
       }
       case 'keyboard_shortcut': {
@@ -551,6 +864,34 @@ export async function polishSession(
         })
         break
       }
+      case 'narration_span': {
+        const text = event.data?.narrationText
+        if (!text || drafts.length === 0) break
+        for (let j = drafts.length - 1; j >= 0; j--) {
+          const prior = drafts[j]
+          if (prior.category === 'session' || prior.category === 'idle') continue
+          prior.narrationText = text
+          if (!prior.sourceEventIds.includes(event.eventId)) {
+            prior.sourceEventIds.push(event.eventId)
+          }
+          break
+        }
+        break
+      }
+      case 'marker': {
+        const marker = event.data?.marker
+        if (!marker || drafts.length === 0) break
+        for (let j = drafts.length - 1; j >= 0; j--) {
+          const prior = drafts[j]
+          if (prior.category === 'session' || prior.category === 'idle') continue
+          prior.marker = marker
+          if (!prior.sourceEventIds.includes(event.eventId)) {
+            prior.sourceEventIds.push(event.eventId)
+          }
+          break
+        }
+        break
+      }
       default:
         break
     }
@@ -568,7 +909,7 @@ export async function polishSession(
     max: events.length ? events[events.length - 1].sequence : 0
   }
 
-  const polished: PolishedSession = {
+  let polished: PolishedSession = {
     sessionId,
     schemaVersion: SCHEMA_VERSION,
     polishedAt: new Date().toISOString(),
@@ -578,8 +919,40 @@ export async function polishSession(
     screens
   }
 
+  // Overlap-based narration attachment (events may already have folded markers).
+  if (store.getNarration) {
+    try {
+      const narration = await store.getNarration(sessionId)
+      if (narration?.spans?.length) {
+        const meta = await store.getSessionMeta(sessionId)
+        const startedAtMs = meta ? Date.parse(meta.startedAt) : 0
+        if (Number.isFinite(startedAtMs) && startedAtMs > 0) {
+          polished = attachNarration(
+            polished,
+            narration.spans.map((s) => ({
+              text: s.text,
+              startMs: s.startMs,
+              endMs: s.endMs,
+              ...(s.marker ? { marker: s.marker } : {})
+            })),
+            startedAtMs
+          )
+        }
+      }
+    } catch (err) {
+      console.error(
+        '[telemetry] attachNarration failed',
+        err instanceof Error ? err.name : 'error'
+      )
+    }
+  }
+
   await store.savePolishedSession(sessionId, polished)
   return polished
+}
+
+function isTextFieldRole(role: string | undefined): boolean {
+  return !!role && TEXT_FIELD_ROLES.has(role)
 }
 
 function resolveTarget(event: TelemetryEvent, axLabel: string | undefined): TargetResolution {
@@ -645,6 +1018,9 @@ function detectVerified(events: TelemetryEvent[], index: number): boolean {
       return true
     }
     if (e.type === 'screen_changed' && e.data?.successMessage) {
+      return true
+    }
+    if (e.type === 'state_change' && e.data?.stateChangeKind === 'toast_appeared') {
       return true
     }
     if (e.data?.verified === true) return true

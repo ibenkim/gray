@@ -6,7 +6,10 @@ export const TelemetryEventTypeSchema = z.enum([
   'session_started',
   'session_stopped',
   'navigation',
+  'app_switch',
+  'window_switch',
   'click',
+  'scroll',
   'text_input',
   'field_completed',
   'selection_changed',
@@ -14,11 +17,16 @@ export const TelemetryEventTypeSchema = z.enum([
   'keyboard_shortcut',
   'error',
   'screen_changed',
+  'state_change',
   'focus_changed',
   'clipboard_changed',
   'paste_detected',
   'element_activated',
-  'keyframe_captured'
+  'keyframe_captured',
+  'file_dialog',
+  'download',
+  'narration_span',
+  'marker'
 ])
 
 export type TelemetryEventType = z.infer<typeof TelemetryEventTypeSchema>
@@ -28,6 +36,44 @@ export const ViewportSchema = z.object({
   height: z.number().int().nonnegative()
 })
 
+export const DisplayInfoSchema = z
+  .object({
+    scale: z.number().positive(),
+    width: z.number().int().nonnegative(),
+    height: z.number().int().nonnegative()
+  })
+  .strict()
+
+export type DisplayInfo = z.infer<typeof DisplayInfoSchema>
+
+export const WindowBoundsSchema = z
+  .object({
+    x: z.number().int(),
+    y: z.number().int(),
+    width: z.number().int().nonnegative(),
+    height: z.number().int().nonnegative()
+  })
+  .strict()
+
+export type WindowBounds = z.infer<typeof WindowBoundsSchema>
+
+/** How the target was resolved — ax preferred; visual/ocr deferred. */
+export const TargetTierSchema = z.enum(['ax', 'coords', 'none', 'visual'])
+export type TargetTier = z.infer<typeof TargetTierSchema>
+
+export const ListContextSchema = z
+  .object({
+    rowIndex: z.number().int().nonnegative().optional(),
+    siblingCount: z.number().int().nonnegative().optional(),
+    precedingNonEmpty: z.number().int().nonnegative().optional(),
+    columnHeader: z.string().max(80).optional(),
+    containerRole: z.string().max(64).optional(),
+    containerLabel: z.string().max(120).optional()
+  })
+  .strict()
+
+export type ListContext = z.infer<typeof ListContextSchema>
+
 export const TelemetryTargetSchema = z
   .object({
     role: z.string().max(64).optional(),
@@ -35,10 +81,15 @@ export const TelemetryTargetSchema = z
     accessibleLabel: z.string().max(120).optional(),
     visibleLabel: z.string().max(80).optional(),
     analyticsId: z.string().max(120).optional(),
+    /** AXIdentifier when available. */
+    identifier: z.string().max(120).optional(),
     fieldType: z.string().max(64).optional(),
     formLabel: z.string().max(120).optional(),
     appName: z.string().max(120).optional(),
-    appBundleId: z.string().max(200).optional()
+    appBundleId: z.string().max(200).optional(),
+    enabled: z.boolean().optional(),
+    tier: TargetTierSchema.optional(),
+    listContext: ListContextSchema.optional()
   })
   .strict()
 
@@ -76,18 +127,70 @@ export const FieldDataSchema = z
 export const ClipboardContentTypeSchema = z.enum(['url', 'text', 'image', 'file', 'other'])
 export type ClipboardContentType = z.infer<typeof ClipboardContentTypeSchema>
 
-/** Sanitized clipboard metadata — never the raw value. */
+/**
+ * Clipboard metadata. Plaintext may be stored under a size threshold after
+ * redaction; sensitive content never persists a value.
+ */
 export const ClipboardDataSchema = z
   .object({
     contentType: ClipboardContentTypeSchema,
     urlHost: z.string().max(200).optional(),
     urlPath: z.string().max(200).optional(),
+    /** Sanitized query kept for address extraction (tracking params stripped). */
+    urlQuery: z.string().max(300).optional(),
     charCount: z.number().int().nonnegative().optional(),
-    contentHash: z.string().max(64)
+    contentHash: z.string().max(64),
+    /** Redacted plaintext under size threshold; absent for sensitive/oversized. */
+    text: z.string().max(500).optional(),
+    /** Links copy → paste as one transfer. */
+    pairId: z.string().max(80).optional()
   })
   .strict()
 
 export type ClipboardData = z.infer<typeof ClipboardDataSchema>
+
+export const ClickModifiersSchema = z
+  .object({
+    cmd: z.boolean().optional(),
+    opt: z.boolean().optional(),
+    ctrl: z.boolean().optional(),
+    shift: z.boolean().optional()
+  })
+  .strict()
+
+export type ClickModifiers = z.infer<typeof ClickModifiersSchema>
+
+export const ElementNormSchema = z
+  .object({
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1)
+  })
+  .strict()
+
+export type ElementNorm = z.infer<typeof ElementNormSchema>
+
+export const StateChangeKindSchema = z.enum([
+  'spinner_gone',
+  'table_rendered',
+  'row_count_changed',
+  'toast_appeared',
+  'dialog_appeared',
+  'dialog_dismissed',
+  'loading_started',
+  'loading_finished',
+  'title_changed',
+  'url_changed',
+  'other'
+])
+export type StateChangeKind = z.infer<typeof StateChangeKindSchema>
+
+export const NarrationMarkerSchema = z.enum([
+  'decision_point',
+  'optional',
+  'skip_this',
+  'check_here'
+])
+export type NarrationMarker = z.infer<typeof NarrationMarkerSchema>
 
 export const ElementBoundsSchema = z
   .object({
@@ -120,7 +223,10 @@ export const ScreenAfterDeltaSchema = z
   .object({
     appName: z.string().max(120).optional(),
     documentTitle: z.string().max(200).optional(),
-    urlHost: z.string().max(200).optional()
+    urlHost: z.string().max(200).optional(),
+    /** Attached from a following state_change event. */
+    stateChangeKind: StateChangeKindSchema.optional(),
+    stateChangeDetail: z.string().max(200).optional()
   })
   .strict()
 
@@ -165,9 +271,17 @@ export const TelemetryEventDataSchema = z
   .object({
     appName: z.string().max(120).optional(),
     appBundleId: z.string().max(200).optional(),
+    /** Process id of the frontmost app (for disambiguation). */
+    pid: z.number().int().positive().optional(),
     windowTitle: z.string().max(200).optional(),
+    windowBounds: WindowBoundsSchema.optional(),
+    display: DisplayInfoSchema.optional(),
     urlHost: z.string().max(200).optional(),
     urlPath: z.string().max(200).optional(),
+    /** Sanitized query string (tracking + credentials stripped). */
+    urlQuery: z.string().max(300).optional(),
+    /** False for redirects / automatic navigations. */
+    userInitiated: z.boolean().optional(),
     shortcut: z.string().max(64).optional(),
     message: z.string().max(300).optional(),
     field: FieldDataSchema.optional(),
@@ -185,15 +299,24 @@ export const TelemetryEventDataSchema = z
     elementRole: z.string().max(64).optional(),
     elementSubrole: z.string().max(64).optional(),
     elementLabel: z.string().max(120).optional(),
-    elementPath: z.array(z.string().max(80)).max(3).optional(),
+    elementIdentifier: z.string().max(120).optional(),
+    elementEnabled: z.boolean().optional(),
+    elementPath: z.array(z.string().max(80)).max(8).optional(),
     selectedLabels: z.array(z.string().max(120)).max(5).optional(),
+    listContext: ListContextSchema.optional(),
+    targetTier: TargetTierSchema.optional(),
     clipboard: ClipboardDataSchema.optional(),
     charCountDelta: z.number().int().optional(),
     matchedClipboardHash: z.string().max(64).optional(),
+    /** Links a paste_detected to its clipboard_changed. */
+    clipboardPairId: z.string().max(80).optional(),
     inferred: z.boolean().optional(),
     verified: z.boolean().optional(),
     /** Relative path only — never base64, never absolute. */
     keyframePath: z.string().max(300).optional(),
+    preShotPath: z.string().max(300).optional(),
+    postShotPath: z.string().max(300).optional(),
+    targetCropPath: z.string().max(300).optional(),
     /**
      * Text the user typed, after redaction. Absent when the target was a
      * password/secure field or the text redacted down to nothing.
@@ -205,13 +328,41 @@ export const TelemetryEventDataSchema = z
     keyCount: z.number().int().nonnegative().optional(),
     /** Key that ended the entry, e.g. "Return" or "Tab". */
     submitKey: z.string().max(24).optional(),
-    clickButton: z.enum(['left', 'right']).optional(),
+    clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
+    clickModifiers: ClickModifiersSchema.optional(),
     /** Screen coordinates of a click (top-left origin), when observed. */
     clickX: z.number().int().optional(),
     clickY: z.number().int().optional(),
+    /** Window-relative click coordinates. */
+    clickWindowX: z.number().int().optional(),
+    clickWindowY: z.number().int().optional(),
+    /** Position inside the target bbox, 0–1 on each axis. */
+    elementNorm: ElementNormSchema.optional(),
     /** Accessibility frame of the target element (top-left origin), when observed. */
-    elementBounds: ElementBoundsSchema.optional()
+    elementBounds: ElementBoundsSchema.optional(),
+    /** Scroll payload. */
+    scrollAxis: z.enum(['vertical', 'horizontal']).optional(),
+    scrollDelta: z.number().optional(),
+    scrollContainerRole: z.string().max(64).optional(),
+    scrollContainerLabel: z.string().max(120).optional(),
+    scrollPositionBefore: z.number().optional(),
+    scrollPositionAfter: z.number().optional(),
+    /** Structured state-change description. */
+    stateChangeKind: StateChangeKindSchema.optional(),
+    stateChangeElement: z.string().max(120).optional(),
+    stateChangeDetail: z.string().max(200).optional(),
+    /** File dialog / download. */
+    filePath: z.string().max(400).optional(),
+    fileName: z.string().max(200).optional(),
+    fileExtension: z.string().max(32).optional(),
+    fileDialogKind: z.enum(['open', 'save']).optional(),
+    downloadSourceUrl: z.string().max(500).optional(),
+    /** Narration / markers. */
+    narrationText: z.string().max(800).optional(),
+    narrationStartMs: z.number().int().nonnegative().optional(),
+    narrationEndMs: z.number().int().nonnegative().optional(),
+    marker: NarrationMarkerSchema.optional()
   })
   .strict()
 
@@ -384,7 +535,7 @@ export const PolishedActionSchema = z
     verified: z.boolean().optional(),
     /** Redacted text the user typed during this action, when captured. */
     typedText: z.string().max(300).optional(),
-    clickButton: z.enum(['left', 'right']).optional(),
+    clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
     clickX: z.number().int().optional(),
     clickY: z.number().int().optional(),
@@ -402,7 +553,18 @@ export const PolishedActionSchema = z
     waitedMs: z.number().int().nonnegative().optional(),
     /** Semantic shortcut / clipboard operation when known. */
     semanticOp: SemanticOpSchema.optional(),
-    elementBounds: ElementBoundsSchema.optional()
+    elementBounds: ElementBoundsSchema.optional(),
+    /** L1 denoised op: fill_field / transfer / reveal when merged. */
+    l1Op: z.enum(['fill_field', 'transfer', 'reveal']).optional(),
+    transferSourceLabel: z.string().max(120).optional(),
+    transferDestLabel: z.string().max(120).optional(),
+    clipboardPairId: z.string().max(80).optional(),
+    listContext: ListContextSchema.optional(),
+    clickModifiers: ClickModifiersSchema.optional(),
+    elementNorm: ElementNormSchema.optional(),
+    narrationText: z.string().max(800).optional(),
+    marker: NarrationMarkerSchema.optional(),
+    userInitiated: z.boolean().optional()
   })
   .strict()
 
@@ -437,6 +599,7 @@ export const WorkflowStepCategorySchema = z.enum([
   'other'
 ])
 
+/** L1 / execution hints — resolver verbs must NOT appear as L2 intent. */
 export const WorkflowActionTypeSchema = z.enum([
   'click',
   'type',
@@ -448,16 +611,88 @@ export const WorkflowActionTypeSchema = z.enum([
   'shortcut',
   'wait',
   'activate',
+  'fill_field',
+  'transfer',
+  'reveal',
   'other'
 ])
 export type WorkflowActionType = z.infer<typeof WorkflowActionTypeSchema>
+
+/** L2 intent verbs — a step is a goal, not a recorded action. */
+export const IntentVerbSchema = z.enum([
+  'Locate',
+  'Read',
+  'Transform',
+  'Fill',
+  'Create',
+  'Decide',
+  'Verify',
+  'Commit',
+  'Wait'
+])
+export type IntentVerb = z.infer<typeof IntentVerbSchema>
+
+export const ResolutionPolicySchema = z.enum(['auto', 'assist', 'stage'])
+export type ResolutionPolicy = z.infer<typeof ResolutionPolicySchema>
+
+export const StepRequirementSchema = z
+  .object({
+    ref: z.string().max(80).nullable(),
+    account: z.string().max(200).nullable(),
+    noModal: z.boolean().nullable(),
+    policy: ResolutionPolicySchema,
+    description: z.string().max(200).nullable()
+  })
+  .strict()
+
+export type StepRequirement = z.infer<typeof StepRequirementSchema>
+
+export const PositionStrategySchema = z.enum([
+  'first_empty_row',
+  'match_row',
+  'newest',
+  'last',
+  'absolute'
+])
+export type PositionStrategy = z.infer<typeof PositionStrategySchema>
+
+export const StepPositionSchema = z
+  .object({
+    strategy: PositionStrategySchema,
+    column: z.string().max(40).nullable(),
+    matchValue: z.string().max(200).nullable()
+  })
+  .strict()
+
+export type StepPosition = z.infer<typeof StepPositionSchema>
+
+export const StepEffectSchema = z
+  .object({
+    kind: z.enum(['row_count', 'readback', 'element_present', 'url_matches', 'other']),
+    column: z.string().max(80).nullable(),
+    equals: z.string().max(300).nullable(),
+    delta: z.string().max(40).nullable(),
+    detail: z.string().max(200).nullable()
+  })
+  .strict()
+
+export type StepEffect = z.infer<typeof StepEffectSchema>
+
+export const AuthorizationClassSchema = z.enum([
+  'read',
+  'bounded_write',
+  'commit',
+  'destructive'
+])
+export type AuthorizationClass = z.infer<typeof AuthorizationClassSchema>
 
 export const WorkflowRetryHintSchema = z.enum([
   'none',
   'retry_once',
   'retry_until',
   'ask_user',
-  'skip'
+  'skip',
+  'halt_and_return_control'
 ])
 export type WorkflowRetryHint = z.infer<typeof WorkflowRetryHintSchema>
 
@@ -492,7 +727,18 @@ export const WorkflowStepSchema = z
     dependsOnSteps: z.array(z.number().int().positive()).max(20).nullable(),
     retryHint: WorkflowRetryHintSchema.nullable(),
     alternatives: z.array(WorkflowStepAlternativeSchema).max(3).nullable(),
-    needsClarification: z.boolean().nullable()
+    needsClarification: z.boolean().nullable(),
+    /** L2 intent step id (stable across re-interpretation). */
+    id: z.string().max(40).nullable(),
+    intent: IntentVerbSchema.nullable(),
+    summary: z.string().max(300).nullable(),
+    requires: z.array(StepRequirementSchema).max(8).nullable(),
+    params: z.record(z.string().max(40), z.string().max(200)).nullable(),
+    position: StepPositionSchema.nullable(),
+    effect: z.array(StepEffectSchema).max(6).nullable(),
+    idempotencyKey: z.string().max(120).nullable(),
+    onFail: WorkflowRetryHintSchema.nullable(),
+    authorization: AuthorizationClassSchema.nullable()
   })
   .strict()
 
@@ -509,6 +755,95 @@ export const WorkflowVariableSchema = z
 
 export type WorkflowVariable = z.infer<typeof WorkflowVariableSchema>
 
+export const AddressKindSchema = z.enum(['url', 'file', 'deeplink', 'record', 'app_doc'])
+export type AddressKind = z.infer<typeof AddressKindSchema>
+
+export const AddressVerifySchema = z
+  .object({
+    urlMatches: z.string().max(300).nullable(),
+    elementPresent: z
+      .object({
+        text: z.string().max(120).nullable(),
+        role: z.string().max(64).nullable()
+      })
+      .nullable(),
+    accountIndicator: z.string().max(200).nullable()
+  })
+  .strict()
+
+export type AddressVerify = z.infer<typeof AddressVerifySchema>
+
+export const AddressHealthSchema = z
+  .object({
+    attempts: z.number().int().nonnegative(),
+    successes: z.number().int().nonnegative(),
+    lastOk: z.string().datetime().nullable()
+  })
+  .strict()
+
+export type AddressHealth = z.infer<typeof AddressHealthSchema>
+
+/** First-class destination — shared across steps, repairable in one place. */
+export const AddressSchema = z
+  .object({
+    id: z.string().min(1).max(80),
+    kind: AddressKindSchema,
+    template: z.string().max(500),
+    params: z.record(z.string().max(40), z.string().max(200)).nullable(),
+    identityAccount: z.string().max(200).nullable(),
+    identityProvider: z.string().max(80).nullable(),
+    stability: z.enum(['high', 'medium', 'low']),
+    verify: AddressVerifySchema,
+    fallback: z.array(z.string().max(80)).max(4).nullable(),
+    health: AddressHealthSchema.nullable(),
+    policy: ResolutionPolicySchema,
+    needsReview: z.boolean().nullable()
+  })
+  .strict()
+
+export type Address = z.infer<typeof AddressSchema>
+
+export const WorkflowBranchSchema = z
+  .object({
+    id: z.string().max(40),
+    atStepId: z.string().max(40),
+    condition: z.string().max(300),
+    /** Required — narration vs cross-run; missing source → question, not branch. */
+    source: z.enum(['narration', 'cross_run', 'user']),
+    confidence: z.number().min(0).max(1)
+  })
+  .strict()
+
+export type WorkflowBranch = z.infer<typeof WorkflowBranchSchema>
+
+export const AuthorizationScopeSchema = z
+  .object({
+    destinations: z.array(z.string().max(80)).max(20),
+    level: AuthorizationClassSchema,
+    expires: z.string().datetime().nullable()
+  })
+  .strict()
+
+export type AuthorizationScope = z.infer<typeof AuthorizationScopeSchema>
+
+export const WorkflowQuestionSchema = z
+  .object({
+    id: z.string().max(40),
+    prompt: z.string().min(1).max(400),
+    relatedStepId: z.string().max(40).nullable(),
+    kind: z.enum([
+      'branch',
+      'value_source',
+      'position',
+      'search_intent',
+      'absolute_position',
+      'other'
+    ])
+  })
+  .strict()
+
+export type WorkflowQuestion = z.infer<typeof WorkflowQuestionSchema>
+
 export const ExtractedWorkflowSchema = z
   .object({
     title: z.string().min(1).max(160),
@@ -518,13 +853,40 @@ export const ExtractedWorkflowSchema = z
     steps: z.array(WorkflowStepSchema).min(1).max(80),
     warnings: z.array(z.string().max(300)).max(20),
     /** OpenAI structured outputs require nullable (not optional). */
-    variables: z.array(WorkflowVariableSchema).max(20).nullable()
+    variables: z.array(WorkflowVariableSchema).max(20).nullable(),
+    addresses: z.array(AddressSchema).max(20).nullable(),
+    commits: z.array(z.string().max(40)).max(20).nullable(),
+    writes: z.array(z.string().max(80)).max(20).nullable(),
+    inputs: z.array(z.string().max(40)).max(20).nullable(),
+    authorizationScope: AuthorizationScopeSchema.nullable(),
+    branches: z.array(WorkflowBranchSchema).max(20).nullable(),
+    questions: z.array(WorkflowQuestionSchema).max(30).nullable()
   })
   .strict()
 
 export type ExtractedWorkflow = z.infer<typeof ExtractedWorkflowSchema>
 
-/** Fill v2 nullable fields so legacy stored steps still validate. */
+export const RunFailureCodeSchema = z.enum([
+  'target_not_found',
+  'target_ambiguous',
+  'precondition_unmet',
+  'navigation_failed',
+  'address_stale',
+  'auth_required',
+  'wrong_identity',
+  'value_mismatch',
+  'unexpected_state',
+  'branch_unknown',
+  'timeout',
+  'out_of_scope',
+  'repair_exhausted'
+])
+export type RunFailureCode = z.infer<typeof RunFailureCodeSchema>
+
+export const RunModeSchema = z.enum(['simulated', 'supervised', 'authorized'])
+export type RunMode = z.infer<typeof RunModeSchema>
+
+/** Fill nullable fields so legacy stored steps still validate. */
 export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
   step: T
 ): T & {
@@ -542,6 +904,16 @@ export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
   retryHint: WorkflowRetryHint | null
   alternatives: WorkflowStepAlternative[] | null
   needsClarification: boolean | null
+  id: string | null
+  intent: IntentVerb | null
+  summary: string | null
+  requires: StepRequirement[] | null
+  params: Record<string, string> | null
+  position: StepPosition | null
+  effect: StepEffect[] | null
+  idempotencyKey: string | null
+  onFail: WorkflowRetryHint | null
+  authorization: AuthorizationClass | null
 } {
   return {
     ...step,
@@ -558,7 +930,17 @@ export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
     dependsOnSteps: (step.dependsOnSteps as number[] | null | undefined) ?? null,
     retryHint: (step.retryHint as WorkflowRetryHint | null | undefined) ?? null,
     alternatives: (step.alternatives as WorkflowStepAlternative[] | null | undefined) ?? null,
-    needsClarification: (step.needsClarification as boolean | null | undefined) ?? null
+    needsClarification: (step.needsClarification as boolean | null | undefined) ?? null,
+    id: (step.id as string | null | undefined) ?? null,
+    intent: (step.intent as IntentVerb | null | undefined) ?? null,
+    summary: (step.summary as string | null | undefined) ?? null,
+    requires: (step.requires as StepRequirement[] | null | undefined) ?? null,
+    params: (step.params as Record<string, string> | null | undefined) ?? null,
+    position: (step.position as StepPosition | null | undefined) ?? null,
+    effect: (step.effect as StepEffect[] | null | undefined) ?? null,
+    idempotencyKey: (step.idempotencyKey as string | null | undefined) ?? null,
+    onFail: (step.onFail as WorkflowRetryHint | null | undefined) ?? null,
+    authorization: (step.authorization as AuthorizationClass | null | undefined) ?? null
   }
 }
 
@@ -570,7 +952,17 @@ export function normalizeExtractedWorkflow(raw: unknown): ExtractedWorkflow | nu
         typeof s === 'object' && s ? withWorkflowStepDefaults(s as Record<string, unknown>) : s
       )
     : data.steps
-  const parsed = ExtractedWorkflowSchema.safeParse({ ...data, steps })
+  const parsed = ExtractedWorkflowSchema.safeParse({
+    ...data,
+    steps,
+    addresses: data.addresses ?? null,
+    commits: data.commits ?? null,
+    writes: data.writes ?? null,
+    inputs: data.inputs ?? null,
+    authorizationScope: data.authorizationScope ?? null,
+    branches: data.branches ?? null,
+    questions: data.questions ?? null
+  })
   return parsed.success ? parsed.data : null
 }
 

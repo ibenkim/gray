@@ -3,6 +3,7 @@ import { zodTextFormat } from 'openai/helpers/zod'
 import {
   AutomationOpSchema,
   AutomationScriptSchema,
+  type Address,
   type AutomationOp,
   type AutomationScript,
   type ExtractedWorkflow,
@@ -11,6 +12,7 @@ import {
   type StoredAutomationScript,
   type WorkflowVariable
 } from '../../../shared/telemetry/schema'
+import { resolveAddressTemplate } from '../addresses'
 import type { TelemetryConfig } from '../config'
 import { TelemetryProcessingError, mapToProcessingError } from '../errors'
 import type { TelemetryStore } from '../store/TelemetryStore'
@@ -253,7 +255,8 @@ export function validateAndGroundScript(
   const withTabs = ensureBrowserNewTab(collapsed, polished, warnings)
   const withClicks = preferClickAtWhenGrounded(withTabs, polished, byEvent, warnings)
   const withInferred = recoverInferredActions(withClicks, workflow, polished, warnings)
-  const withIntent = applyEditorIntentToOps(withInferred, workflow, polished, warnings)
+  const withAddresses = preferAddressNavigation(withInferred, workflow, warnings)
+  const withIntent = applyEditorIntentToOps(withAddresses, workflow, polished, warnings)
   const withInjected = injectClickOpsFromEvidence(withIntent, workflow, polished, warnings)
   const withWaits = injectWaitOpsFromStepSemantics(withInjected, workflow, polished, warnings)
   const withNav = collapseRedundantBrowserNav(withWaits, warnings)
@@ -1214,6 +1217,163 @@ export function collapseRedundantTypeTexts(
   return ops.filter((_, i) => !drop.has(i))
 }
 
+/**
+ * Prefer first-class addresses over click-path navigation.
+ * When a step requires an address ref, emit open_url / open_app from the
+ * address template and drop same-step click/activate pathing.
+ */
+export function preferAddressNavigation(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  warnings: string[]
+): AutomationOp[] {
+  const addresses = new Map((workflow.addresses ?? []).map((a) => [a.id, a]))
+  if (!addresses.size) return ops
+
+  const stepAddr = new Map<number, Address>()
+  for (const step of workflow.steps) {
+    const ref = step.requires?.find((r) => r.ref && addresses.has(r.ref))?.ref
+    if (!ref) continue
+    const addr = addresses.get(ref)
+    if (addr) stepAddr.set(step.order, addr)
+  }
+  if (!stepAddr.size) return ops
+
+  const out: AutomationOp[] = []
+  const opened = new Set<number>()
+
+  for (const op of ops) {
+    const addr = stepAddr.get(op.stepOrder)
+    if (!addr) {
+      out.push(op)
+      continue
+    }
+
+    // Drop click-path navigation once we can open via address.
+    if (
+      (op.op === 'click_at' || op.op === 'activate_element') &&
+      !/type|fill|cell|field|button|send|share/i.test(op.label ?? op.elementLabel ?? '')
+    ) {
+      if (!opened.has(op.stepOrder)) {
+        out.push(...addressOpenOps(op, addr, warnings))
+        opened.add(op.stepOrder)
+      } else {
+        warnings.push(
+          `Dropped click-path op in favor of address ${addr.id} at step ${op.stepOrder}`
+        )
+      }
+      continue
+    }
+
+    if (op.op === 'manual' && !opened.has(op.stepOrder)) {
+      out.push(...addressOpenOps(op, addr, warnings))
+      opened.add(op.stepOrder)
+      continue
+    }
+
+    if (op.op === 'open_url' && addr.kind === 'url') {
+      const resolved = resolveAddressTemplate(addr.template, addr.params)
+      if (resolved && (!op.url || /drive\.google\.com\/?$/i.test(op.url))) {
+        warnings.push(`Using address ${addr.id} template for open_url at step ${op.stepOrder}`)
+        out.push({ ...op, url: resolved, label: op.label ?? `Open ${addr.id}` })
+        opened.add(op.stepOrder)
+        continue
+      }
+    }
+
+    out.push(op)
+  }
+
+  // Steps that referenced an address but had no ops yet — prepend open.
+  for (const [order, addr] of stepAddr) {
+    if (opened.has(order)) continue
+    if (ops.some((o) => o.stepOrder === order)) continue
+    const evidence =
+      workflow.steps.find((s) => s.order === order)?.evidenceEventIds ?? ['tevt_unknown']
+    const seed: AutomationOp = {
+      op: 'manual',
+      stepOrder: order,
+      evidenceEventIds: evidence,
+      confidence: 0.7,
+      timeoutMs: 15_000,
+      label: null,
+      appName: workflow.steps.find((s) => s.order === order)?.appName ?? null,
+      appBundleId: null,
+      url: null,
+      urlVariableKey: null,
+      elementRole: null,
+      elementLabel: null,
+      elementPath: null,
+      chord: null,
+      variableKey: null,
+      literalText: null,
+      waitCondition: null,
+      waitValue: null,
+      prompt: null,
+      clickX: null,
+      clickY: null
+    }
+    out.push(...addressOpenOps(seed, addr, warnings))
+  }
+
+  return out.sort((a, b) => a.stepOrder - b.stepOrder || 0)
+}
+
+function addressOpenOps(seed: AutomationOp, addr: Address, warnings: string[]): AutomationOp[] {
+  if (addr.kind === 'url') {
+    const url = resolveAddressTemplate(addr.template, addr.params)
+    warnings.push(`Address ${addr.id} → open_url ${url}`)
+    return [
+      {
+        ...seed,
+        op: 'open_url',
+        url,
+        urlVariableKey: null,
+        elementRole: null,
+        elementLabel: null,
+        elementPath: null,
+        chord: null,
+        literalText: null,
+        prompt: null,
+        clickX: null,
+        clickY: null,
+        label: seed.label ?? `Open ${addr.id}`,
+        confidence: Math.max(seed.confidence, 0.75)
+      }
+    ]
+  }
+
+  if (addr.kind === 'app_doc' || addr.kind === 'deeplink') {
+    const appName = seed.appName
+    if (appName) {
+      warnings.push(`Address ${addr.id} → open_app ${appName}`)
+      return [
+        {
+          ...seed,
+          op: 'open_app',
+          url: null,
+          label: seed.label ?? `Open ${appName}`,
+          confidence: Math.max(seed.confidence, 0.7)
+        }
+      ]
+    }
+  }
+
+  if (addr.kind === 'file') {
+    warnings.push(`Address ${addr.id} file path left as manual (no file opener op)`)
+    return [
+      {
+        ...seed,
+        op: 'manual',
+        prompt: `Open file ${resolveAddressTemplate(addr.template, addr.params)}`,
+        label: seed.label ?? 'Open file'
+      }
+    ]
+  }
+
+  return [seed]
+}
+
 function prepareCompileInput(
   workflow: ExtractedWorkflow,
   polished: PolishedSession,
@@ -1224,13 +1384,22 @@ function prepareCompileInput(
   return {
     workflow: {
       title: workflow.title,
+      addresses: workflow.addresses ?? null,
       steps: workflow.steps.map((s) => ({
         order: s.order,
+        id: s.id ?? null,
         action: s.action,
         category: s.category,
         appName: s.appName,
         evidenceEventIds: s.evidenceEventIds,
         confidence: s.confidence,
+        intent: s.intent ?? null,
+        summary: s.summary ?? null,
+        requires: s.requires ?? null,
+        position: s.position ?? null,
+        effect: s.effect ?? null,
+        params: s.params ?? null,
+        authorization: s.authorization ?? null,
         objective: s.objective ?? null,
         actionType: s.actionType ?? null,
         targetRole: s.targetRole ?? null,

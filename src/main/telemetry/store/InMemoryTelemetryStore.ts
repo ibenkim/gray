@@ -14,6 +14,7 @@ import type {
   AppendEventsResult,
   CreateSessionInput,
   SessionMetaPatch,
+  StoredNarration,
   TelemetryStore
 } from './TelemetryStore'
 
@@ -26,6 +27,8 @@ export class InMemoryTelemetryStore implements TelemetryStore {
   variables = new Map<string, StoredVariables>()
   automation = new Map<string, StoredAutomationScript>()
   keyframes = new Map<string, Buffer>()
+  narration = new Map<string, StoredNarration>()
+  groundTruth = new Map<string, string>()
 
   async ensureReady(): Promise<void> {
     /* no-op */
@@ -162,13 +165,31 @@ export class InMemoryTelemetryStore implements TelemetryStore {
     eventId: string,
     jpeg: Buffer
   ): Promise<{ absolutePath: string; relativePath: string }> {
-    const relativePath = `${sessionId}/${eventId}.jpg`
+    const relativePath = `sessions/${sessionId}/shots/${eventId}.jpg`
     this.keyframes.set(relativePath, jpeg)
     return { absolutePath: `/tmp/${relativePath}`, relativePath }
   }
 
   keyframesRoot(): string {
-    return '/tmp/keyframes'
+    return '/tmp'
+  }
+
+  async saveNarration(sessionId: string, narration: StoredNarration): Promise<void> {
+    this.narration.set(sessionId, { ...narration, sessionId })
+  }
+
+  async getNarration(sessionId: string): Promise<StoredNarration | null> {
+    return this.narration.get(sessionId) ?? null
+  }
+
+  async saveGroundTruth(sessionId: string, groundTruth: string | object): Promise<void> {
+    const text =
+      typeof groundTruth === 'string' ? groundTruth : JSON.stringify(groundTruth, null, 2) + '\n'
+    this.groundTruth.set(sessionId, text)
+  }
+
+  async getGroundTruth(sessionId: string): Promise<string | null> {
+    return this.groundTruth.get(sessionId) ?? null
   }
 
   async getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null> {

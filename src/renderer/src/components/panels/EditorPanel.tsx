@@ -2,13 +2,20 @@ import { useEffect, useState } from 'react'
 import { useWorkflow } from '../../state/WorkflowContext'
 import TriggerSection, { PencilIcon } from '../shared/TriggerSection'
 import StepList from '../shared/StepList'
+import {
+  needsRunContract,
+  QuestionsSection,
+  RedactionPreview,
+  RunContractPanel,
+  WorkflowSummary
+} from '../shared/ReviewSections'
 import { ChevronDown } from '../GhostPill'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 
 /**
- * 05 — editor, 660×521 white panel. Header · TRIGGER · STEPS · footer
- * (Cancel with confirm · Run · Save Workflow). Esc collapses to the
- * "Editing" pill — Cancel/✕ is the only destructive exit.
+ * 05 — editor, 660×521 white panel. Header · summary · TRIGGER · QUESTIONS ·
+ * STEPS · footer (Cancel with confirm · Run · Save Workflow). Esc collapses to
+ * the "Editing" pill — Cancel/✕ is the only destructive exit.
  */
 export default function EditorPanel() {
   const {
@@ -22,6 +29,7 @@ export default function EditorPanel() {
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [showContract, setShowContract] = useState(false)
   const { onMouseDown: onDragMouseDown } = useWindowDrag()
 
   // Esc → collapse (not discard).
@@ -30,6 +38,10 @@ export default function EditorPanel() {
       if (e.key !== 'Escape') return
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (showContract) {
+        setShowContract(false)
+        return
+      }
       if (confirmDiscard) {
         setConfirmDiscard(false)
         return
@@ -38,7 +50,7 @@ export default function EditorPanel() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [setEditorCollapsed, confirmDiscard])
+  }, [setEditorCollapsed, confirmDiscard, showContract])
 
   function commitTitle() {
     if (titleDraft.trim()) setWorkflow((w) => ({ ...w, name: titleDraft.trim() }))
@@ -48,6 +60,21 @@ export default function EditorPanel() {
   function beginTitleEdit() {
     setTitleDraft(workflow.name)
     setEditingTitle(true)
+  }
+
+  function requestRun() {
+    if (needsRunContract(workflow)) {
+      setShowContract(true)
+      return
+    }
+    runWorkflow()
+  }
+
+  function confirmContract() {
+    const accepted = { ...workflow, contractAccepted: true }
+    setWorkflow(accepted)
+    setShowContract(false)
+    runWorkflow(accepted)
   }
 
   return (
@@ -109,30 +136,46 @@ export default function EditorPanel() {
       </div>
 
       <div className="editor-body scroll">
-        <TriggerSection
-          trigger={workflow.trigger}
-          onChange={(t) => setWorkflow((w) => ({ ...w, trigger: t }))}
-        />
-
-        <div className="ledger-section">
-          <div className="section-label">STEPS</div>
-          <StepList
-            steps={workflow.steps}
-            onChange={(updater) =>
-              setWorkflow((w) => {
-                const nextSteps = updater(w.steps)
-                if (w.sessionId) {
-                  void window.ghostBridge?.automationMarkStale?.(
-                    w.sessionId,
-                    true,
-                    nextSteps.map((s) => ({ index: s.index, title: s.title }))
-                  )
-                }
-                return { ...w, steps: nextSteps, automationStale: true }
-              })
-            }
+        {showContract && workflow.runContract ? (
+          <RunContractPanel
+            contract={workflow.runContract}
+            onConfirm={confirmContract}
+            onCancel={() => setShowContract(false)}
           />
-        </div>
+        ) : (
+          <>
+            <WorkflowSummary summary={workflow.summary} goal={workflow.goal} />
+
+            <RedactionPreview sessionId={workflow.sessionId} />
+
+            <TriggerSection
+              trigger={workflow.trigger}
+              onChange={(t) => setWorkflow((w) => ({ ...w, trigger: t }))}
+            />
+
+            <QuestionsSection questions={workflow.questions} />
+
+            <div className="ledger-section">
+              <div className="section-label">STEPS</div>
+              <StepList
+                steps={workflow.steps}
+                onChange={(updater) =>
+                  setWorkflow((w) => {
+                    const nextSteps = updater(w.steps)
+                    if (w.sessionId) {
+                      void window.ghostBridge?.automationMarkStale?.(
+                        w.sessionId,
+                        true,
+                        nextSteps.map((s) => ({ index: s.index, title: s.title }))
+                      )
+                    }
+                    return { ...w, steps: nextSteps, automationStale: true }
+                  })
+                }
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <div className="panel-divider" />
@@ -154,7 +197,11 @@ export default function EditorPanel() {
               Cancel
             </button>
             <div className="footer-actions">
-              <button className="btn btn-outline" onClick={runWorkflow}>
+              <button
+                className="btn btn-outline"
+                onClick={requestRun}
+                disabled={showContract}
+              >
                 Run
               </button>
               <button className="btn btn-primary" onClick={saveWorkflow}>

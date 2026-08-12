@@ -113,8 +113,10 @@ export async function processSessionWorkflow(
 
     let polished: PolishedSession
     try {
+      // Re-interpretation always restarts from L0 unless explicitly opted out —
+      // otherwise prompt improvements cannot recover information an earlier polish discarded.
       const prior =
-        opts.skipPolishIfPresent !== false ? await store.readPolishedSession(sessionId) : null
+        opts.skipPolishIfPresent === true ? await store.readPolishedSession(sessionId) : null
       polished = prior ?? (await polishSession(store, sessionId))
     } catch (err) {
       logProcessingFailure('polish', err)

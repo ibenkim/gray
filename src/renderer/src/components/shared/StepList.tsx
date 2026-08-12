@@ -169,7 +169,14 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
             <div className="fix-step-row" key={step.id}>
               <span className="step-num fix-num">{step.index}</span>
               <div className="fix-step">
-                <div className="fix-step-title">{step.title}</div>
+                <div className="fix-step-title">
+                  {step.intent && (
+                    <span className="step-intent-badge" title={`Intent: ${step.intent}`}>
+                      {step.intent}
+                    </span>
+                  )}
+                  {step.title}
+                </div>
                 <div className="fix-step-prompt">{step.fix.prompt}</div>
                 <div className="fix-options">
                   {step.fix.options.map((opt) => {
@@ -226,12 +233,15 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
               step.fix.options.find((o) => o.id === step.fix!.selectedOptionId)?.label
             : undefined
 
+        const lowConfidence =
+          typeof step.confidence === 'number' && step.confidence < 0.6
+
         return (
           <div key={step.id}>
             <div
               className={`step ${isHovered && !isForming ? 'step-hovered' : ''} ${
                 isResolved ? 'step-flash' : ''
-              }`}
+              } ${lowConfidence ? 'step-low-confidence' : ''}`}
               onMouseEnter={() => setHoveredId(step.id)}
               onMouseLeave={() => setHoveredId(null)}
               onDoubleClick={() => !isForming && beginEdit(step)}
@@ -254,6 +264,11 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
                 <span className="step-title step-forming">Forming new step…</span>
               ) : (
                 <span className="step-title">
+                  {step.intent && (
+                    <span className="step-intent-badge" title={`Intent: ${step.intent}`}>
+                      {step.intent}
+                    </span>
+                  )}
                   {step.title.replace(/\s*___+\s*$/, '').trim()}
                   {step.app ? (
                     <AppChip
@@ -289,6 +304,9 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
                 </span>
               )}
             </div>
+            {step.requiresSummary && !isEditing && (
+              <div className="step-requires-summary">{step.requiresSummary}</div>
+            )}
             {step.voiceNote && !isEditing && (
               <div className="step-voice-note">
                 <MicIcon size={8} />

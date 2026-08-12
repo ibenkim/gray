@@ -319,4 +319,151 @@ describe('polishSession', () => {
     expect(polished.segments?.length).toBeGreaterThanOrEqual(2)
     expect(polished.screens?.some((s) => s.id === 'ss_figma')).toBe(true)
   })
+
+  it('merges click + type + Tab into one fill_field action', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'click',
+        eventId: 'c1',
+        sequence: 0,
+        data: {
+          appName: 'Safari',
+          elementLabel: 'Name',
+          elementRole: 'AXTextField'
+        }
+      }),
+      evt({
+        type: 'text_input',
+        eventId: 't1',
+        sequence: 1,
+        data: {
+          appName: 'Safari',
+          elementLabel: 'Name',
+          elementRole: 'AXTextField',
+          typedText: 'Ada Lovelace',
+          keyCount: 12
+        }
+      }),
+      evt({
+        type: 'text_input',
+        eventId: 't2',
+        sequence: 2,
+        data: {
+          appName: 'Safari',
+          elementLabel: 'Name',
+          elementRole: 'AXTextField',
+          submitKey: 'Tab'
+        }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions).toHaveLength(1)
+    expect(polished.actions[0].l1Op).toBe('fill_field')
+    expect(polished.actions[0].category).toBe('input')
+    expect(polished.actions[0].typedText).toBe('Ada Lovelace')
+    expect(polished.actions[0].sourceEventIds).toEqual(
+      expect.arrayContaining(['c1', 't1', 't2'])
+    )
+    expect(polished.actions.some((a) => /^Clicked /.test(a.text))).toBe(false)
+  })
+
+  it('merges clipboard pair into one transfer with source and dest labels', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'clipboard_changed',
+        eventId: 'copy1',
+        sequence: 0,
+        data: {
+          appName: 'Figma',
+          elementLabel: 'Share link',
+          elementRole: 'AXButton',
+          clipboardPairId: 'clip_pair_1',
+          clipboard: {
+            contentType: 'url',
+            urlHost: 'figma.com',
+            urlPath: '/file/xyz',
+            charCount: 40,
+            contentHash: 'hash_transfer',
+            pairId: 'clip_pair_1'
+          }
+        },
+        target: { visibleLabel: 'Share link', role: 'AXButton', appName: 'Figma' }
+      }),
+      evt({
+        type: 'paste_detected',
+        eventId: 'paste1',
+        sequence: 1,
+        data: {
+          appName: 'Messages',
+          elementLabel: 'Message',
+          elementRole: 'AXTextArea',
+          clipboardPairId: 'clip_pair_1',
+          matchedClipboardHash: 'hash_transfer',
+          inferred: true,
+          clipboard: {
+            contentType: 'url',
+            urlHost: 'figma.com',
+            urlPath: '/file/xyz',
+            charCount: 40,
+            contentHash: 'hash_transfer',
+            pairId: 'clip_pair_1'
+          }
+        }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions).toHaveLength(1)
+    expect(polished.actions[0].l1Op).toBe('transfer')
+    expect(polished.actions[0].transferSourceLabel).toBe('Share link')
+    expect(polished.actions[0].transferDestLabel).toBe('Message')
+    expect(polished.actions[0].clipboardPairId).toBe('clip_pair_1')
+    expect(polished.actions[0].semanticOp).toBe('paste')
+    expect(polished.actions[0].sourceEventIds).toEqual(
+      expect.arrayContaining(['copy1', 'paste1'])
+    )
+  })
+
+  it('drops navigation when userInitiated is false', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'navigation',
+        eventId: 'n_user',
+        sequence: 0,
+        data: {
+          appName: 'Safari',
+          documentTitle: 'Home',
+          userInitiated: true
+        }
+      }),
+      evt({
+        type: 'navigation',
+        eventId: 'n_redirect',
+        sequence: 1,
+        data: {
+          appName: 'Safari',
+          documentTitle: 'Login redirect',
+          userInitiated: false
+        }
+      }),
+      evt({
+        type: 'click',
+        eventId: 'c1',
+        sequence: 2,
+        data: { appName: 'Safari', elementLabel: 'Continue', elementRole: 'AXButton' }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions.some((a) => a.sourceEventIds.includes('n_redirect'))).toBe(false)
+    expect(polished.actions.some((a) => a.sourceEventIds.includes('n_user'))).toBe(true)
+    expect(polished.actions.some((a) => a.elementLabel === 'Continue')).toBe(true)
+  })
 })

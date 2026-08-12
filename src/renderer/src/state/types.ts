@@ -53,6 +53,8 @@ export type {
   VoiceNote,
   Weekday,
   Workflow,
+  WorkflowQuestionRef,
+  WorkflowRunContract,
   WorkflowScope,
   WorkflowStatus,
   WorkspaceFocus

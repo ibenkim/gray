@@ -57,7 +57,7 @@ describe('clipboard helpers', () => {
 })
 
 describe('ClipboardWatcher', () => {
-  it('emits clipboard_changed metadata without raw value in clipboard object', () => {
+  it('emits clipboard_changed with host/path/query and redacted text under threshold', () => {
     const changes: Array<ReturnType<ClipboardWatcher['ingestText']>> = []
     const watcher = new ClipboardWatcher({
       readText: () => '',
@@ -72,9 +72,10 @@ describe('ClipboardWatcher', () => {
     expect(first!.clipboard.contentType).toBe('url')
     expect(first!.clipboard.urlHost).toBe('www.figma.com')
     expect(first!.clipboard.urlPath).toBe('/design/xyz')
+    // Stable query params are kept for address extraction; tracking params are stripped.
+    expect(first!.clipboard.urlQuery).toBe('node-id=1')
     expect(first!.clipboard.contentHash).toBeTruthy()
-    expect(JSON.stringify(first!.clipboard)).not.toContain('node-id')
-    expect(JSON.stringify(first!.clipboard)).not.toContain('https://www.figma.com/design/xyz?')
+    expect(first!.clipboard.text).toContain('figma.com')
 
     // Same content → no second emit
     const second = watcher.ingestText('https://www.figma.com/design/xyz?node-id=1', [
@@ -83,6 +84,15 @@ describe('ClipboardWatcher', () => {
     expect(second).toBeNull()
 
     watcher.stop()
+  })
+
+  it('rejects credential-bearing clipboard URLs', () => {
+    const watcher = new ClipboardWatcher()
+    const result = watcher.ingestText(
+      'https://example.com/callback?access_token=supersecrettokenvalue123456789012',
+      ['text/plain']
+    )
+    expect(result).toBeNull()
   })
 
   it('skips sensitive content', () => {

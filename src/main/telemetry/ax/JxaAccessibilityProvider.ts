@@ -71,14 +71,24 @@ export type JxaClickEvent = {
   count?: number
   x?: number | null
   y?: number | null
+  cmd?: boolean
+  opt?: boolean
+  ctrl?: boolean
+  shift?: boolean
   app?: string | null
   appBundleId?: string | null
   role?: string | null
   subrole?: string | null
+  identifier?: string | null
   label?: string | null
   valueLength?: number | null
+  enabled?: boolean | null
   path?: string[]
   bounds?: JxaElementBounds | null
+  containerRole?: string | null
+  containerLabel?: string | null
+  rowIndex?: number | null
+  siblingCount?: number | null
   /** 'poll' when synthesized from pressedMouseButtons; omit for NSEvent monitor. */
   via?: string | null
 }
@@ -390,6 +400,19 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         this.faults = 0
         this.handleClick(parsed as unknown as JxaClickEvent)
         return
+      case 'scroll':
+        this.faults = 0
+        this.handleScroll(parsed as {
+          axis?: 'vertical' | 'horizontal'
+          delta?: number
+          app?: string | null
+          appBundleId?: string | null
+          role?: string | null
+          label?: string | null
+          containerRole?: string | null
+          containerLabel?: string | null
+        })
+        return
       case 'fault': {
         // Transient AX read failures happen; only give up if they persist.
         this.faults += 1
@@ -506,15 +529,28 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     const dialogKey = dialogs.join('|')
     if (dialogKey && dialogKey !== this.lastDialogKey) {
       this.lastDialogKey = dialogKey
-      this.onEvent({
-        type: 'error',
-        data: {
-          ...baseData,
-          message: errorState || dialogs[0],
-          errorState: errorState || dialogs[0],
-          dialogs
-        }
-      })
+      const fileKind = classifyFileDialog(dialogs[0] || errorState || '')
+      if (fileKind) {
+        this.onEvent({
+          type: 'file_dialog',
+          data: {
+            ...baseData,
+            fileDialogKind: fileKind,
+            message: dialogs[0] || errorState || undefined,
+            dialogs
+          }
+        })
+      } else {
+        this.onEvent({
+          type: 'error',
+          data: {
+            ...baseData,
+            message: errorState || dialogs[0],
+            errorState: errorState || dialogs[0],
+            dialogs
+          }
+        })
+      }
     } else if (!dialogKey) {
       this.lastDialogKey = null
     }
@@ -785,6 +821,46 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.armTypingTimer()
   }
 
+  handleScroll(event: {
+    axis?: 'vertical' | 'horizontal'
+    delta?: number
+    app?: string | null
+    appBundleId?: string | null
+    role?: string | null
+    label?: string | null
+    containerRole?: string | null
+    containerLabel?: string | null
+  }): void {
+    if (!this.onEvent) return
+    const appName = sanitizeLabel(event.app ?? undefined) ?? this.context.appName
+    const appBundleId = sanitizeLabel(event.appBundleId ?? undefined) ?? this.context.appBundleId
+    this.onEvent({
+      type: 'scroll',
+      target: {
+        role: sanitizeLabel(event.role ?? undefined),
+        accessibleLabel: sanitizeLabel(event.label ?? undefined),
+        visibleLabel: sanitizeLabel(event.label ?? undefined),
+        appName,
+        appBundleId,
+        listContext: {
+          containerRole: sanitizeLabel(event.containerRole ?? undefined),
+          containerLabel: sanitizeLabel(event.containerLabel ?? undefined)
+        }
+      },
+      data: {
+        appName,
+        appBundleId,
+        documentTitle: this.context.documentTitle,
+        scrollAxis: event.axis === 'horizontal' ? 'horizontal' : 'vertical',
+        scrollDelta: typeof event.delta === 'number' ? event.delta : undefined,
+        scrollContainerRole: sanitizeLabel(event.containerRole ?? undefined),
+        scrollContainerLabel: sanitizeLabel(event.containerLabel ?? undefined),
+        elementRole: sanitizeLabel(event.role ?? undefined),
+        elementLabel: sanitizeLabel(event.label ?? undefined)
+      }
+    })
+  }
+
   /** Exposed for tests — handle one observed mouse press. */
   handleClick(event: JxaClickEvent): void {
     if (!this.onEvent) return
@@ -811,6 +887,41 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       typeof event.x === 'number' && Number.isFinite(event.x) ? Math.round(event.x) : undefined
     const clickY =
       typeof event.y === 'number' && Number.isFinite(event.y) ? Math.round(event.y) : undefined
+    const bounds = sanitizeBounds(event.bounds)
+    const identifier = sanitizeLabel(event.identifier ?? undefined)
+    const enabled = typeof event.enabled === 'boolean' ? event.enabled : undefined
+    const listContext =
+      event.containerRole || event.rowIndex != null || event.siblingCount != null
+        ? {
+            rowIndex:
+              typeof event.rowIndex === 'number' && event.rowIndex >= 0
+                ? Math.round(event.rowIndex)
+                : undefined,
+            siblingCount:
+              typeof event.siblingCount === 'number' && event.siblingCount >= 0
+                ? Math.round(event.siblingCount)
+                : undefined,
+            containerRole: sanitizeLabel(event.containerRole ?? undefined),
+            containerLabel: sanitizeLabel(event.containerLabel ?? undefined)
+          }
+        : undefined
+
+    let elementNorm: { x: number; y: number } | undefined
+    if (
+      bounds &&
+      clickX != null &&
+      clickY != null &&
+      bounds.width > 0 &&
+      bounds.height > 0
+    ) {
+      elementNorm = {
+        x: Math.min(1, Math.max(0, (clickX - bounds.x) / bounds.width)),
+        y: Math.min(1, Math.max(0, (clickY - bounds.y) / bounds.height))
+      }
+    }
+
+    const hasModifiers =
+      event.cmd === true || event.opt === true || event.ctrl === true || event.shift === true
 
     this.onEvent({
       type: 'click',
@@ -818,8 +929,12 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         role,
         accessibleLabel: label,
         visibleLabel: label,
+        identifier,
         appName,
         appBundleId,
+        enabled,
+        tier: role || label ? 'ax' : clickX != null ? 'coords' : 'none',
+        listContext,
         fieldType: role && TEXT_ROLES.has(role) ? 'text' : undefined
       },
       data: {
@@ -829,12 +944,25 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         elementRole: role,
         elementSubrole: subrole,
         elementLabel: label,
+        elementIdentifier: identifier,
+        elementEnabled: enabled,
         elementPath: path.length ? path : undefined,
+        listContext,
+        targetTier: role || label ? 'ax' : clickX != null ? 'coords' : 'none',
         clickButton: event.button === 'right' ? 'right' : 'left',
         clickCount: clampClickCount(event.count),
+        clickModifiers: hasModifiers
+          ? {
+              cmd: event.cmd === true,
+              opt: event.opt === true,
+              ctrl: event.ctrl === true,
+              shift: event.shift === true
+            }
+          : undefined,
         clickX,
         clickY,
-        elementBounds: sanitizeBounds(event.bounds)
+        elementNorm,
+        elementBounds: bounds
       }
     })
   }
@@ -928,6 +1056,14 @@ export class JxaAccessibilityProvider implements InteractionProvider {
 function clampClickCount(count?: number): number | undefined {
   if (typeof count !== 'number' || !Number.isFinite(count)) return undefined
   return Math.min(10, Math.max(1, Math.round(count)))
+}
+
+/** Detect Open/Save file dialogs from sheet titles. */
+function classifyFileDialog(title: string): 'open' | 'save' | null {
+  const t = title.toLowerCase()
+  if (/\b(save|export|download as|save as)\b/.test(t)) return 'save'
+  if (/\b(open|choose|select|import|upload|attach)\b/.test(t)) return 'open'
+  return null
 }
 
 /**

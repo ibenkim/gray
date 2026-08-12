@@ -68,6 +68,33 @@ export type EditorStep = {
   voiceNote?: VoiceNote
   fix?: FixStep
   phase?: StepPhase
+  /** L2 intent verb from ExtractedWorkflow (Locate, Fill, Commit, …). */
+  intent?: string
+  /** Model confidence 0–1; UI treats values below 0.6 as low. */
+  confidence?: number
+  /** One plain sentence for destination resolution policy (§6.2). */
+  requiresSummary?: string
+}
+
+/** Clarifying question from interpretation (review Questions section). */
+export type WorkflowQuestionRef = {
+  id: string
+  prompt: string
+  relatedStepId?: string | null
+  kind?: string
+}
+
+/**
+ * Slim run-contract fields copied from ExtractedWorkflow for the pre-run
+ * authorization screen. Seed / mock workflows omit this.
+ */
+export type WorkflowRunContract = {
+  inputs: string[]
+  writes: string[]
+  commits: string[]
+  destinations: string[]
+  authorizationLevel?: string
+  authorizationExpires?: string | null
 }
 
 /** Personal = owner's Workflows list; team = also listed on Shared. */
@@ -104,6 +131,16 @@ export type Workflow = {
   sessionId?: string
   /** True when editor steps changed after the last successful compile. */
   automationStale?: boolean
+  /** Plain-language job summary from ExtractedWorkflow (§9.1). */
+  summary?: string
+  /** Optional shorter goal line from ExtractedWorkflow. */
+  goal?: string
+  /** All interpretation questions for the dedicated Questions section (§9.3). */
+  questions?: WorkflowQuestionRef[]
+  /** Pre-run authorization contract (§9.4). */
+  runContract?: WorkflowRunContract
+  /** True after the user confirms the run contract for this session. */
+  contractAccepted?: boolean
 }
 
 // ── Running (ephemeral ledger in the pill) ──

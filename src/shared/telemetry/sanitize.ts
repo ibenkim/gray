@@ -194,15 +194,74 @@ export function sanitizeTypedText(raw: string | undefined | null): {
   return { text, redacted }
 }
 
-/** Strip query/hash and keep host + limited path from a URL. */
-export function sanitizeUrl(raw?: string | null): { urlHost?: string; urlPath?: string } {
+const TRACKING_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'gclid',
+  'fbclid',
+  'mc_cid',
+  'mc_eid',
+  'ref',
+  'referrer',
+  'ref_src',
+  'ref_url'
+])
+
+const CREDENTIAL_QUERY_KEYS =
+  /^(token|access_token|refresh_token|id_token|auth|authorization|code|session|sid|jwt|api[_-]?key|password|secret)$/i
+
+/** High-entropy query/path segments that look like session credentials. */
+const CREDENTIAL_VALUE_RE =
+  /^(?:[A-Za-z0-9_-]{32,}|[A-Fa-f0-9]{32,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/
+
+export type SanitizedUrl = {
+  urlHost?: string
+  urlPath?: string
+  /** Tracking-stripped query; omitted when empty or when URL was rejected. */
+  urlQuery?: string
+  /** True when the URL contained credentials / session tokens and must not be stored. */
+  rejected?: boolean
+}
+
+/**
+ * Canonicalize a URL for capture and address extraction.
+ * - Keeps host + path
+ * - Strips tracking params (utm_*, gclid, referrer chains)
+ * - Drops ephemeral fragments
+ * - Rejects URLs containing session tokens / auth codes (hard rule)
+ */
+export function sanitizeUrl(raw?: string | null): SanitizedUrl {
   if (!raw) return {}
   try {
     const u = new URL(raw)
-    // Never keep credentials, query, or hash (tokens often live there).
+    // Embedded credentials in the authority are never kept.
+    if (u.username || u.password) return { rejected: true }
+
+    const kept = new URLSearchParams()
+    for (const [key, value] of u.searchParams.entries()) {
+      const lower = key.toLowerCase()
+      if (TRACKING_PARAMS.has(lower)) continue
+      if (CREDENTIAL_QUERY_KEYS.test(key) || CREDENTIAL_VALUE_RE.test(value)) {
+        return { rejected: true }
+      }
+      kept.append(key, value)
+    }
+
+    // Path segments that look like opaque session tokens.
+    for (const segment of u.pathname.split('/')) {
+      if (segment.length >= 40 && CREDENTIAL_VALUE_RE.test(segment)) {
+        return { rejected: true }
+      }
+    }
+
+    const query = kept.toString()
     return {
       urlHost: truncate(u.host, 200),
-      urlPath: truncate(u.pathname, MAX_PATH)
+      urlPath: truncate(u.pathname, MAX_PATH),
+      urlQuery: query ? truncate(query, 300) : undefined
     }
   } catch {
     return {}
@@ -280,22 +339,45 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
       data.clipboard = {
         ...data.clipboard,
         urlHost: truncate(data.clipboard.urlHost, 200),
-        urlPath: truncate(data.clipboard.urlPath, MAX_PATH)
+        urlPath: truncate(data.clipboard.urlPath, MAX_PATH),
+        urlQuery: truncate(data.clipboard.urlQuery, 300),
+        text: data.clipboard.text ? truncate(data.clipboard.text, 500) : undefined
+      }
+      if (data.clipboard.text) {
+        const { text, redacted } = sanitizeTypedText(data.clipboard.text)
+        if (!text || looksLikeClipboardSecret(text)) {
+          delete data.clipboard.text
+        } else {
+          data.clipboard.text = text
+          if (redacted) data.typedTextRedacted = true
+        }
       }
     }
 
     // Never keep absolute paths for keyframes — relative only.
-    if (data.keyframePath) {
-      if (
-        data.keyframePath.includes('..') ||
-        data.keyframePath.startsWith('/') ||
-        /^[A-Za-z]:\\/.test(data.keyframePath)
-      ) {
-        delete data.keyframePath
+    for (const pathKey of [
+      'keyframePath',
+      'preShotPath',
+      'postShotPath',
+      'targetCropPath'
+    ] as const) {
+      const p = data[pathKey]
+      if (!p) continue
+      if (p.includes('..') || p.startsWith('/') || /^[A-Za-z]:\\/.test(p)) {
+        delete data[pathKey]
       } else {
-        data.keyframePath = truncate(data.keyframePath, 300)
+        data[pathKey] = truncate(p, 300)
       }
     }
+
+    data.narrationText = truncate(data.narrationText, 800)
+    data.filePath = truncate(data.filePath, 400)
+    data.fileName = truncate(data.fileName, 200)
+    data.downloadSourceUrl = truncate(data.downloadSourceUrl, 500)
+    data.stateChangeDetail = truncate(data.stateChangeDetail, 200)
+    data.stateChangeElement = sanitizeLabel(data.stateChangeElement)
+    data.elementIdentifier = sanitizeLabel(data.elementIdentifier)
+    data.urlQuery = truncate(data.urlQuery, 300)
 
     // Typed text: drop outright for sensitive targets, otherwise re-redact.
     if (data.typedText != null) {
@@ -372,6 +454,13 @@ function scrubSecrets(data: TelemetryEventData): TelemetryEventData {
     }
   }
   return clone
+}
+
+function looksLikeClipboardSecret(text: string): boolean {
+  if (SENSITIVE_NAME_RE.test(text)) return true
+  if (/\bsk-[A-Za-z0-9_\-]{8,}\b/.test(text)) return true
+  if (/bearer\s+[A-Za-z0-9._\-]+/i.test(text)) return true
+  return false
 }
 
 /** Whether an event should be dropped (ignored / empty / invalid). */

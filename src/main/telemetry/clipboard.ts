@@ -1,15 +1,17 @@
 import { createHash } from 'crypto'
 import { clipboard } from 'electron'
 import type { ClipboardContentType, ClipboardData } from '../../shared/telemetry/schema'
-import { sanitizeUrl } from '../../shared/telemetry/sanitize'
+import { sanitizeTypedText, sanitizeUrl } from '../../shared/telemetry/sanitize'
 
 const POLL_MS = 500
+/** Persist redacted plaintext at or below this size; larger stays hash-only. */
+const TEXT_PERSIST_MAX = 500
 const SENSITIVE_RE =
   /(password|passwd|passcode|secret|token|auth|api[_-]?key|credit|card|cvv|ssn|pin|cookie|session)/i
 
 export type ClipboardChange = {
   clipboard: ClipboardData
-  /** Full value held in-memory only for the session — never written to JSONL. */
+  /** Full value held in-memory for the session (also may appear redacted on clipboard.text). */
   rawValue?: string
 }
 
@@ -121,15 +123,28 @@ export class ClipboardWatcher {
     if (looksSensitive(trimmed)) return null
 
     const contentType = classifyContent(trimmed, formats)
-    const { urlHost, urlPath } =
-      contentType === 'url' ? sanitizeUrl(trimmed.trim()) : {}
+    const sanitized =
+      contentType === 'url' ? sanitizeUrl(trimmed.trim()) : ({} as ReturnType<typeof sanitizeUrl>)
+    if (sanitized.rejected) return null
+
+    let persistedText: string | undefined
+    if (
+      trimmed &&
+      trimmed.length <= TEXT_PERSIST_MAX &&
+      (contentType === 'text' || contentType === 'url')
+    ) {
+      const { text } = sanitizeTypedText(trimmed)
+      persistedText = text
+    }
 
     const clipboardData: ClipboardData = {
       contentType,
-      urlHost,
-      urlPath,
+      urlHost: sanitized.urlHost,
+      urlPath: sanitized.urlPath,
+      urlQuery: sanitized.urlQuery,
       charCount: trimmed.length,
-      contentHash
+      contentHash,
+      text: persistedText
     }
 
     if (trimmed) {

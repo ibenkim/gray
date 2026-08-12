@@ -21,6 +21,7 @@ import type { TelemetryStore } from './store/TelemetryStore'
 
 export type RecordingStatus = {
   recording: boolean
+  paused: boolean
   sessionId: string | null
   sequence: number
   startedAt: string | null
@@ -31,9 +32,35 @@ export type CaptureOptions = {
   recordMode?: 'one-app' | 'full-screen'
   selectedAppId?: string
   ownerEmail?: string
+  /** Capture voice narration for this session. */
+  narrate?: boolean
   /** App names to ignore (our own pill/workspace). */
   ignoreAppNames?: string[]
 }
+
+/** Hard denylist — password managers, banking, messaging (capture-spec §5). */
+const APP_DENYLIST = [
+  '1password',
+  '1password for safari',
+  'bitwarden',
+  'lastpass',
+  'dashlane',
+  'keeper',
+  'enpass',
+  'keychain access',
+  'chase',
+  'wells fargo',
+  'bank of america',
+  'capital one',
+  'paypal',
+  'venmo',
+  'cash app',
+  'messages',
+  'whatsapp',
+  'signal',
+  'telegram',
+  'imessage'
+]
 
 type ActiveWinModule = {
   default?: () => Promise<ActiveWinResult | undefined>
@@ -80,11 +107,26 @@ export class TelemetryRecorder {
   private startedAtMs = 0
   private startedAtIso: string | null = null
   private recording = false
+  private paused = false
   private processing = false
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private registeredShortcuts: string[] = []
   private lastAppKey: string | null = null
+  private lastWindowKey: string | null = null
   private lastBounds: ActiveWinResult['bounds'] | null = null
+  private lastScreenSnapshot: {
+    loading?: boolean
+    dialogs?: string[]
+    windowTitle?: string
+    urlHost?: string
+    urlPath?: string
+  } | null = null
+  private lastFocusTarget: {
+    role?: string
+    label?: string
+    appName?: string
+  } | null = null
+  private pendingClipboardPairId: string | null = null
   private opts: CaptureOptions = {}
   private onEventListeners = new Set<(event: TelemetryEvent) => void>()
   private onStatusListeners = new Set<(status: RecordingStatus) => void>()
@@ -114,11 +156,46 @@ export class TelemetryRecorder {
   getRecordingStatus(): RecordingStatus {
     return {
       recording: this.recording,
+      paused: this.paused,
       sessionId: this.sessionId,
       sequence: this.sequence,
       startedAt: this.startedAtIso,
       processing: this.processing
     }
+  }
+
+  /** True pause — halts the capture pipeline, not just the UI timer. */
+  pauseRecording(): RecordingStatus {
+    if (!this.recording || this.paused) return this.getRecordingStatus()
+    this.paused = true
+    this.stopPolling()
+    this.unregisterShortcuts()
+    this.interaction.flush?.()
+    this.interaction.stop()
+    this.clipboard.stop()
+    if (this.settleTimer) {
+      clearTimeout(this.settleTimer)
+      this.settleTimer = null
+    }
+    this.emitStatus()
+    return this.getRecordingStatus()
+  }
+
+  resumeRecording(): RecordingStatus {
+    if (!this.recording || !this.paused) return this.getRecordingStatus()
+    this.paused = false
+    this.startPolling()
+    this.startClipboard()
+    if (this.interaction.enabled) {
+      this.interaction.start((partial) => this.ingestInteraction(partial))
+    }
+    this.registerShortcuts()
+    this.emitStatus()
+    return this.getRecordingStatus()
+  }
+
+  isNarrating(): boolean {
+    return !!this.opts.narrate
   }
 
   onEvent(cb: (event: TelemetryEvent) => void): () => void {
@@ -155,9 +232,14 @@ export class TelemetryRecorder {
     this.startedAtMs = Date.now()
     this.startedAtIso = new Date(this.startedAtMs).toISOString()
     this.recording = true
+    this.paused = false
     this.processing = false
     this.lastAppKey = null
+    this.lastWindowKey = null
     this.lastBounds = null
+    this.lastScreenSnapshot = null
+    this.lastFocusTarget = null
+    this.pendingClipboardPairId = null
     this.lastFieldLength = null
     this.screenStates.reset()
 
@@ -235,6 +317,15 @@ export class TelemetryRecorder {
   ): TelemetryEvent | null {
     if (!this.sessionId) return null
     if (!this.recording && type !== 'session_stopped') return null
+    if (this.paused && type !== 'session_stopped') return null
+
+    const display = this.displayInfo()
+    const windowBounds = this.windowBounds()
+    const data = {
+      ...partial.data,
+      display: partial.data?.display ?? display,
+      windowBounds: partial.data?.windowBounds ?? windowBounds
+    }
 
     const event: TelemetryEvent = redactEvent({
       schemaVersion: SCHEMA_VERSION,
@@ -242,13 +333,14 @@ export class TelemetryRecorder {
       sessionId: this.sessionId,
       sequence: this.sequence++,
       timestamp: new Date().toISOString(),
+      // elapsedMs is monotonic (session-relative) — the only legal duration source.
       elapsedMs: Math.max(0, Date.now() - this.startedAtMs),
       type,
       page: partial.page,
       route: partial.route,
       viewport: partial.viewport ?? this.viewport(),
       target: partial.target,
-      data: partial.data,
+      data,
       screenStateId: partial.screenStateId
     })
 
@@ -289,6 +381,31 @@ export class TelemetryRecorder {
     }
   }
 
+  private displayInfo(): { scale: number; width: number; height: number } {
+    try {
+      const d = screen.getPrimaryDisplay()
+      return {
+        scale: d.scaleFactor || 1,
+        width: d.size.width,
+        height: d.size.height
+      }
+    } catch {
+      return { scale: 1, width: 0, height: 0 }
+    }
+  }
+
+  private windowBounds():
+    | { x: number; y: number; width: number; height: number }
+    | undefined {
+    if (!this.lastBounds) return undefined
+    return {
+      x: this.lastBounds.x ?? 0,
+      y: this.lastBounds.y ?? 0,
+      width: this.lastBounds.width ?? 0,
+      height: this.lastBounds.height ?? 0
+    }
+  }
+
   private async ensureActiveWin(): Promise<void> {
     if (this.activeWin) return
     try {
@@ -317,10 +434,25 @@ export class TelemetryRecorder {
 
   private startClipboard(): void {
     this.clipboard.start((change) => {
-      if (!this.recording) return
+      if (!this.recording || this.paused) return
+      const pairId = newId('clip')
+      this.pendingClipboardPairId = pairId
+      const clipboard = { ...change.clipboard, pairId }
       this.recordEvent('clipboard_changed', {
+        target: this.lastFocusTarget
+          ? {
+              role: this.lastFocusTarget.role,
+              accessibleLabel: this.lastFocusTarget.label,
+              visibleLabel: this.lastFocusTarget.label,
+              appName: this.lastFocusTarget.appName
+            }
+          : undefined,
         data: {
-          clipboard: change.clipboard
+          clipboard,
+          clipboardPairId: pairId,
+          elementLabel: this.lastFocusTarget?.label,
+          elementRole: this.lastFocusTarget?.role,
+          appName: this.lastFocusTarget?.appName
         }
       })
       this.interaction.poke?.()
@@ -329,7 +461,7 @@ export class TelemetryRecorder {
   }
 
   private async pollActiveWindow(): Promise<void> {
-    if (!this.recording || !this.activeWin) return
+    if (!this.recording || this.paused || !this.activeWin) return
     try {
       const fn = this.activeWin.default ?? this.activeWin
       const win = await fn()
@@ -344,17 +476,47 @@ export class TelemetryRecorder {
       if (!snapshot) return
 
       const appKey = `${snapshot.appBundleId ?? snapshot.appName ?? ''}`
-      const screenKey = `${appKey}|${snapshot.windowTitle ?? ''}|${snapshot.urlHost ?? ''}${snapshot.urlPath ?? ''}`
-      const prevScreenKey = this.lastAppKey
-      const prevApp = prevScreenKey?.split('|')[0] ?? null
-      const isFirst = prevScreenKey === null
+      const windowKey = `${appKey}|${snapshot.windowTitle ?? ''}`
+      const screenKey = `${windowKey}|${snapshot.urlHost ?? ''}${snapshot.urlPath ?? ''}`
+      const prevApp = this.lastAppKey
+      const prevWindow = this.lastWindowKey
+      const isFirst = prevApp === null
       const appChanged = prevApp !== null && prevApp !== appKey
-      this.lastAppKey = screenKey
+      const windowChanged =
+        !appChanged && prevWindow !== null && prevWindow !== windowKey
+      this.lastAppKey = appKey
+      this.lastWindowKey = windowKey
 
-      const { urlHost, urlPath } = sanitizeUrl(win.url)
+      const sanitized = sanitizeUrl(win.url)
+      const urlHost = sanitized.rejected ? undefined : sanitized.urlHost
+      const urlPath = sanitized.rejected ? undefined : sanitized.urlPath
+      const urlQuery = sanitized.rejected ? undefined : sanitized.urlQuery
       const windowTitle = sanitizeWindowTitle(win.title)
+      const pid = win.owner?.processId
+      const commonData = {
+        appName: snapshot.appName,
+        appBundleId: snapshot.appBundleId,
+        pid: typeof pid === 'number' && pid > 0 ? pid : undefined,
+        windowTitle,
+        documentTitle: windowTitle,
+        urlHost,
+        urlPath,
+        urlQuery,
+        userInitiated: true as const
+      }
 
       if (isFirst || appChanged) {
+        this.recordEvent('app_switch', {
+          page: snapshot.page,
+          route: snapshot.route,
+          screenStateId: snapshot.screenStateId,
+          target: {
+            appName: snapshot.appName,
+            appBundleId: snapshot.appBundleId
+          },
+          data: commonData
+        })
+        // Keep navigation for backward compatibility with polish/model.
         this.recordEvent('navigation', {
           page: snapshot.page,
           route: snapshot.route,
@@ -363,18 +525,24 @@ export class TelemetryRecorder {
             appName: snapshot.appName,
             appBundleId: snapshot.appBundleId
           },
-          data: {
-            appName: snapshot.appName,
-            appBundleId: snapshot.appBundleId,
-            windowTitle,
-            documentTitle: windowTitle,
-            urlHost,
-            urlPath
-          }
+          data: commonData
         })
         this.interaction.poke?.()
         void this.captureKeyframe('app_changed')
+      } else if (windowChanged) {
+        this.recordEvent('window_switch', {
+          page: snapshot.page,
+          route: snapshot.route,
+          screenStateId: snapshot.screenStateId,
+          target: {
+            appName: snapshot.appName,
+            appBundleId: snapshot.appBundleId
+          },
+          data: commonData
+        })
       }
+
+      this.emitStateChanges(snapshot, windowTitle, urlHost, urlPath)
 
       this.recordEvent('screen_changed', {
         page: snapshot.page,
@@ -385,12 +553,7 @@ export class TelemetryRecorder {
           appBundleId: snapshot.appBundleId
         },
         data: {
-          appName: snapshot.appName,
-          appBundleId: snapshot.appBundleId,
-          windowTitle,
-          documentTitle: windowTitle,
-          urlHost,
-          urlPath,
+          ...commonData,
           headings: snapshot.headings,
           buttons: snapshot.buttons,
           dialogs: snapshot.dialogs,
@@ -398,16 +561,95 @@ export class TelemetryRecorder {
         }
       })
 
+      this.lastScreenSnapshot = {
+        loading: snapshot.loading,
+        dialogs: snapshot.dialogs,
+        windowTitle,
+        urlHost,
+        urlPath
+      }
+
       this.scheduleSettleKeyframe()
     } catch (err) {
       console.error('[telemetry] active-win poll failed', err instanceof Error ? err.name : 'error')
     }
   }
 
+  private emitStateChanges(
+    snapshot: { loading?: boolean; dialogs?: string[] },
+    windowTitle?: string,
+    urlHost?: string,
+    urlPath?: string
+  ): void {
+    const prev = this.lastScreenSnapshot
+    if (!prev) return
+
+    if (prev.loading === true && snapshot.loading === false) {
+      this.recordEvent('state_change', {
+        data: {
+          stateChangeKind: 'loading_finished',
+          stateChangeDetail: 'Spinner / loading indicator cleared'
+        }
+      })
+    } else if (prev.loading === false && snapshot.loading === true) {
+      this.recordEvent('state_change', {
+        data: {
+          stateChangeKind: 'loading_started',
+          stateChangeDetail: 'Loading indicator appeared'
+        }
+      })
+    }
+
+    const prevDialogs = new Set(prev.dialogs ?? [])
+    for (const d of snapshot.dialogs ?? []) {
+      if (!prevDialogs.has(d)) {
+        this.recordEvent('state_change', {
+          data: {
+            stateChangeKind: 'dialog_appeared',
+            stateChangeElement: d,
+            stateChangeDetail: `Dialog appeared: ${d}`
+          }
+        })
+      }
+    }
+    const nextDialogs = new Set(snapshot.dialogs ?? [])
+    for (const d of prev.dialogs ?? []) {
+      if (!nextDialogs.has(d)) {
+        this.recordEvent('state_change', {
+          data: {
+            stateChangeKind: 'dialog_dismissed',
+            stateChangeElement: d,
+            stateChangeDetail: `Dialog dismissed: ${d}`
+          }
+        })
+      }
+    }
+
+    if (prev.windowTitle && windowTitle && prev.windowTitle !== windowTitle) {
+      this.recordEvent('state_change', {
+        data: {
+          stateChangeKind: 'title_changed',
+          stateChangeDetail: `Title: ${prev.windowTitle} → ${windowTitle}`
+        }
+      })
+    }
+
+    if (
+      (prev.urlHost || prev.urlPath) &&
+      (urlHost !== prev.urlHost || urlPath !== prev.urlPath)
+    ) {
+      this.recordEvent('state_change', {
+        data: {
+          stateChangeKind: 'url_changed',
+          stateChangeDetail: `URL → ${urlHost ?? ''}${urlPath ?? ''}`
+        }
+      })
+    }
+  }
+
   /**
-   * Whether events from this app must be discarded — either it is Ghost itself
-   * (never record the user interacting with the recorder) or the session is
-   * scoped to a single other app.
+   * Whether events from this app must be discarded — Ghost itself, denylisted
+   * apps (password managers / banking / messaging), or outside the one-app scope.
    */
   private shouldIgnoreApp(appName?: string): boolean {
     if (!appName) return false
@@ -415,6 +657,7 @@ export class TelemetryRecorder {
 
     const ignore = this.opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']
     if (ignore.some((n) => lower === n.toLowerCase())) return true
+    if (APP_DENYLIST.some((n) => lower.includes(n))) return true
 
     if (this.opts.recordMode === 'one-app' && this.opts.selectedAppId) {
       const selected = this.opts.selectedAppId.toLowerCase()
@@ -440,34 +683,46 @@ export class TelemetryRecorder {
     }, 1500)
   }
 
-  private async captureKeyframe(reason: KeyframeReason): Promise<void> {
-    if (!this.screenshot.enabled || !this.sessionId || !this.recording) return
+  private async captureKeyframe(
+    reason: KeyframeReason,
+    boundsOverride?: { x: number; y: number; width: number; height: number }
+  ): Promise<string | null> {
+    if (!this.screenshot.enabled || !this.sessionId || !this.recording || this.paused) {
+      return null
+    }
     const eventId = newId('tevt')
     try {
-      const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
-        reason,
-        bounds: this.lastBounds
+      const bounds =
+        boundsOverride ??
+        (this.lastBounds
           ? {
               x: this.lastBounds.x ?? 0,
               y: this.lastBounds.y ?? 0,
               width: this.lastBounds.width ?? 0,
               height: this.lastBounds.height ?? 0
             }
-          : undefined,
+          : undefined)
+      const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
+        reason,
+        bounds,
         sessionId: this.sessionId,
         eventId
       })
       if (result?.relativePath) {
-        this.recordEvent('keyframe_captured', {
-          data: {
-            keyframePath: result.relativePath,
-            message: reason
-          }
-        })
+        if (reason !== 'pre_action' && reason !== 'post_action' && reason !== 'target_crop') {
+          this.recordEvent('keyframe_captured', {
+            data: {
+              keyframePath: result.relativePath,
+              message: reason
+            }
+          })
+        }
+        return result.relativePath
       }
     } catch {
       /* never block recording on keyframe failure */
     }
+    return null
   }
 
   private registerShortcuts(): void {
@@ -502,19 +757,49 @@ export class TelemetryRecorder {
   }
 
   private ingestInteraction(partial: InteractionPartial): void {
-    if (!this.recording) return
+    if (!this.recording || this.paused) return
     if (this.shouldIgnoreApp(partial.data?.appName ?? partial.target?.appName)) return
+
+    if (partial.type === 'focus_changed') {
+      this.lastFocusTarget = {
+        role: partial.data?.elementRole ?? partial.target?.role,
+        label:
+          partial.data?.elementLabel ??
+          partial.target?.accessibleLabel ??
+          partial.target?.visibleLabel,
+        appName: partial.data?.appName ?? partial.target?.appName
+      }
+    }
+
+    // Enrich clicks with window-relative coordinates when we have window bounds.
+    let data = partial.data
+    if (
+      (partial.type === 'click' || partial.type === 'element_activated') &&
+      data?.clickX != null &&
+      data?.clickY != null &&
+      this.lastBounds
+    ) {
+      const wx = this.lastBounds.x ?? 0
+      const wy = this.lastBounds.y ?? 0
+      data = {
+        ...data,
+        clickWindowX: data.clickX - wx,
+        clickWindowY: data.clickY - wy
+      }
+    }
 
     // An observed paste chord is direct evidence — no length heuristics needed.
     if (partial.type === 'keyboard_shortcut' && isPasteChord(partial.data?.shortcut)) {
       const latest = this.clipboard.getLatest()
       if (latest) {
+        const pairId = this.pendingClipboardPairId ?? latest.clipboard.pairId
         this.recordEvent('paste_detected', {
           target: partial.target,
           data: {
-            ...partial.data,
-            clipboard: latest.clipboard,
-            matchedClipboardHash: latest.clipboard.contentHash
+            ...data,
+            clipboard: { ...latest.clipboard, pairId: pairId ?? latest.clipboard.pairId },
+            matchedClipboardHash: latest.clipboard.contentHash,
+            clipboardPairId: pairId
           }
         })
         return
@@ -523,7 +808,7 @@ export class TelemetryRecorder {
 
     // Paste inference: field length jumped after a recent clipboard change.
     if (partial.type === 'focus_changed' || partial.type === 'field_completed') {
-      const len = partial.data?.field?.valueLength
+      const len = data?.field?.valueLength
       if (typeof len === 'number') {
         const latest = this.clipboard.getLatest()
         if (
@@ -539,12 +824,14 @@ export class TelemetryRecorder {
             now: Date.now()
           })
           if (result.matched) {
+            const pairId = this.pendingClipboardPairId ?? latest.clipboard.pairId
             this.recordEvent('paste_detected', {
               target: partial.target,
               data: {
-                ...partial.data,
-                clipboard: latest.clipboard,
+                ...data,
+                clipboard: { ...latest.clipboard, pairId: pairId ?? latest.clipboard.pairId },
                 matchedClipboardHash: latest.clipboard.contentHash,
+                clipboardPairId: pairId,
                 charCountDelta: result.charCountDelta,
                 inferred: true
               }
@@ -555,14 +842,41 @@ export class TelemetryRecorder {
       }
     }
 
+    // Record the interaction immediately so callers/tests see it without waiting
+    // on screenshot I/O; attach pre/post shot paths asynchronously when enabled.
     this.recordEvent(partial.type, {
       target: partial.target,
-      data: partial.data
+      data
     })
 
     if (partial.type === 'element_activated' || partial.type === 'click') {
-      void this.captureKeyframe('activation')
       this.interaction.poke?.()
+      void this.captureActionShots(data)
+    }
+  }
+
+  /** Pre/post screenshots + optional target crop at action boundaries. */
+  private async captureActionShots(data: InteractionPartial['data']): Promise<void> {
+    if (!this.screenshot.enabled) return
+    const pre = await this.captureKeyframe('pre_action')
+    if (pre) {
+      this.recordEvent('keyframe_captured', {
+        data: { keyframePath: pre, preShotPath: pre, message: 'pre_action' }
+      })
+    }
+    if (data?.elementBounds) {
+      const crop = await this.captureKeyframe('target_crop', data.elementBounds)
+      if (crop) {
+        this.recordEvent('keyframe_captured', {
+          data: { keyframePath: crop, targetCropPath: crop, message: 'target_crop' }
+        })
+      }
+    }
+    const post = await this.captureKeyframe('post_action')
+    if (post) {
+      this.recordEvent('keyframe_captured', {
+        data: { keyframePath: post, postShotPath: post, message: 'post_action' }
+      })
     }
   }
 }

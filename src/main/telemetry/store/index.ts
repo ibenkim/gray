@@ -6,7 +6,9 @@ export type {
   TelemetryStore,
   CreateSessionInput,
   AppendEventsResult,
-  SessionMetaPatch
+  SessionMetaPatch,
+  StoredNarration,
+  StoredNarrationSpan
 } from './TelemetryStore'
 export { FileTelemetryStore } from './FileTelemetryStore'
 

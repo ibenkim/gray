@@ -556,6 +556,31 @@
 .step-actions button:hover { color: var(--text-70); }
 .step-check { color: var(--purple-70); display: flex; flex-shrink: 0; }
 
+.step-intent-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-40);
+  border: 0.5px solid var(--text-15);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-right: 6px;
+  vertical-align: 1px;
+  text-transform: capitalize;
+}
+.step-low-confidence {
+  background: rgba(194, 117, 96, 0.08);
+}
+.step-low-confidence .step-title { color: rgba(22, 20, 39, 0.72); }
+.step-requires-summary {
+  font-size: 10px;
+  color: var(--text-40);
+  margin: 0 0 4px 36px;
+  padding-left: 10px;
+  line-height: 1.35;
+}
+
 .step-voice-note {
   display: flex;
   align-items: center;
@@ -569,6 +594,83 @@
   font-size: 11px;
   font-style: italic;
   color: rgba(22, 20, 39, 0.55);
+}
+
+/* Review UI — summary, questions, run contract (§9) */
+.review-summary {
+  padding: 2px 12px 8px;
+}
+.review-summary-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.review-goal {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-40);
+  line-height: 1.35;
+}
+.review-questions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.review-question {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--amber-text);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(194, 117, 96, 0.35);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.run-contract {
+  margin: 4px 8px 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--text-15);
+  border-radius: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.run-contract-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.run-contract-lead {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-40);
+  line-height: 1.4;
+}
+.run-contract-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 11px;
+}
+.run-contract-list dt {
+  color: var(--text-40);
+  font-weight: 500;
+}
+.run-contract-list dd {
+  margin: 0;
+  color: var(--text);
+}
+.run-contract-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
 }
 
 /* Fix step — amber (= needs answer) question card at its step number */

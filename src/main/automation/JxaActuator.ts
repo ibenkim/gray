@@ -146,6 +146,14 @@ export class JxaActuator implements Actuator {
     })
   }
 
+  /**
+   * Readback stub — always succeeds until JXA field-value query lands.
+   * Runner calls this after fill-like type_text ops.
+   */
+  async readField(_params: QueryParams): Promise<ActuatorResult> {
+    return { ok: true }
+  }
+
   async typeText(text: string): Promise<ActuatorResult> {
     // Type through System Events so ordinary data_entry never depends on the
     // clipboard (and never fails with clipboard_write_failed).

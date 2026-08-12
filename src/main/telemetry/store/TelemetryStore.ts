@@ -1,6 +1,7 @@
 import type {
   AutomationScript,
   ExtractedWorkflow,
+  NarrationMarker,
   PolishedSession,
   ProcessingErrorCode,
   ProcessingStatus,
@@ -32,6 +33,22 @@ export type SessionMetaPatch = {
   processingStatus?: ProcessingStatus
   processingErrorCode?: ProcessingErrorCode | null
   stoppedAt?: string
+}
+
+/** Persisted voice narration transcript aligned to session elapsedMs. */
+export type StoredNarrationSpan = {
+  text: string
+  startMs: number
+  endMs: number
+  marker?: NarrationMarker
+}
+
+export type StoredNarration = {
+  sessionId: string
+  spans: StoredNarrationSpan[]
+  /** ISO timestamp when transcribed; empty string for capture placeholder. */
+  transcribedAt: string
+  audioPath?: string
 }
 
 export interface TelemetryStore {
@@ -68,4 +85,10 @@ export interface TelemetryStore {
   ): Promise<{ absolutePath: string; relativePath: string }>
   /** Absolute root for keyframe files (optional). */
   keyframesRoot?(): string
+  saveNarration?(sessionId: string, narration: StoredNarration): Promise<void>
+  getNarration?(sessionId: string): Promise<StoredNarration | null>
+  /** Persist ground-truth markdown or structured JSON (serialized). */
+  saveGroundTruth?(sessionId: string, groundTruth: string | object): Promise<void>
+  /** Raw ground-truth file contents (markdown or JSON string), if present. */
+  getGroundTruth?(sessionId: string): Promise<string | null>
 }

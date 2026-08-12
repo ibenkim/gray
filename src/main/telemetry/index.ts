@@ -7,16 +7,23 @@ import { ClipboardWatcher } from './clipboard'
 import { loadTelemetryConfig, type TelemetryConfig } from './config'
 import { userMessageForCode } from './errors'
 import { SparseKeyframeProvider } from './keyframes'
+import {
+  emptyNarration,
+  NarrationRecorder,
+  persistNarrationResult
+} from './narration'
 import { compileSessionAutomation } from './automation/compileSession'
 import { processSessionWorkflow } from './processSession'
 import { createTelemetryStore, type TelemetryStore } from './store'
 
 const MAX_EVENTS_BODY = 200
 const MAX_BODY_BYTES = 512_000
+const MAX_NARRATION_CHUNK = 512_000
 
 let config: TelemetryConfig
 let store: TelemetryStore | null = null
 let recorder: TelemetryRecorder | null = null
+let narrationRecorder: NarrationRecorder | null = null
 
 export function getTelemetryRecorder(): TelemetryRecorder | null {
   return recorder
@@ -28,6 +35,10 @@ export function getTelemetryStore(): TelemetryStore | null {
 
 export function getTelemetryConfig(): TelemetryConfig {
   return config
+}
+
+export function getNarrationRecorder(): NarrationRecorder | null {
+  return narrationRecorder
 }
 
 function isAccessibilityTrusted(): boolean {
@@ -99,6 +110,7 @@ export async function initTelemetry(): Promise<void> {
     screenshot,
     clipboard: new ClipboardWatcher()
   })
+  narrationRecorder = new NarrationRecorder(config.devDir)
 
   recorder.onEvent((event) => {
     broadcast('telemetry:event', event)
@@ -106,6 +118,62 @@ export async function initTelemetry(): Promise<void> {
   recorder.onStatus((status) => {
     broadcast('telemetry:status', status)
   })
+}
+
+async function beginNarrationCapture(sessionId: string): Promise<void> {
+  if (!narrationRecorder || !store?.saveNarration) return
+  try {
+    const { audioPath } = narrationRecorder.begin(sessionId)
+    await store.saveNarration(sessionId, emptyNarration(sessionId, audioPath))
+  } catch (err) {
+    console.error(
+      '[telemetry] narration begin failed',
+      err instanceof Error ? err.name : 'error'
+    )
+  }
+}
+
+/** Finalize mic audio → Whisper → narration.json + stream events (before polish). */
+async function finalizeNarrationForSession(
+  sessionId: string,
+  opts: { discard?: boolean } = {}
+): Promise<void> {
+  if (!store || !narrationRecorder) return
+  const trackedId = narrationRecorder.getSessionId()
+  if (trackedId && trackedId !== sessionId) {
+    await narrationRecorder.end()
+    return
+  }
+
+  try {
+    if (opts.discard) {
+      await narrationRecorder.end()
+      return
+    }
+    const meta = await store.getSessionMeta(sessionId)
+    const sessionStartedAtMs = meta ? Date.parse(meta.startedAt) : Date.now()
+    const started =
+      Number.isFinite(sessionStartedAtMs) && sessionStartedAtMs > 0
+        ? sessionStartedAtMs
+        : Date.now()
+    const spans = await narrationRecorder.finalize({
+      apiKey: config.openaiApiKey,
+      sessionStartedAtMs: started,
+      sessionId
+    })
+    const audioPath = narrationRecorder.getAudioPath()
+    await persistNarrationResult(store, sessionId, spans, started, audioPath)
+  } catch (err) {
+    console.error(
+      '[telemetry] narration finalize failed',
+      err instanceof Error ? err.name : 'error'
+    )
+    try {
+      await narrationRecorder.end()
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -181,6 +249,9 @@ export function registerTelemetryIpc(): void {
           ownerEmail: auth.email ?? opts.ownerEmail,
           ignoreAppNames: opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']
         })
+        if (opts.narrate && status.sessionId) {
+          await beginNarrationCapture(status.sessionId)
+        }
         return { ok: true, status }
       } catch (err) {
         console.error('[telemetry] sessionStart failed')
@@ -188,6 +259,16 @@ export function registerTelemetryIpc(): void {
       }
     }
   )
+
+  ipcMain.handle('telemetry:sessionPause', async () => {
+    if (!recorder) return { ok: false, error: 'Telemetry not initialized' }
+    return { ok: true, status: recorder.pauseRecording() }
+  })
+
+  ipcMain.handle('telemetry:sessionResume', async () => {
+    if (!recorder) return { ok: false, error: 'Telemetry not initialized' }
+    return { ok: true, status: recorder.resumeRecording() }
+  })
 
   ipcMain.handle(
     'telemetry:events',
@@ -233,9 +314,12 @@ export function registerTelemetryIpc(): void {
       }
 
       try {
+        const wasNarrating = recorder.isNarrating()
+
         if (opts.discard) {
           const { sessionId: stoppedId } = await recorder.stopRecording()
           if (stoppedId) {
+            if (wasNarrating) await finalizeNarrationForSession(stoppedId, { discard: true })
             await store.updateSessionMeta(stoppedId, {
               captureStatus: 'stopped',
               processingStatus: 'not_started',
@@ -253,6 +337,11 @@ export function registerTelemetryIpc(): void {
         if (!stoppedId) {
           recorder.setProcessing(false)
           return { ok: false, error: 'Stop failed' }
+        }
+
+        // Narration events must land in the stream before polish runs.
+        if (wasNarrating) {
+          await finalizeNarrationForSession(stoppedId)
         }
 
         await store.updateSessionMeta(stoppedId, {
@@ -345,6 +434,7 @@ export function registerTelemetryIpc(): void {
       recorder?.getRecordingStatus() ??
       ({
         recording: false,
+        paused: false,
         sessionId: null,
         sequence: 0,
         startedAt: null,
@@ -425,6 +515,56 @@ export function registerTelemetryIpc(): void {
         : { ok: false, error: 'Script not found' }
     }
   )
+
+  // ── Narration capture (renderer MediaRecorder → main file sink) ──
+  ipcMain.handle('narration:start', async (_e, sessionId: string) => {
+    if (!narrationRecorder || !store) return { ok: false, error: 'Telemetry not initialized' }
+    if (!sessionId || typeof sessionId !== 'string') {
+      return { ok: false, error: 'sessionId required' }
+    }
+    try {
+      if (narrationRecorder.getSessionId() === sessionId && narrationRecorder.isActive()) {
+        return { ok: true, audioPath: narrationRecorder.getAudioPath() }
+      }
+      const { audioPath } = narrationRecorder.begin(sessionId)
+      if (store.saveNarration) {
+        await store.saveNarration(sessionId, emptyNarration(sessionId, audioPath))
+      }
+      return { ok: true, audioPath }
+    } catch {
+      return { ok: false, error: 'Could not start narration' }
+    }
+  })
+
+  ipcMain.handle(
+    'narration:append',
+    async (_e, sessionId: string, chunk: ArrayBuffer | Uint8Array | Buffer) => {
+      if (!narrationRecorder) return { ok: false, error: 'Telemetry not initialized' }
+      if (!sessionId || !chunk) return { ok: false, error: 'Invalid body' }
+      try {
+        const buf = Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : chunk)
+        if (buf.byteLength > MAX_NARRATION_CHUNK) {
+          return { ok: false, error: 'Chunk too large' }
+        }
+        narrationRecorder.appendChunk(sessionId, buf)
+        return { ok: true }
+      } catch {
+        return { ok: false, error: 'Append failed' }
+      }
+    }
+  )
+
+  ipcMain.handle('narration:stop', async () => {
+    if (!narrationRecorder) return { ok: false, error: 'Telemetry not initialized' }
+    try {
+      const result = await narrationRecorder.end()
+      return { ok: true, ...result }
+    } catch {
+      return { ok: false, error: 'Could not stop narration' }
+    }
+  })
 }
 
 export async function flushTelemetryOnQuit(): Promise<void> {

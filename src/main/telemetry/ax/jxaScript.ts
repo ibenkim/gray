@@ -127,16 +127,17 @@ function elementAtPoint(x, y) {
   }
 }
 
-/** Identity of a clicked element: role + best label + a little ancestor context. */
+/** Identity of a clicked element: role + best label + ancestor + list context. */
 function describeElement(el) {
   if (!el) return null;
   var role = axString(el, 'AXRole');
   if (!role) return null;
 
+  var identifier = axString(el, 'AXIdentifier');
   var label =
     axString(el, 'AXTitle') ||
     axString(el, 'AXDescription') ||
-    axString(el, 'AXIdentifier');
+    identifier;
 
   /* A button's AXValue is its caption; a text field's AXValue is private content. */
   if (!label && LABEL_VALUE_ROLES[role] && !TEXT_ROLES[role]) {
@@ -150,22 +151,57 @@ function describeElement(el) {
     valueLength = val ? val.length : 0;
   }
 
+  var enabled = null;
+  try {
+    var en = Ref();
+    if ($.AXUIElementCopyAttributeValue(el, cfstr('AXEnabled'), en) === 0) {
+      enabled = !!en[0];
+    }
+  } catch (eEn) {}
+
   var path = [];
   var cur = el;
-  for (var i = 0; i < MAX_ANCESTORS + 2 && path.length < MAX_ANCESTORS; i++) {
+  var containerRole = null;
+  var containerLabel = null;
+  var rowIndex = null;
+  var siblingCount = null;
+  for (var i = 0; i < MAX_ANCESTORS + 4 && path.length < 8; i++) {
     cur = axCopy(cur, 'AXParent');
     if (!cur) break;
+    var pRole = axString(cur, 'AXRole');
     var pLabel = axString(cur, 'AXTitle') || axString(cur, 'AXDescription');
     if (pLabel) path.push(pLabel.slice(0, 80));
+    if (!containerRole && pRole && /AX(Table|List|Outline|ScrollArea|Grid|Row|Cell)/.test(pRole)) {
+      containerRole = pRole;
+      containerLabel = pLabel ? pLabel.slice(0, 120) : null;
+      try {
+        var kids = Ref();
+        if ($.AXUIElementCopyAttributeValue(cur, cfstr('AXChildren'), kids) === 0 && kids[0]) {
+          siblingCount = kids[0].length;
+          for (var si = 0; si < kids[0].length; si++) {
+            if (kids[0][si] && el && $.CFEqual(kids[0][si], el)) {
+              rowIndex = si;
+              break;
+            }
+          }
+        }
+      } catch (eKids) {}
+    }
   }
 
   return {
     role: role,
     subrole: axString(el, 'AXSubrole'),
+    identifier: identifier ? identifier.slice(0, 120) : null,
     label: label ? label.slice(0, 120) : null,
     valueLength: valueLength,
+    enabled: enabled,
     path: path,
-    bounds: axFrameBounds(el)
+    bounds: axFrameBounds(el),
+    containerRole: containerRole,
+    containerLabel: containerLabel,
+    rowIndex: rowIndex,
+    siblingCount: siblingCount
   };
 }
 
@@ -513,6 +549,8 @@ function onMouse(evt, button) {
     var front = frontApp();
     var count = 1;
     try { count = evt.clickCount || 1; } catch (e) {}
+    var flags = 0;
+    try { flags = evt.modifierFlags; } catch (eFlags) {}
 
     emit({
       k: 'click',
@@ -520,18 +558,60 @@ function onMouse(evt, button) {
       count: count,
       x: pt ? pt.x : null,
       y: pt ? pt.y : null,
+      cmd: (flags & $.NSEventModifierFlagCommand) !== 0,
+      opt: (flags & $.NSEventModifierFlagOption) !== 0,
+      ctrl: (flags & $.NSEventModifierFlagControl) !== 0,
+      shift: (flags & $.NSEventModifierFlagShift) !== 0,
       app: front.name,
       appBundleId: front.bundleId,
       role: target ? target.role : null,
       subrole: target ? target.subrole : null,
+      identifier: target ? target.identifier : null,
       label: target ? target.label : null,
       valueLength: target ? target.valueLength : null,
+      enabled: target ? target.enabled : null,
       path: target ? target.path : [],
-      bounds: target ? target.bounds : null
+      bounds: target ? target.bounds : null,
+      containerRole: target ? target.containerRole : null,
+      containerLabel: target ? target.containerLabel : null,
+      rowIndex: target ? target.rowIndex : null,
+      siblingCount: target ? target.siblingCount : null
     });
     scheduleSample(160);
   } catch (err) {
     emit({ k: 'fault', where: 'click' });
+  }
+}
+
+var lastScrollEmitAt = 0;
+function onScroll(evt) {
+  try {
+    var now = Date.now();
+    if (now - lastScrollEmitAt < 200) return;
+    lastScrollEmitAt = now;
+    var dx = 0;
+    var dy = 0;
+    try { dx = evt.scrollingDeltaX || 0; } catch (e1) {}
+    try { dy = evt.scrollingDeltaY || 0; } catch (e2) {}
+    if (!dx && !dy) return;
+    var pt = pointOf(evt);
+    var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
+    var front = frontApp();
+    emit({
+      k: 'scroll',
+      axis: Math.abs(dy) >= Math.abs(dx) ? 'vertical' : 'horizontal',
+      delta: Math.abs(dy) >= Math.abs(dx) ? dy : dx,
+      x: pt ? pt.x : null,
+      y: pt ? pt.y : null,
+      app: front.name,
+      appBundleId: front.bundleId,
+      role: target ? target.role : null,
+      label: target ? target.label : null,
+      containerRole: target ? target.containerRole : null,
+      containerLabel: target ? target.containerLabel : null
+    });
+  } catch (err) {
+    emit({ k: 'fault', where: 'scroll' });
   }
 }
 
@@ -543,8 +623,10 @@ function installMonitors() {
       try { if (evt.type === $.NSEventTypeRightMouseDown) button = 'right'; } catch (e) {}
       onMouse(evt, button);
     };
+    var scrollHandler = function (evt) { onScroll(evt); };
     monitorHandlers.push(keyHandler);
     monitorHandlers.push(mouseHandler);
+    monitorHandlers.push(scrollHandler);
 
     var keyMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(
       $.NSEventMaskKeyDown,
@@ -554,10 +636,18 @@ function installMonitors() {
       $.NSEventMaskLeftMouseDown | $.NSEventMaskRightMouseDown,
       mouseHandler
     );
+    var scrollMonitor = null;
+    try {
+      scrollMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(
+        $.NSEventMaskScrollWheel,
+        scrollHandler
+      );
+    } catch (eScroll) {}
     /* Retain tokens AND handlers: releasing either removes/breaks the monitor. */
     if (keyMonitor) monitors.push(keyMonitor);
     if (mouseMonitor) monitors.push(mouseMonitor);
-    monitorsOk = monitors.length === 2;
+    if (scrollMonitor) monitors.push(scrollMonitor);
+    monitorsOk = monitors.length >= 2;
   } catch (e) {
     monitorsOk = false;
   }
@@ -634,14 +724,24 @@ function emitPolledClick(button) {
     count: 1,
     x: pt ? pt.x : null,
     y: pt ? pt.y : null,
+    cmd: false,
+    opt: false,
+    ctrl: false,
+    shift: false,
     app: front.name,
     appBundleId: front.bundleId,
     role: target ? target.role : null,
     subrole: target ? target.subrole : null,
+    identifier: target ? target.identifier : null,
     label: target ? target.label : null,
     valueLength: target ? target.valueLength : null,
+    enabled: target ? target.enabled : null,
     path: target ? target.path : [],
     bounds: target ? target.bounds : null,
+    containerRole: target ? target.containerRole : null,
+    containerLabel: target ? target.containerLabel : null,
+    rowIndex: target ? target.rowIndex : null,
+    siblingCount: target ? target.siblingCount : null,
     via: 'poll'
   });
   scheduleSample(160);

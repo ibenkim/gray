@@ -33,6 +33,7 @@ import type {
   AppendEventsResult,
   CreateSessionInput,
   SessionMetaPatch,
+  StoredNarration,
   TelemetryStore
 } from './TelemetryStore'
 
@@ -42,9 +43,15 @@ type Envelope = {
   event: TelemetryEvent
 }
 
+type Layout = 'session' | 'legacy'
+
 /**
  * Development-only file adapter. Refuses to initialize when the app is packaged.
  * Writes sanitized JSONL under development-data/telemetry/.
+ *
+ * New sessions use per-session layout under sessions/{sessionId}/.
+ * Legacy flat paths (normalized/, meta/, …) remain readable and writable for
+ * sessions that already exist in that layout.
  */
 export class FileTelemetryStore implements TelemetryStore {
   private readonly root: string
@@ -67,13 +74,17 @@ export class FileTelemetryStore implements TelemetryStore {
     }
     if (this.ready) return
     try {
-      mkdirSync(this.subdir('normalized'), { recursive: true })
-      mkdirSync(this.subdir('polished'), { recursive: true })
-      mkdirSync(this.subdir('workflows'), { recursive: true })
-      mkdirSync(this.subdir('meta'), { recursive: true })
-      mkdirSync(this.subdir('variables'), { recursive: true })
-      mkdirSync(this.subdir('automation'), { recursive: true })
-      mkdirSync(this.subdir('keyframes'), { recursive: true })
+      mkdirSync(this.safeJoin('sessions'), { recursive: true })
+      // Legacy dirs — still created so old tooling / dual-path reads keep working.
+      mkdirSync(this.safeJoin('normalized'), { recursive: true })
+      mkdirSync(this.safeJoin('polished'), { recursive: true })
+      mkdirSync(this.safeJoin('workflows'), { recursive: true })
+      mkdirSync(this.safeJoin('meta'), { recursive: true })
+      mkdirSync(this.safeJoin('variables'), { recursive: true })
+      mkdirSync(this.safeJoin('automation'), { recursive: true })
+      mkdirSync(this.safeJoin('keyframes'), { recursive: true })
+      mkdirSync(this.safeJoin('narration'), { recursive: true })
+      mkdirSync(this.safeJoin('ground_truth'), { recursive: true })
       this.ready = true
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -98,11 +109,14 @@ export class FileTelemetryStore implements TelemetryStore {
       recordMode: input.recordMode,
       selectedAppId: input.selectedAppId
     }
-    this.writeJson(this.metaPath(sessionId), meta)
-    const nPath = this.normalizedPath(sessionId)
-    if (!existsSync(nPath)) {
-      writeFileSync(nPath, '', 'utf8')
+    const metaPath = this.pathFor(sessionId, 'meta', 'session')
+    this.writeJson(metaPath, meta)
+    const eventsPath = this.pathFor(sessionId, 'events', 'session')
+    if (!existsSync(eventsPath)) {
+      mkdirSync(dirname(eventsPath), { recursive: true })
+      writeFileSync(eventsPath, '', 'utf8')
     }
+    mkdirSync(this.safeJoin('sessions', sessionId, 'shots'), { recursive: true })
     return meta
   }
 
@@ -151,7 +165,8 @@ export class FileTelemetryStore implements TelemetryStore {
     }
 
     if (lines.length > 0) {
-      await this.safeAppend(this.normalizedPath(id), lines.join('\n') + '\n')
+      const layout = this.layoutOf(id)
+      await this.safeAppend(this.pathFor(id, 'events', layout), lines.join('\n') + '\n')
     }
 
     return { accepted, duplicates, rejected }
@@ -174,8 +189,8 @@ export class FileTelemetryStore implements TelemetryStore {
   async readSessionEvents(sessionId: string): Promise<TelemetryEvent[]> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.normalizedPath(id)
-    if (!existsSync(path)) return []
+    const path = this.resolveExisting(id, 'events')
+    if (!path) return []
     const text = readFileSync(path, 'utf8')
     const events: TelemetryEvent[] = []
     for (const line of text.split('\n')) {
@@ -194,8 +209,8 @@ export class FileTelemetryStore implements TelemetryStore {
   async readPolishedSession(sessionId: string): Promise<PolishedSession | null> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.polishedPath(id)
-    if (!existsSync(path)) return null
+    const path = this.resolveExisting(id, 'polished')
+    if (!path) return null
     try {
       return PolishedSessionSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
     } catch {
@@ -209,7 +224,7 @@ export class FileTelemetryStore implements TelemetryStore {
     if (polished.sessionId !== id) {
       throw new Error('[telemetry] polished sessionId mismatch')
     }
-    this.writeJson(this.polishedPath(id), polished)
+    this.writeJson(this.pathFor(id, 'polished', this.layoutOf(id)), polished)
   }
 
   async saveWorkflow(
@@ -229,15 +244,15 @@ export class FileTelemetryStore implements TelemetryStore {
       usage: opts?.usage
     }
     const validated = StoredWorkflowResultSchema.parse(stored)
-    this.writeJson(this.workflowPath(id), validated)
+    this.writeJson(this.pathFor(id, 'workflow', this.layoutOf(id)), validated)
     return validated
   }
 
   async getWorkflow(sessionId: string): Promise<StoredWorkflowResult | null> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.workflowPath(id)
-    if (!existsSync(path)) return null
+    const path = this.resolveExisting(id, 'workflow')
+    if (!path) return null
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
       const normalized = normalizeExtractedWorkflow(raw.workflow)
@@ -259,15 +274,15 @@ export class FileTelemetryStore implements TelemetryStore {
       variables
     }
     const validated = StoredVariablesSchema.parse(stored)
-    this.writeJson(this.variablesPath(id), validated)
+    this.writeJson(this.pathFor(id, 'variables', this.layoutOf(id)), validated)
     return validated
   }
 
   async getVariables(sessionId: string): Promise<StoredVariables | null> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.variablesPath(id)
-    if (!existsSync(path)) return null
+    const path = this.resolveExisting(id, 'variables')
+    if (!path) return null
     try {
       return StoredVariablesSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
     } catch {
@@ -293,15 +308,15 @@ export class FileTelemetryStore implements TelemetryStore {
       usage: opts.usage
     }
     const validated = StoredAutomationScriptSchema.parse(stored)
-    this.writeJson(this.automationPath(id), validated)
+    this.writeJson(this.pathFor(id, 'automation', this.layoutOf(id)), validated)
     return validated
   }
 
   async getAutomationScript(sessionId: string): Promise<StoredAutomationScript | null> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.automationPath(id)
-    if (!existsSync(path)) return null
+    const path = this.resolveExisting(id, 'automation')
+    if (!path) return null
     try {
       return StoredAutomationScriptSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
     } catch {
@@ -318,7 +333,8 @@ export class FileTelemetryStore implements TelemetryStore {
     if (!existing) return null
     const next: StoredAutomationScript = { ...existing, stale }
     const validated = StoredAutomationScriptSchema.parse(next)
-    this.writeJson(this.automationPath(this.assertSessionId(sessionId)), validated)
+    const id = this.assertSessionId(sessionId)
+    this.writeJson(this.pathFor(id, 'automation', this.layoutOf(id)), validated)
     return validated
   }
 
@@ -332,6 +348,14 @@ export class FileTelemetryStore implements TelemetryStore {
     if (!/^[A-Za-z0-9_-]+$/.test(eventId) || eventId.includes('..')) {
       throw new Error('[telemetry] invalid eventId for keyframe')
     }
+    const layout = this.layoutOf(id)
+    if (layout === 'session') {
+      const relativePath = `sessions/${id}/shots/${eventId}.jpg`
+      const absolutePath = this.safeJoin('sessions', id, 'shots', `${eventId}.jpg`)
+      mkdirSync(dirname(absolutePath), { recursive: true })
+      writeFileSync(absolutePath, jpeg)
+      return { absolutePath, relativePath }
+    }
     const relativePath = `${id}/${eventId}.jpg`
     const absolutePath = this.safeJoin('keyframes', id, `${eventId}.jpg`)
     mkdirSync(dirname(absolutePath), { recursive: true })
@@ -340,14 +364,65 @@ export class FileTelemetryStore implements TelemetryStore {
   }
 
   keyframesRoot(): string {
+    // Legacy keyframes live under keyframes/; session shots use absolute paths from saveKeyframe.
     return this.safeJoin('keyframes')
+  }
+
+  async saveNarration(sessionId: string, narration: StoredNarration): Promise<void> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const payload: StoredNarration = { ...narration, sessionId: id }
+    this.writeJson(this.pathFor(id, 'narration', this.layoutOf(id)), payload)
+  }
+
+  async getNarration(sessionId: string): Promise<StoredNarration | null> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.resolveExisting(id, 'narration')
+    if (!path) return null
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as StoredNarration
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.spans)) return null
+      return { ...raw, sessionId: id }
+    } catch {
+      return null
+    }
+  }
+
+  async saveGroundTruth(sessionId: string, groundTruth: string | object): Promise<void> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const text =
+      typeof groundTruth === 'string' ? groundTruth : JSON.stringify(groundTruth, null, 2) + '\n'
+    const path = this.pathFor(id, 'ground_truth', this.layoutOf(id))
+    try {
+      mkdirSync(dirname(path), { recursive: true })
+      const tmp = `${path}.${process.pid}.tmp`
+      writeFileSync(tmp, text.endsWith('\n') ? text : text + '\n', 'utf8')
+      renameSync(tmp, path)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`[telemetry] failed to write ${path}: ${msg}`)
+    }
+  }
+
+  async getGroundTruth(sessionId: string): Promise<string | null> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.resolveExisting(id, 'ground_truth')
+    if (!path) return null
+    try {
+      return readFileSync(path, 'utf8')
+    } catch {
+      return null
+    }
   }
 
   async getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const path = this.metaPath(id)
-    if (!existsSync(path)) return null
+    const path = this.resolveExisting(id, 'meta')
+    if (!path) return null
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown
       return normalizeSessionMeta(raw)
@@ -373,45 +448,81 @@ export class FileTelemetryStore implements TelemetryStore {
     }
     delete (next as { error?: string }).error
     delete (next as { status?: string }).status
-    this.writeJson(this.metaPath(id), next)
+    this.writeJson(this.pathFor(id, 'meta', this.layoutOf(id)), next)
     return next
   }
 
-  private subdir(
-    name:
-      | 'normalized'
-      | 'polished'
-      | 'workflows'
+  /** Prefer session layout when its meta.json exists; else legacy. */
+  private layoutOf(sessionId: string): Layout {
+    if (existsSync(this.pathFor(sessionId, 'meta', 'session'))) return 'session'
+    if (existsSync(this.pathFor(sessionId, 'meta', 'legacy'))) return 'legacy'
+    return 'session'
+  }
+
+  private pathFor(
+    sessionId: string,
+    kind:
       | 'meta'
+      | 'events'
+      | 'polished'
+      | 'workflow'
       | 'variables'
       | 'automation'
-      | 'keyframes'
+      | 'narration'
+      | 'ground_truth',
+    layout: Layout
   ): string {
-    return this.safeJoin(name)
+    if (layout === 'session') {
+      const nameByKind: Record<typeof kind, string> = {
+        meta: 'meta.json',
+        events: 'events.jsonl',
+        polished: 'polished.json',
+        workflow: 'workflow.json',
+        variables: 'variables.json',
+        automation: 'automation.json',
+        narration: 'narration.json',
+        ground_truth: 'ground_truth.md'
+      }
+      return this.safeJoin('sessions', sessionId, nameByKind[kind])
+    }
+    switch (kind) {
+      case 'meta':
+        return this.safeJoin('meta', `${sessionId}.json`)
+      case 'events':
+        return this.safeJoin('normalized', `${sessionId}.jsonl`)
+      case 'polished':
+        return this.safeJoin('polished', `${sessionId}.json`)
+      case 'workflow':
+        return this.safeJoin('workflows', `${sessionId}.json`)
+      case 'variables':
+        return this.safeJoin('variables', `${sessionId}.json`)
+      case 'automation':
+        return this.safeJoin('automation', `${sessionId}.json`)
+      case 'narration':
+        return this.safeJoin('narration', `${sessionId}.json`)
+      case 'ground_truth':
+        return this.safeJoin('ground_truth', `${sessionId}.md`)
+    }
   }
 
-  private normalizedPath(sessionId: string): string {
-    return this.safeJoin('normalized', `${sessionId}.jsonl`)
-  }
-
-  private polishedPath(sessionId: string): string {
-    return this.safeJoin('polished', `${sessionId}.json`)
-  }
-
-  private workflowPath(sessionId: string): string {
-    return this.safeJoin('workflows', `${sessionId}.json`)
-  }
-
-  private variablesPath(sessionId: string): string {
-    return this.safeJoin('variables', `${sessionId}.json`)
-  }
-
-  private automationPath(sessionId: string): string {
-    return this.safeJoin('automation', `${sessionId}.json`)
-  }
-
-  private metaPath(sessionId: string): string {
-    return this.safeJoin('meta', `${sessionId}.json`)
+  /** Read: try session layout, then legacy. */
+  private resolveExisting(
+    sessionId: string,
+    kind:
+      | 'meta'
+      | 'events'
+      | 'polished'
+      | 'workflow'
+      | 'variables'
+      | 'automation'
+      | 'narration'
+      | 'ground_truth'
+  ): string | null {
+    const sessionPath = this.pathFor(sessionId, kind, 'session')
+    if (existsSync(sessionPath)) return sessionPath
+    const legacyPath = this.pathFor(sessionId, kind, 'legacy')
+    if (existsSync(legacyPath)) return legacyPath
+    return null
   }
 
   private assertSessionId(sessionId: string): string {

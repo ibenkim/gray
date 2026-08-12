@@ -29,6 +29,7 @@ export type InteractionPartial = {
   type: Extract<
     TelemetryEventType,
     | 'click'
+    | 'scroll'
     | 'text_input'
     | 'keyboard_shortcut'
     | 'field_completed'
@@ -37,6 +38,10 @@ export type InteractionPartial = {
     | 'focus_changed'
     | 'element_activated'
     | 'error'
+    | 'state_change'
+    | 'file_dialog'
+    | 'download'
+    | 'marker'
   >
   target?: TelemetryTarget
   data?: TelemetryEvent['data']
@@ -58,6 +63,9 @@ export type KeyframeReason =
   | 'clipboard'
   | 'settle'
   | 'ambiguous'
+  | 'pre_action'
+  | 'post_action'
+  | 'target_crop'
 
 /**
  * Optional redacted keyframe screenshot source.

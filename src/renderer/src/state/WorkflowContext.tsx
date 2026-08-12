@@ -25,8 +25,68 @@ import type {
   Workflow
 } from './types'
 import { formatWatchEntry } from '../../../shared/telemetry/formatWatchEntry'
-import type { TelemetryEvent } from '../../../shared/telemetry/schema'
+import type { ExtractedWorkflow, TelemetryEvent } from '../../../shared/telemetry/schema'
 import { createMockDraft, makeRunSteps } from './mockData'
+
+/**
+ * Ensure review fields from ExtractedWorkflow stay on the editor Workflow
+ * even if an older main process omitted them from toEditorWorkflow.
+ */
+function applyExtractedReview(
+  workflow: Workflow,
+  extracted: ExtractedWorkflow | undefined,
+  sessionId?: string | null
+): Workflow {
+  const base: Workflow = {
+    ...workflow,
+    sessionId: workflow.sessionId ?? sessionId ?? undefined,
+    hoursReturned: workflow.hoursReturned ?? '≈ 0 h returned total',
+    automationStale: false,
+    contractAccepted: workflow.contractAccepted ?? false
+  }
+  if (!extracted) return base
+
+  const destinations = [
+    ...new Set([
+      ...(extracted.authorizationScope?.destinations ?? []),
+      ...(extracted.addresses ?? []).map((a) => a.id)
+    ])
+  ]
+  const hasContract =
+    (extracted.inputs?.length ?? 0) > 0 ||
+    (extracted.writes?.length ?? 0) > 0 ||
+    (extracted.commits?.length ?? 0) > 0 ||
+    destinations.length > 0 ||
+    !!extracted.authorizationScope
+
+  return {
+    ...base,
+    summary: base.summary ?? extracted.summary,
+    goal: base.goal ?? extracted.goal ?? undefined,
+    questions:
+      base.questions ??
+      (extracted.questions?.length
+        ? extracted.questions.map((q) => ({
+            id: q.id,
+            prompt: q.prompt,
+            relatedStepId: q.relatedStepId,
+            kind: q.kind
+          }))
+        : undefined),
+    runContract:
+      base.runContract ??
+      (hasContract
+        ? {
+            inputs: extracted.inputs ?? [],
+            writes: extracted.writes ?? [],
+            commits: extracted.commits ?? [],
+            destinations,
+            authorizationLevel: extracted.authorizationScope?.level,
+            authorizationExpires: extracted.authorizationScope?.expires ?? null
+          }
+        : undefined)
+  }
+}
 
 export type WatchEntry = {
   time: string
@@ -143,7 +203,8 @@ type WorkflowContextValue = {
   cancelRecording: () => void
   finishRecording: () => void
   cancelEditor: () => void
-  runWorkflow: () => void
+  /** Optional override used when accepting the run contract in the same tick. */
+  runWorkflow: (override?: Workflow) => void
   saveWorkflow: () => void
   editFromRunning: () => void
   toggleRunPause: () => void
@@ -219,6 +280,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [organizeError, setOrganizeError] = useState<string | null>(null)
   const [lastTelemetrySessionId, setLastTelemetrySessionId] = useState<string | null>(null)
   const telemetrySessionRef = useRef<string | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const narrationSessionRef = useRef<string | null>(null)
 
   const [workflow, setWorkflow] = useState<Workflow>(() => createMockDraft(newId('draft')))
   const [editorCollapsed, setEditorCollapsed] = useState(false)
@@ -898,6 +962,71 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Transitions ──
 
+  const stopNarrationCapture = useCallback(async () => {
+    const recorder = mediaRecorderRef.current
+    mediaRecorderRef.current = null
+    const stream = mediaStreamRef.current
+    mediaStreamRef.current = null
+    narrationSessionRef.current = null
+    if (recorder && recorder.state !== 'inactive') {
+      await new Promise<void>((resolve) => {
+        recorder.addEventListener('stop', () => resolve(), { once: true })
+        try {
+          recorder.stop()
+        } catch {
+          resolve()
+        }
+      })
+    }
+    stream?.getTracks().forEach((t) => t.stop())
+    try {
+      await window.ghostBridge?.narrationStop?.()
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const startNarrationCapture = useCallback(async (sessionId: string) => {
+    const bridge = window.ghostBridge
+    if (!bridge?.narrationStart || !bridge.narrationAppend) return
+    try {
+      const started = await bridge.narrationStart(sessionId)
+      if (!started?.ok) return
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : ''
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+      recorder.ondataavailable = (ev) => {
+        if (!ev.data || ev.data.size === 0) return
+        void ev.data
+          .arrayBuffer()
+          .then((buf) => bridge.narrationAppend?.(sessionId, buf))
+          .catch(() => {
+            /* drop chunk */
+          })
+      }
+      recorder.onerror = () => {
+        /* continue session without narration */
+      }
+      mediaStreamRef.current = stream
+      mediaRecorderRef.current = recorder
+      narrationSessionRef.current = sessionId
+      recorder.start(1000)
+    } catch {
+      // Mic failure must not abort the telemetry session.
+      try {
+        await bridge.narrationStop?.()
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [])
+
   const resetRecording = useCallback(() => {
     setElapsed(0)
     setRecordPaused(false)
@@ -905,7 +1034,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setWatchExpanded(false)
     telemetrySessionRef.current = null
     setOrganizeError(null)
-  }, [])
+    void stopNarrationCapture()
+  }, [stopNarrationCapture])
 
   const openHover = useCallback(() => {
     if (draggingRef.current || hoverClosingRef.current) return
@@ -977,20 +1107,28 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setSavedConfirm(null)
     resetRecording()
 
+    const wantNarrate = narrate && micGranted
     const result = await window.ghostBridge?.telemetryStart?.({
       recordMode,
-      selectedAppId
+      selectedAppId,
+      narrate: wantNarrate
     })
     if (!result?.ok) {
       setOrganizeError(result?.error ?? 'Could not start recording')
       setState('idle')
       return
     }
-    telemetrySessionRef.current = result.status?.sessionId ?? null
+    const sessionId = result.status?.sessionId ?? null
+    telemetrySessionRef.current = sessionId
+    if (wantNarrate && sessionId) {
+      void startNarrationCapture(sessionId)
+    }
+    setRecordPaused(false)
     setState('recording')
-  }, [recordMode, resetRecording, selectedAppId])
+  }, [micGranted, narrate, recordMode, resetRecording, selectedAppId, startNarrationCapture])
 
   const cancelRecording = useCallback(async () => {
+    await stopNarrationCapture()
     const sessionId = telemetrySessionRef.current
     if (sessionId) {
       try {
@@ -1001,12 +1139,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }
     resetRecording()
     setState('idle')
-  }, [resetRecording])
+  }, [resetRecording, stopNarrationCapture])
 
   const finishRecording = useCallback(async () => {
     setWatchExpanded(false)
     setState('organizing')
     setOrganizeError(null)
+    await stopNarrationCapture()
     const sessionId = telemetrySessionRef.current ?? undefined
     const result = await window.ghostBridge?.telemetryStop?.(
       sessionId ? { sessionId } : undefined
@@ -1023,16 +1162,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       return
     }
     setLastTelemetrySessionId(null)
-    setWorkflow({
-      ...result.workflow,
-      sessionId: result.workflow.sessionId ?? result.sessionId ?? undefined,
-      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total',
-      automationStale: false
-    })
+    setWorkflow(applyExtractedReview(result.workflow, result.extracted, result.sessionId))
     setEditorCollapsed(false)
     resetRecording()
     setState('editor')
-  }, [resetRecording])
+  }, [resetRecording, stopNarrationCapture])
 
   const dismissOrganizeError = useCallback(() => {
     setOrganizeError(null)
@@ -1053,12 +1187,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       return
     }
     setLastTelemetrySessionId(null)
-    setWorkflow({
-      ...result.workflow,
-      sessionId: result.workflow.sessionId ?? sessionId,
-      hoursReturned: result.workflow.hoursReturned ?? '≈ 0 h returned total',
-      automationStale: false
-    })
+    setWorkflow(applyExtractedReview(result.workflow, result.extracted, sessionId))
     setEditorCollapsed(false)
     setState('editor')
   }, [lastTelemetrySessionId])
@@ -1127,35 +1256,39 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const runWorkflow = useCallback(() => {
-    if (runInFlightRef.current) {
-      runInFlightRef.current = false
-      setRunPaused(false)
-      setEditorCollapsed(false)
-      setState('running')
-      if (automationRunRef.current) {
-        void window.ghostBridge?.automationRunResume?.()
+  const runWorkflow = useCallback(
+    (override?: Workflow) => {
+      const wf = override ?? workflow
+      if (runInFlightRef.current) {
+        runInFlightRef.current = false
+        setRunPaused(false)
+        setEditorCollapsed(false)
+        setState('running')
+        if (automationRunRef.current) {
+          void window.ghostBridge?.automationRunResume?.()
+        }
+        return
       }
-      return
-    }
-    // Preflight: automation needs Accessibility; mock runs need Screen.
-    if (workflow.sessionId) {
-      if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
-        window.ghostBridge?.openPermissionSettings?.('accessibility')
+      // Preflight: automation needs Accessibility; mock runs need Screen.
+      if (wf.sessionId) {
+        if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
+          window.ghostBridge?.openPermissionSettings?.('accessibility')
+          setToastArmed(true)
+          void computeStake()
+          return
+        }
+      } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
+        window.ghostBridge?.openPermissionSettings?.('screen')
         setToastArmed(true)
         void computeStake()
         return
       }
-    } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
-      window.ghostBridge?.openPermissionSettings?.('screen')
-      setToastArmed(true)
-      void computeStake()
-      return
-    }
-    // Run saves into history first, then runs.
-    window.ghostBridge?.upsertWorkflow?.(workflow)
-    beginRun(workflow)
-  }, [beginRun, computeStake, workflow])
+      // Run saves into history first, then runs.
+      window.ghostBridge?.upsertWorkflow?.(wf)
+      beginRun(wf)
+    },
+    [beginRun, computeStake, workflow]
+  )
 
   const saveWorkflow = useCallback(() => {
     runInFlightRef.current = false
@@ -1249,11 +1382,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setRunCollapsed(false)
       }
     })
+    const offWorkflowReady = window.ghostBridge?.onTelemetryWorkflowReady?.(
+      (payload) => {
+        setLastTelemetrySessionId(null)
+        setOrganizeError(null)
+        setWorkflow(applyExtractedReview(payload.workflow, payload.extracted, payload.sessionId))
+        setEditorCollapsed(false)
+        setState('editor')
+      }
+    )
     return () => {
       offRecord?.()
       offRun?.()
       offEditor?.()
       offReveal?.()
+      offWorkflowReady?.()
     }
   }, [beginRun, computeStake])
 
@@ -1267,7 +1410,17 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setNarrate,
     elapsedLabel: formatElapsed(elapsed),
     recordPaused,
-    toggleRecordPause: () => setRecordPaused((p) => !p),
+    toggleRecordPause: () => {
+      void (async () => {
+        if (recordPaused) {
+          const result = await window.ghostBridge?.telemetryResume?.()
+          if (result?.ok) setRecordPaused(false)
+        } else {
+          const result = await window.ghostBridge?.telemetryPause?.()
+          if (result?.ok) setRecordPaused(true)
+        }
+      })()
+    },
     watchLog,
     watchExpanded,
     setWatchExpanded,
