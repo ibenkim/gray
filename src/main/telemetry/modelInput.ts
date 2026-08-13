@@ -7,6 +7,7 @@ import type {
   TelemetrySessionMeta,
   WorkflowVariable
 } from '../../shared/telemetry/schema'
+import { sanitizeUrl } from '../../shared/telemetry/sanitize'
 import { sanitizeModelString } from './modelSanitize'
 import { segmentActions } from './segment'
 
@@ -243,10 +244,26 @@ function packAction(
   if (DROP_CATEGORIES.has(code)) return null
 
   const app = sanitizeModelString(a.appName ?? null, 40)
-  const doc = sanitizeModelString(a.documentTitle ?? null, 60)
   const el = sanitizeModelString(a.elementLabel ?? null, 40)
   const role = sanitizeModelString(a.elementRole ?? null, 24)
-  const host = sanitizeModelString(a.clipboard?.urlHost ?? null, 60)
+  // Browser AX often puts the page URL in documentTitle — surface host/path to the model.
+  const titleUrl =
+    a.documentTitle && /^https?:\/\//i.test(a.documentTitle)
+      ? sanitizeUrl(a.documentTitle)
+      : null
+  const doc = sanitizeModelString(
+    titleUrl?.urlHost
+      ? `${titleUrl.urlHost}${titleUrl.urlPath ?? ''}`.slice(0, 80)
+      : (a.documentTitle ?? null),
+    60
+  )
+  const host = sanitizeModelString(
+    a.clipboard?.urlHost ??
+      (titleUrl && !titleUrl.rejected ? titleUrl.urlHost : null) ??
+      a.screenAfter?.urlHost ??
+      null,
+    60
+  )
   const typed = sanitizeModelString(a.typedText ?? null, 120)
 
   const row: CompactModelAction = {
@@ -437,7 +454,9 @@ function compactAddresses(addresses: Address[]): CompactModelAddress[] {
       kind: a.kind,
       t: sanitizeModelString(a.template, 200) ?? a.template.slice(0, 200)
     }
-    if (a.params && Object.keys(a.params).length) row.p = a.params
+    if (a.params?.length) {
+      row.p = Object.fromEntries(a.params.map((e) => [e.key, e.value]))
+    }
     if (a.policy) row.pol = a.policy
     if (a.needsReview) row.nr = true
     return row

@@ -4,8 +4,10 @@ import type { ExtractedWorkflow } from '../../shared/telemetry/schema'
 import {
   applyEditorIntentToOps,
   collapseRedundantBrowserNav,
+  ensureCreateRenameFromEvidence,
   injectClickOpsFromEvidence,
-  recoverInferredActions
+  recoverInferredActions,
+  rewriteCreateSheetClicks
 } from '../telemetry/automation/compile'
 import { compileSessionAutomation } from '../telemetry/automation/compileSession'
 import { syncEditorStepsToStoredWorkflow } from '../telemetry/automation/syncEditorSteps'
@@ -97,9 +99,19 @@ export function registerAutomationIpc(): void {
         if (polished) {
           const warnings: string[] = [...script.script.warnings]
           const recovered = collapseRedundantBrowserNav(
-            injectClickOpsFromEvidence(
-              applyEditorIntentToOps(
-                recoverInferredActions(script.script.ops, storedWorkflow, polished, warnings),
+            ensureCreateRenameFromEvidence(
+              rewriteCreateSheetClicks(
+                injectClickOpsFromEvidence(
+                  applyEditorIntentToOps(
+                    recoverInferredActions(script.script.ops, storedWorkflow, polished, warnings),
+                    storedWorkflow,
+                    polished,
+                    warnings
+                  ),
+                  storedWorkflow,
+                  polished,
+                  warnings
+                ),
                 storedWorkflow,
                 polished,
                 warnings

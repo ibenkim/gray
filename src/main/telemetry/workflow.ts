@@ -2,6 +2,8 @@ import OpenAI from 'openai'
 import { zodTextFormat } from 'openai/helpers/zod'
 import {
   ExtractedWorkflowSchema,
+  ModelExtractedWorkflowSchema,
+  normalizeStepParams,
   withWorkflowStepDefaults,
   type Address,
   type ExtractedWorkflow,
@@ -169,7 +171,8 @@ async function parseWorkflowResponse(
         { role: 'user', content: JSON.stringify(userPayload) }
       ],
       text: {
-        format: zodTextFormat(ExtractedWorkflowSchema, formatName)
+        // Lean schema — full Address trees / z.record break Structured Outputs.
+        format: zodTextFormat(ModelExtractedWorkflowSchema, formatName)
       }
     })
   } catch (err) {
@@ -406,27 +409,116 @@ function finalizeParsedWorkflow(
   }
 
   const raw = parsed as Record<string, unknown>
-  const withDefaults = {
-    ...raw,
-    steps: (raw.steps as ExtractedWorkflow['steps']).map((s) =>
-      withWorkflowStepDefaults(s as unknown as Record<string, unknown>)
-    ),
-    addresses: raw.addresses ?? null,
-    commits: raw.commits ?? null,
-    writes: raw.writes ?? null,
-    inputs: raw.inputs ?? null,
-    authorizationScope: raw.authorizationScope ?? null,
-    branches: raw.branches ?? null,
-    questions: raw.questions ?? null,
-    variables: raw.variables ?? null
-  }
+  const rawSteps = Array.isArray(raw.steps) ? raw.steps : []
+  const sanitizedSteps = rawSteps
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+    .map((s, idx) => {
+      const defaults = withWorkflowStepDefaults({
+        ...s,
+        // Drop nested fields that commonly fail Zod when the model invents shapes.
+        requires: Array.isArray(s.requires) ? s.requires : null,
+        params: normalizeStepParams(s.params),
+        position:
+          s.position && typeof s.position === 'object' ? s.position : null,
+        effect: Array.isArray(s.effect) ? s.effect : null,
+        alternatives: Array.isArray(s.alternatives) ? s.alternatives : null,
+        order: typeof s.order === 'number' ? s.order : idx + 1,
+        action:
+          typeof s.action === 'string' && s.action.trim()
+            ? s.action
+            : typeof s.summary === 'string' && s.summary.trim()
+              ? s.summary
+              : `Step ${idx + 1}`,
+        category: typeof s.category === 'string' ? s.category : 'other',
+        evidenceEventIds: Array.isArray(s.evidenceEventIds)
+          ? s.evidenceEventIds.filter((id): id is string => typeof id === 'string')
+          : [],
+        confidence: typeof s.confidence === 'number' ? s.confidence : 0.5
+      })
+      // Evidence must be non-empty for schema; placeholder until resolveEvidence.
+      if (!defaults.evidenceEventIds.length) {
+        defaults.evidenceEventIds = ['tevt_unknown']
+      }
+      return defaults
+    })
 
-  const validatedResult = ExtractedWorkflowSchema.safeParse(withDefaults)
-  if (!validatedResult.success) {
+  if (!sanitizedSteps.length) {
     throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
   }
 
-  const expandedSteps = validatedResult.data.steps.map((step, idx) =>
+  const withDefaults = {
+    title:
+      typeof raw.title === 'string' && raw.title.trim() ? raw.title : 'Untitled workflow',
+    goal: typeof raw.goal === 'string' ? raw.goal : null,
+    summary:
+      typeof raw.summary === 'string' && raw.summary.trim()
+        ? raw.summary
+        : 'Recorded workflow',
+    outcome:
+      raw.outcome === 'completed' ||
+      raw.outcome === 'partial' ||
+      raw.outcome === 'failed' ||
+      raw.outcome === 'unknown'
+        ? raw.outcome
+        : 'unknown',
+    steps: sanitizedSteps,
+    warnings: Array.isArray(raw.warnings)
+      ? raw.warnings.filter((w): w is string => typeof w === 'string')
+      : [],
+    // Never trust model addresses — deterministic extraction owns this layer.
+    addresses: null,
+    commits: Array.isArray(raw.commits) ? raw.commits : null,
+    writes: Array.isArray(raw.writes) ? raw.writes : null,
+    inputs: Array.isArray(raw.inputs) ? raw.inputs : null,
+    authorizationScope:
+      raw.authorizationScope && typeof raw.authorizationScope === 'object'
+        ? raw.authorizationScope
+        : null,
+    branches: Array.isArray(raw.branches) ? raw.branches : null,
+    questions: Array.isArray(raw.questions) ? raw.questions : null,
+    variables: Array.isArray(raw.variables) ? raw.variables : null
+  }
+
+  let validated = ExtractedWorkflowSchema.safeParse(withDefaults)
+  if (!validated.success) {
+    // Salvage: strip complex nested L3 fields that often fail, keep core steps.
+    const preSalvageIssues = validated.error.issues
+      .slice(0, 6)
+      .map((i) => `${i.path.join('.')}: ${i.message}`)
+    console.error(
+      '[telemetry] workflow schema validation failed; salvaging core fields',
+      preSalvageIssues
+    )
+    const stripped = {
+      ...withDefaults,
+      steps: sanitizedSteps.map((s) =>
+        withWorkflowStepDefaults({
+          ...s,
+          requires: null,
+          position: null,
+          effect: null,
+          params: null,
+          authorization: null,
+          onFail: null,
+          idempotencyKey: null
+        })
+      ),
+      authorizationScope: null,
+      branches: null,
+      questions: null,
+      addresses: null
+    }
+    validated = ExtractedWorkflowSchema.safeParse(stripped)
+    if (!validated.success) {
+      const issues = validated.error.issues
+        .slice(0, 8)
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+      console.error('[telemetry] workflow salvage failed', issues)
+      throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
+    }
+  }
+
+  const expandedSteps = validated.data.steps.map((step, idx) =>
     withWorkflowStepDefaults({
       ...step,
       id: step.id ?? `step_${idx + 1}`,
@@ -434,20 +526,13 @@ function finalizeParsedWorkflow(
     })
   )
 
-  const persistedAddresses =
-    validatedResult.data.addresses && validatedResult.data.addresses.length > 0
-      ? validatedResult.data.addresses
-      : addresses.length
-        ? addresses
-        : null
-
   const base: ExtractedWorkflow = {
-    ...validatedResult.data,
+    ...validated.data,
     steps: expandedSteps,
-    addresses: persistedAddresses,
+    addresses: addresses.length ? addresses : null,
     variables:
-      validatedResult.data.variables && validatedResult.data.variables.length > 0
-        ? validatedResult.data.variables
+      validated.data.variables && validated.data.variables.length > 0
+        ? validated.data.variables
         : variables.length
           ? variables
           : null

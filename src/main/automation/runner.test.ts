@@ -233,7 +233,7 @@ describe('AutomationRunner', () => {
     expect(toFailureCode('app_not_found')).toBe('target_not_found')
     expect(toFailureCode('wait_timeout')).toBe('timeout')
     expect(toFailureCode('timeout')).toBe('timeout')
-    expect(toFailureCode('missing_url')).toBe('navigation_failed')
+    expect(toFailureCode('missing_url')).toBe('precondition_unmet')
     expect(toFailureCode('missing_variable')).toBe('precondition_unmet')
     expect(toFailureCode('out_of_scope')).toBe('out_of_scope')
   })

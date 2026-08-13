@@ -84,13 +84,20 @@ function openUrlInNewTab(url, preferredApp) {
 
 function clickAtPoint(x, y, button) {
   try {
-    var pt = $.CGPointMake(x, y);
+    var pt = $.CGPointMake(Number(x), Number(y));
     var downType = button === 'right' ? $.kCGEventRightMouseDown : $.kCGEventLeftMouseDown;
     var upType = button === 'right' ? $.kCGEventRightMouseUp : $.kCGEventLeftMouseUp;
     var buttonType = button === 'right' ? $.kCGMouseButtonRight : $.kCGMouseButtonLeft;
+    /* Move first — many web UIs ignore down/up that never hovered the target. */
+    var move = $.CGEventCreateMouseEvent($(), $.kCGEventMouseMoved, pt, buttonType);
+    $.CGEventPost($.kCGHIDEventTap, move);
+    try { $.NSThread.sleepForTimeInterval(0.03); } catch (eSleep0) {}
     var down = $.CGEventCreateMouseEvent($(), downType, pt, buttonType);
-    var up = $.CGEventCreateMouseEvent($(), upType, pt, buttonType);
+    $.CGEventSetIntegerValueField(down, $.kCGMouseEventClickState, 1);
     $.CGEventPost($.kCGHIDEventTap, down);
+    try { $.NSThread.sleepForTimeInterval(0.04); } catch (eSleep1) {}
+    var up = $.CGEventCreateMouseEvent($(), upType, pt, buttonType);
+    $.CGEventSetIntegerValueField(up, $.kCGMouseEventClickState, 1);
     $.CGEventPost($.kCGHIDEventTap, up);
     return { ok: true };
   } catch (e) {

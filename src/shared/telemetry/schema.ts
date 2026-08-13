@@ -733,7 +733,14 @@ export const WorkflowStepSchema = z
     intent: IntentVerbSchema.nullable(),
     summary: z.string().max(300).nullable(),
     requires: z.array(StepRequirementSchema).max(8).nullable(),
-    params: z.record(z.string().max(40), z.string().max(200)).nullable(),
+    /**
+     * OpenAI structured outputs do not support z.record reliably — store as
+     * key/value entries and convert at the edges when needed.
+     */
+    params: z
+      .array(z.object({ key: z.string().max(40), value: z.string().max(200) }).strict())
+      .max(20)
+      .nullable(),
     position: StepPositionSchema.nullable(),
     effect: z.array(StepEffectSchema).max(6).nullable(),
     idempotencyKey: z.string().max(120).nullable(),
@@ -743,6 +750,7 @@ export const WorkflowStepSchema = z
   .strict()
 
 export type WorkflowStep = z.infer<typeof WorkflowStepSchema>
+export type WorkflowStepParam = { key: string; value: string }
 
 export const WorkflowVariableSchema = z
   .object({
@@ -789,7 +797,10 @@ export const AddressSchema = z
     id: z.string().min(1).max(80),
     kind: AddressKindSchema,
     template: z.string().max(500),
-    params: z.record(z.string().max(40), z.string().max(200)).nullable(),
+    params: z
+      .array(z.object({ key: z.string().max(40), value: z.string().max(200) }).strict())
+      .max(20)
+      .nullable(),
     identityAccount: z.string().max(200).nullable(),
     identityProvider: z.string().max(80).nullable(),
     stability: z.enum(['high', 'medium', 'low']),
@@ -866,6 +877,33 @@ export const ExtractedWorkflowSchema = z
 
 export type ExtractedWorkflow = z.infer<typeof ExtractedWorkflowSchema>
 
+/**
+ * Lean schema for OpenAI Structured Outputs.
+ * Addresses are injected deterministically — the model must leave them null.
+ * Avoids deep Address trees that break Responses API parsing.
+ */
+export const ModelExtractedWorkflowSchema = z
+  .object({
+    title: z.string().min(1).max(160),
+    goal: z.string().max(400).nullable(),
+    summary: z.string().min(1).max(800),
+    outcome: z.enum(['completed', 'partial', 'failed', 'unknown']),
+    steps: z.array(WorkflowStepSchema).min(1).max(80),
+    warnings: z.array(z.string().max(300)).max(20),
+    variables: z.array(WorkflowVariableSchema).max(20).nullable(),
+    /** Always null from the model — filled from deterministic extractAddresses. */
+    addresses: z.null(),
+    commits: z.array(z.string().max(40)).max(20).nullable(),
+    writes: z.array(z.string().max(80)).max(20).nullable(),
+    inputs: z.array(z.string().max(40)).max(20).nullable(),
+    authorizationScope: AuthorizationScopeSchema.nullable(),
+    branches: z.array(WorkflowBranchSchema).max(20).nullable(),
+    questions: z.array(WorkflowQuestionSchema).max(30).nullable()
+  })
+  .strict()
+
+export type ModelExtractedWorkflow = z.infer<typeof ModelExtractedWorkflowSchema>
+
 export const RunFailureCodeSchema = z.enum([
   'target_not_found',
   'target_ambiguous',
@@ -908,7 +946,7 @@ export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
   intent: IntentVerb | null
   summary: string | null
   requires: StepRequirement[] | null
-  params: Record<string, string> | null
+  params: WorkflowStepParam[] | null
   position: StepPosition | null
   effect: StepEffect[] | null
   idempotencyKey: string | null
@@ -935,13 +973,40 @@ export function withWorkflowStepDefaults<T extends Record<string, unknown>>(
     intent: (step.intent as IntentVerb | null | undefined) ?? null,
     summary: (step.summary as string | null | undefined) ?? null,
     requires: (step.requires as StepRequirement[] | null | undefined) ?? null,
-    params: (step.params as Record<string, string> | null | undefined) ?? null,
+    params: normalizeStepParams(step.params),
     position: (step.position as StepPosition | null | undefined) ?? null,
     effect: (step.effect as StepEffect[] | null | undefined) ?? null,
     idempotencyKey: (step.idempotencyKey as string | null | undefined) ?? null,
     onFail: (step.onFail as WorkflowRetryHint | null | undefined) ?? null,
     authorization: (step.authorization as AuthorizationClass | null | undefined) ?? null
   }
+}
+
+/** Accept legacy record-shaped params or entry arrays. */
+export function normalizeStepParams(raw: unknown): WorkflowStepParam[] | null {
+  if (raw == null) return null
+  if (Array.isArray(raw)) {
+    const entries = raw
+      .filter(
+        (e): e is { key: string; value: string } =>
+          !!e &&
+          typeof e === 'object' &&
+          typeof (e as { key?: unknown }).key === 'string' &&
+          typeof (e as { value?: unknown }).value === 'string'
+      )
+      .map((e) => ({ key: e.key.slice(0, 40), value: e.value.slice(0, 200) }))
+    return entries.length ? entries : null
+  }
+  if (typeof raw === 'object') {
+    const entries = Object.entries(raw as Record<string, unknown>)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([key, value]) => ({
+        key: key.slice(0, 40),
+        value: String(value).slice(0, 200)
+      }))
+    return entries.length ? entries : null
+  }
+  return null
 }
 
 export function normalizeExtractedWorkflow(raw: unknown): ExtractedWorkflow | null {

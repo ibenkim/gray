@@ -7,7 +7,18 @@ import {
   type TargetResolution,
   type TelemetryEvent
 } from '../../shared/telemetry/schema'
-import { redactEvent, shouldDropEvent } from '../../shared/telemetry/sanitize'
+import { redactEvent, sanitizeUrl, shouldDropEvent } from '../../shared/telemetry/sanitize'
+
+/** Prefer structured urlHost; fall back when AX stuffed the page URL into the title. */
+function urlHostFromEvent(event: TelemetryEvent): string | undefined {
+  if (event.data?.urlHost) return event.data.urlHost
+  const title = event.data?.documentTitle || event.data?.windowTitle
+  if (title && /^https?:\/\//i.test(title)) {
+    const s = sanitizeUrl(title)
+    if (!s.rejected && s.urlHost) return s.urlHost
+  }
+  return undefined
+}
 import { attachNarration } from './narration'
 import { classifyInputKind, segmentActions, semanticOpFromShortcut } from './segment'
 import type { TelemetryStore } from './store/TelemetryStore'
@@ -144,7 +155,7 @@ export async function polishSession(
     const delta: ScreenAfterDelta = {
       appName: event.data?.appName,
       documentTitle: event.data?.documentTitle || event.data?.windowTitle,
-      urlHost: event.data?.urlHost
+      urlHost: urlHostFromEvent(event)
     }
     // Attach after-state to the most recent non-session action.
     for (let i = drafts.length - 1; i >= 0; i--) {
@@ -205,7 +216,7 @@ export async function polishSession(
           lastScreenDelta = {
             appName: app,
             documentTitle: doc,
-            urlHost: event.data?.urlHost
+            urlHost: urlHostFromEvent(event)
           }
         }
         return
@@ -236,7 +247,7 @@ export async function polishSession(
         ? changedOnly(lastScreenDelta, {
             appName: app,
             documentTitle: doc,
-            urlHost: event.data?.urlHost
+            urlHost: urlHostFromEvent(event)
           })
         : undefined
     }
@@ -246,7 +257,7 @@ export async function polishSession(
       lastScreenDelta = {
         appName: app,
         documentTitle: doc,
-        urlHost: event.data?.urlHost
+        urlHost: urlHostFromEvent(event)
       }
     }
   }
@@ -320,7 +331,7 @@ export async function polishSession(
             screenAfter: {
               appName: app,
               documentTitle: doc,
-              urlHost: event.data?.urlHost
+              urlHost: urlHostFromEvent(event)
             }
           })
         }

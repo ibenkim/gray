@@ -102,17 +102,47 @@ function axCopy(el, name) {
   }
 }
 
-function axString(el, name) {
-  var raw = axCopy(el, name);
-  if (!raw) return null;
+/**
+ * Convert CFString / NSString / JS primitive to a real string.
+ * Never return "[object Ref]" — that means the ObjC bridge failed to unwrap.
+ */
+function jsString(val) {
+  if (val === undefined || val === null) return null;
   try {
-    var unwrapped = ObjC.unwrap(raw);
+    if (typeof val === 'string') return val.length ? val : null;
+    if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  } catch (e0) {}
+  try {
+    if (val.js !== undefined && typeof val.js === 'string') {
+      return val.js.length ? val.js : null;
+    }
+  } catch (e1) {}
+  try {
+    var ns = $.NSString.stringWithString(val);
+    if (ns && ns.js !== undefined) {
+      var fromNs = String(ns.js);
+      if (fromNs && fromNs.indexOf('[object ') !== 0) return fromNs;
+    }
+  } catch (e2) {}
+  try {
+    var unwrapped = ObjC.unwrap(val);
     if (unwrapped === null || unwrapped === undefined) return null;
+    if (typeof unwrapped === 'string') return unwrapped.length ? unwrapped : null;
+    if (unwrapped && typeof unwrapped.js === 'string') {
+      return unwrapped.js.length ? unwrapped.js : null;
+    }
     var text = String(unwrapped);
-    return text.length ? text : null;
-  } catch (e) {
+    if (!text.length || text.indexOf('[object ') === 0) return null;
+    return text;
+  } catch (e3) {
     return null;
   }
+}
+
+function axString(el, name) {
+  var raw = axCopy(el, name);
+  if (raw == null) return null;
+  return jsString(raw);
 }
 
 function elementAtPoint(x, y) {
@@ -235,9 +265,7 @@ function attr(el, name) {
     if (!el) return null;
     var v = el.attributes.byName(name);
     if (!v) return null;
-    var val = v.value();
-    if (val === undefined || val === null) return null;
-    return String(val);
+    return jsString(v.value());
   } catch (e) {
     return null;
   }
@@ -248,9 +276,9 @@ function attrLen(el, name) {
     if (!el) return null;
     var v = el.attributes.byName(name);
     if (!v) return null;
-    var val = v.value();
-    if (val === undefined || val === null) return null;
-    return String(val).length;
+    var text = jsString(v.value());
+    if (text === null) return null;
+    return text.length;
   } catch (e) {
     return null;
   }
@@ -263,9 +291,8 @@ function attrTail(el, name) {
     if (!el) return null;
     var v = el.attributes.byName(name);
     if (!v) return null;
-    var val = v.value();
-    if (val === undefined || val === null) return null;
-    var text = String(val);
+    var text = jsString(v.value());
+    if (text === null) return null;
     if (!text.length) return '';
     return text.length > VALUE_TAIL_MAX ? text.slice(-VALUE_TAIL_MAX) : text;
   } catch (e) {

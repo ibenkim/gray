@@ -13,8 +13,15 @@ import {
   ensureBrowserNewTab,
   injectClickOpsFromEvidence,
   injectWaitOpsFromStepSemantics,
+  isCreateSheetIntent,
+  ensureCreateRenameFromEvidence,
+  hoistCreateSheetBeforeMisplacedWaits,
+  orderCreateSheetSequences,
+  polishedImpliesCreateSheet,
   preferAddressNavigation,
   recoverInferredActions,
+  renameNameFromPolishedTitleChange,
+  rewriteCreateSheetClicks,
   validateAndGroundScript
 } from './compile'
 
@@ -102,7 +109,7 @@ describe('preferAddressNavigation', () => {
           id: 'addr_1',
           kind: 'url',
           template: 'https://docs.google.com/spreadsheets/d/{sheet_id}/edit',
-          params: { sheet_id: 'SHEET123' },
+          params: [{ key: 'sheet_id', value: 'SHEET123' }],
           identityAccount: null,
           identityProvider: 'google',
           stability: 'medium',
@@ -565,6 +572,358 @@ describe('recoverInferredActions', () => {
     expect(ops.filter((o) => o.op === 'click_at')).toHaveLength(2)
     expect(ops.map((o) => o.op)).toEqual(['open_url', 'click_at', 'click_at', 'wait_for'])
     expect(warnings.some((w) => /Injected 2 click_at/i.test(w))).toBe(true)
+  })
+
+  it('isCreateSheetIntent matches spreadsheet create but not create columns', () => {
+    expect(isCreateSheetIntent('Create Data Collection spreadsheet')).toBe(true)
+    expect(isCreateSheetIntent('Create an Untitled spreadsheet')).toBe(true)
+    expect(isCreateSheetIntent('Opened an untitled spreadsheet.')).toBe(true)
+    expect(
+      isCreateSheetIntent(
+        'Open the Data Logs spreadsheet in Google Sheets, passing through the untitled spreadsheet view.'
+      )
+    ).toBe(false)
+    expect(isCreateSheetIntent('Inspect or select content in Data Collection')).toBe(false)
+    expect(isCreateSheetIntent('Create columns x, y, and time on the spreadsheet')).toBe(false)
+  })
+
+  it('ensureCreateRenameFromEvidence replaces Drive New click and infers rename from title change', () => {
+    const warnings: string[] = []
+    const seed = {
+      op: 'click_at' as const,
+      stepOrder: 2,
+      evidenceEventIds: ['tevt_new'],
+      confidence: 0.9,
+      timeoutMs: 5000,
+      label: 'Select creation option',
+      appName: 'Google Chrome',
+      appBundleId: null,
+      url: null,
+      urlVariableKey: null,
+      elementRole: null,
+      elementLabel: null,
+      elementPath: null,
+      chord: null,
+      variableKey: null,
+      literalText: null,
+      waitCondition: null,
+      waitValue: null,
+      prompt: null,
+      clickX: 62 as number | null,
+      clickY: 210 as number | null
+    }
+    const polishedCreate: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Clicked New',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:47.000Z',
+          sourceEventIds: ['tevt_new'],
+          appName: 'Google Chrome',
+          documentTitle: 'https://drive.google.com/drive/home',
+          clickX: 62,
+          clickY: 210
+        },
+        {
+          order: 2,
+          text: 'Opened Untitled',
+          category: 'navigation',
+          timestamp: '2026-07-29T04:28:48.000Z',
+          sourceEventIds: ['tevt_create'],
+          appName: 'Google Chrome',
+          documentTitle: 'Untitled',
+          screenAfter: {
+            documentTitle: 'Untitled',
+            urlHost: 'docs.google.com',
+            stateChangeKind: 'url_changed',
+            stateChangeDetail: 'URL → docs.google.com/spreadsheets/create'
+          }
+        },
+        {
+          order: 3,
+          text: 'Clicked title',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:49.000Z',
+          sourceEventIds: ['tevt_title'],
+          appName: 'Google Chrome',
+          documentTitle:
+            'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit',
+          clickX: 145,
+          clickY: 135
+        },
+        {
+          order: 4,
+          text: 'Opened Data Collection',
+          category: 'navigation',
+          timestamp: '2026-07-29T04:28:50.000Z',
+          sourceEventIds: ['tevt_named'],
+          appName: 'Google Chrome',
+          documentTitle: 'Data Collection - Google Sheets',
+          screenAfter: {
+            documentTitle: 'Data Collection - Google Sheets',
+            stateChangeKind: 'title_changed',
+            stateChangeDetail:
+              'Title: Untitled spreadsheet - Google Sheets → Data Collection - Google Sheets'
+          }
+        }
+      ]
+    }
+    expect(polishedImpliesCreateSheet(polishedCreate)).toBe(true)
+    expect(renameNameFromPolishedTitleChange(polishedCreate)).toBe('Data Collection')
+
+    const ops = ensureCreateRenameFromEvidence(
+      [
+        { ...seed, op: 'click_at', clickX: 62, clickY: 210 },
+        {
+          ...seed,
+          stepOrder: 3,
+          op: 'wait_for',
+          waitCondition: 'window_title_contains',
+          waitValue: 'Untitled spreadsheet',
+          clickX: null,
+          clickY: null,
+          evidenceEventIds: ['tevt_create']
+        },
+        {
+          ...seed,
+          stepOrder: 3,
+          op: 'click_at',
+          clickX: 145,
+          clickY: 135,
+          evidenceEventIds: ['tevt_title']
+        },
+        {
+          ...seed,
+          stepOrder: 4,
+          op: 'open_url',
+          url: null,
+          urlVariableKey: 'file',
+          clickX: null,
+          clickY: null,
+          evidenceEventIds: ['tevt_named']
+        }
+      ],
+      {
+        ...workflow,
+        variables: [
+          {
+            key: 'file',
+            kind: 'document',
+            label: 'sheet',
+            exampleSanitized:
+              'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit'
+          }
+        ]
+      },
+      polishedCreate,
+      warnings
+    )
+
+    expect(ops.some((o) => o.op === 'open_url' && /spreadsheets\/create/i.test(o.url ?? ''))).toBe(
+      true
+    )
+    expect(ops.some((o) => o.op === 'type_text' && o.literalText === 'Data Collection')).toBe(true)
+    expect(ops.some((o) => o.op === 'open_url' && o.urlVariableKey === 'file')).toBe(false)
+    expect(ops.findIndex((o) => o.op === 'open_url' && /create/i.test(o.url ?? ''))).toBeLessThan(
+      ops.findIndex((o) => o.op === 'wait_for' && /untitled/i.test(o.waitValue ?? ''))
+    )
+  })
+
+  it('hoistCreateSheetBeforeMisplacedWaits moves Untitled wait before create URL', () => {
+    const warnings: string[] = []
+    const seed = {
+      op: 'click_at' as const,
+      stepOrder: 1,
+      evidenceEventIds: ['tevt_a'],
+      confidence: 0.9,
+      timeoutMs: 5000,
+      label: 'x',
+      appName: 'Google Chrome',
+      appBundleId: null,
+      url: null,
+      urlVariableKey: null,
+      elementRole: null,
+      elementLabel: null,
+      elementPath: null,
+      chord: null,
+      variableKey: null,
+      literalText: null,
+      waitCondition: null,
+      waitValue: null,
+      prompt: null,
+      clickX: null as number | null,
+      clickY: null as number | null
+    }
+    const ops = hoistCreateSheetBeforeMisplacedWaits(
+      [
+        {
+          ...seed,
+          op: 'wait_for',
+          waitCondition: 'window_title_contains',
+          waitValue: 'Untitled spreadsheet'
+        },
+        {
+          ...seed,
+          stepOrder: 2,
+          op: 'open_url',
+          url: 'https://docs.google.com/spreadsheets/create'
+        },
+        { ...seed, stepOrder: 2, op: 'click_at', clickX: 10, clickY: 20 }
+      ],
+      warnings
+    )
+    expect(ops[0]?.op).toBe('open_url')
+    expect(ops[1]?.op).toBe('wait_for')
+    expect(ops[2]?.op).toBe('click_at')
+  })
+
+  it('orderCreateSheetSequences puts create URL before Untitled wait and rename clicks', () => {
+    const warnings: string[] = []
+    const seed = {
+      op: 'click_at' as const,
+      stepOrder: 2,
+      evidenceEventIds: ['tevt_a'],
+      confidence: 0.9,
+      timeoutMs: 5000,
+      label: 'x',
+      appName: 'Google Chrome',
+      appBundleId: null,
+      url: null,
+      urlVariableKey: null,
+      elementRole: null,
+      elementLabel: null,
+      elementPath: null,
+      chord: null,
+      variableKey: null,
+      literalText: null,
+      waitCondition: null,
+      waitValue: null,
+      prompt: null,
+      clickX: 10,
+      clickY: 20
+    }
+    const ops = orderCreateSheetSequences(
+      [
+        {
+          ...seed,
+          op: 'wait_for',
+          waitCondition: 'window_title_contains',
+          waitValue: 'Untitled spreadsheet',
+          clickX: null,
+          clickY: null
+        },
+        { ...seed, op: 'click_at', clickX: 168, clickY: 132 },
+        {
+          ...seed,
+          op: 'open_url',
+          url: 'https://docs.google.com/spreadsheets/create',
+          clickX: null,
+          clickY: null
+        },
+        {
+          ...seed,
+          op: 'wait_for',
+          waitCondition: 'window_title_contains',
+          waitValue: 'Data Logs - Google Sheets',
+          clickX: null,
+          clickY: null
+        }
+      ],
+      warnings
+    )
+    expect(ops.map((o) => o.op)).toEqual(['open_url', 'wait_for', 'click_at', 'wait_for'])
+    expect(ops[0]?.url).toContain('spreadsheets/create')
+    expect(ops[1]?.waitValue).toMatch(/untitled/i)
+  })
+
+  it('rewriteCreateSheetClicks turns Drive New-menu click_at into create URL', () => {
+    const warnings: string[] = []
+    const ops = rewriteCreateSheetClicks(
+      [
+        {
+          op: 'click_at',
+          stepOrder: 3,
+          evidenceEventIds: ['tevt_new'],
+          confidence: 0.9,
+          timeoutMs: 5000,
+          label: 'Create Data Collection spreadsheet.',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: null,
+          waitValue: null,
+          prompt: null,
+          clickX: 140,
+          clickY: 372
+        },
+        {
+          op: 'wait_for',
+          stepOrder: 3,
+          evidenceEventIds: ['tevt_new'],
+          confidence: 0.9,
+          timeoutMs: 20000,
+          label: 'Create Data Collection spreadsheet.',
+          appName: 'Google Chrome',
+          appBundleId: null,
+          url: null,
+          urlVariableKey: null,
+          elementRole: null,
+          elementLabel: null,
+          elementPath: null,
+          chord: null,
+          variableKey: null,
+          literalText: null,
+          waitCondition: 'window_title_contains',
+          waitValue: 'Untitled',
+          prompt: null,
+          clickX: null,
+          clickY: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          workflow.steps[0]!,
+          {
+            order: 3,
+            action: 'Create Data Collection spreadsheet.',
+            category: 'navigation',
+            appName: 'Google Chrome',
+            evidenceEventIds: ['tevt_new'],
+            confidence: 0.9
+          }
+        ]
+      },
+      {
+        ...polished,
+        actions: [
+          ...polished.actions,
+          {
+            order: 10,
+            text: 'Opened window Untitled spreadsheet - Google Sheets in Google Chrome',
+            category: 'navigation',
+            timestamp: '2026-07-29T04:28:50.000Z',
+            sourceEventIds: ['tevt_new'],
+            appName: 'Google Chrome',
+            documentTitle: 'Untitled spreadsheet - Google Sheets'
+          }
+        ]
+      },
+      warnings
+    )
+    expect(ops[0]?.op).toBe('open_url')
+    expect(ops[0]?.url).toBe('https://docs.google.com/spreadsheets/create')
+    expect(ops[1]?.op).toBe('wait_for')
+    expect(warnings.some((w) => /Rewrote create-sheet click_at/i.test(w))).toBe(true)
   })
 
   it('applyEditorIntentToOps forces “Rename the document to X” over Untitled literal', () => {

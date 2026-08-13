@@ -298,6 +298,23 @@ describe('JxaAccessibilityProvider click capture', () => {
     expect(click!.target?.accessibleLabel).toBe('Send')
   })
 
+  it('drops JXA bridge garbage roles so clicks fall back to coords tier', () => {
+    const { provider, events } = harness()
+    provider.handleClick({
+      button: 'left',
+      count: 1,
+      x: 100,
+      y: 200,
+      app: 'Google Chrome',
+      role: '[object Ref]',
+      label: undefined
+    })
+    const click = events.find((e) => e.type === 'click')
+    expect(click?.data?.elementRole).toBeUndefined()
+    expect(click?.data?.targetTier).toBe('coords')
+    expect(click?.target?.tier).toBe('coords')
+  })
+
   it('clamps an implausible click count', () => {
     const { provider, events } = harness()
     provider.handleClick({ button: 'right', count: 99, label: 'Row' })

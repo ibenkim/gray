@@ -65,7 +65,10 @@ Return an ExtractedWorkflow with steps that MUST each have:
   id, intent (Locate|Read|Transform|Fill|Create|Decide|Verify|Commit|Wait), summary, action, category,
   evidenceEventIds, confidence, needsClarification, alternatives when ambiguous.
 FORBIDDEN intent values: navigate, click, open, type, paste, activate, select, submit, shortcut.
-Merge noisy clicks into intent-level steps. Title = user outcome. Echo vars. addresses may be null here.
+Prefer MORE steps over fewer (up to ~24): separate Locate (open app/site by URL), Create, Rename/Fill, and Verify.
+Do NOT collapse create + rename + cell edits into one step — sequences of clicks/typing need their own steps.
+Only merge duplicate jitter on the same control. Title = user outcome. Echo vars. addresses may be null here.
+When the app is a browser, bind steps to addrs[] / URL hosts from evidence (d/urlHost), not only window titles.
 Leave requires/position/effect null if unsure — the extract pass fills them.
 Never invent evidence ids. Cite acts[].ids only.`
 
@@ -80,6 +83,8 @@ For every step fill when evidenced:
   position, effect[], params, idempotencyKey, onFail, authorization,
   plus objective/actionType/target/input/preconditions/expectedChange/completionCheck/dependsOnSteps/retryHint.
 Echo addresses from addrs[]. Set commits/writes/inputs/authorizationScope when clear.
+Browser steps: set requires.ref to the matching addrs[].id (Drive/Sheets/Docs URL) whenever evidence shows that host/path.
+Keep create, rename, and cell-entry as separate steps with their own evidenceEventIds.
 branches[] only with source narration|cross_run|user; otherwise omit (questions come next).
 Preserve classified intent/summary/ids/evidence. Never invent UI or evidence.
 FORBIDDEN as intent: navigate/click/open (resolvers only).`

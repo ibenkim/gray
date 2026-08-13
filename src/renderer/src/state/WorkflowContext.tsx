@@ -211,6 +211,8 @@ type WorkflowContextValue = {
   stopRunning: () => void
   finishSummary: () => void
   runRemaining: () => void
+  /** Full re-run from the summary (automation or mock). */
+  runAgain: () => void
 }
 
 const WorkflowContext = createContext<WorkflowContextValue | null>(null)
@@ -970,11 +972,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     narrationSessionRef.current = null
     if (recorder && recorder.state !== 'inactive') {
       await new Promise<void>((resolve) => {
-        recorder.addEventListener('stop', () => resolve(), { once: true })
+        const done = () => resolve()
+        const timer = setTimeout(done, 1500)
+        recorder.addEventListener(
+          'stop',
+          () => {
+            clearTimeout(timer)
+            done()
+          },
+          { once: true }
+        )
         try {
           recorder.stop()
         } catch {
-          resolve()
+          clearTimeout(timer)
+          done()
         }
       })
     }
@@ -1142,6 +1154,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [resetRecording, stopNarrationCapture])
 
   const finishRecording = useCallback(async () => {
+    if (stateRef.current === 'organizing') return
     setWatchExpanded(false)
     setState('organizing')
     setOrganizeError(null)
@@ -1152,13 +1165,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     )
     if (!result?.ok || !result.workflow) {
       const sid = result?.sessionId ?? sessionId ?? null
+      const errMsg =
+        (result as { discarded?: boolean } | undefined)?.discarded
+          ? 'Recording was discarded before it could be organized.'
+          : result?.error ??
+            'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
+      // Reset ledger/timer but keep organizeError + retry session id (resetRecording clears both).
+      setElapsed(0)
+      setRecordPaused(false)
+      setWatchLog([])
+      setWatchExpanded(false)
+      telemetrySessionRef.current = null
+      void stopNarrationCapture()
       if (sid) setLastTelemetrySessionId(sid)
-      setOrganizeError(
-        result?.error ??
-          'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
-      )
+      setOrganizeError(errMsg)
       setState('idle')
-      resetRecording()
       return
     }
     setLastTelemetrySessionId(null)
@@ -1336,13 +1357,28 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setState('idle')
   }, [])
 
-  const runRemaining = useCallback(() => {
+  const runAgain = useCallback(() => {
+    runInFlightRef.current = false
     runPersistedRef.current = false
     if (activeRunRef.current) activeRunRef.current.stopReason = undefined
-    setRunPaused(false)
-    setRunCollapsed(false)
-    setState('running')
-  }, [])
+    automationRunRef.current = false
+    void window.ghostBridge?.automationRunStop?.()
+    runWorkflow()
+  }, [runWorkflow, workflow.id, workflow.sessionId])
+
+  const runRemaining = useCallback(() => {
+    // Mock (no session): resume pending steps in the in-memory timer engine.
+    if (!workflow.sessionId) {
+      runPersistedRef.current = false
+      if (activeRunRef.current) activeRunRef.current.stopReason = undefined
+      setRunPaused(false)
+      setRunCollapsed(false)
+      setState('running')
+      return
+    }
+    // Automation runner is torn down on stop/finish — restart a full run.
+    runAgain()
+  }, [runAgain, workflow.sessionId])
 
   // ── Commands from the workspace window / global hotkey ──
   useEffect(() => {
@@ -1478,7 +1514,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     toggleRunPause,
     stopRunning,
     finishSummary,
-    runRemaining
+    runRemaining,
+    runAgain
   }
 
   return <WorkflowContext.Provider value={value}>{children}</WorkflowContext.Provider>

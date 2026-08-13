@@ -297,6 +297,18 @@ export class AutomationRunner {
   }
 
   private async afterSuccess(op: AutomationOp): Promise<void> {
+    // Let UI settle between sequenced clicks / navigations / typing.
+    if (
+      op.op === 'click_at' ||
+      op.op === 'activate_element' ||
+      op.op === 'keystroke' ||
+      op.op === 'type_text'
+    ) {
+      await sleep(280)
+    } else if (op.op === 'open_url' || op.op === 'open_app') {
+      await sleep(500)
+    }
+
     if (op.op !== 'type_text') return
     const wantsReadback =
       /\bfill\b/i.test(op.label ?? '') ||
@@ -400,6 +412,11 @@ export class AutomationRunner {
           return { ok: false, error: 'missing_point' }
         }
         if (!this.actuator.clickAt) return { ok: false, error: 'click_unsupported' }
+        // Ensure the recorded app is frontmost so coords land in the right window.
+        if (op.appName) {
+          const act = await this.actuator.activateApp(op.appName, op.appBundleId)
+          if (act.ok) await sleep(120)
+        }
         return this.actuator.clickAt(op.clickX, op.clickY)
       }
       case 'keystroke':
@@ -711,6 +728,8 @@ export function toFailureCode(error?: string): RunFailureCode {
     case 'timeout':
       return 'timeout'
     case 'missing_url':
+      // Unresolvable URL/variable — retrying will not help.
+      return 'precondition_unmet'
     case 'navigation_failed':
       return 'navigation_failed'
     case 'out_of_scope':

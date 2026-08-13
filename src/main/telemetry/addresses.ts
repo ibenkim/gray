@@ -78,16 +78,32 @@ export function extractAddresses(
 
   for (let i = 0; i < events.length; i++) {
     const e = events[i]!
-    if (e.type === 'navigation' || e.type === 'app_switch') {
-      const host = e.data?.urlHost
-      const path = e.data?.urlPath
+    if (
+      e.type === 'navigation' ||
+      e.type === 'app_switch' ||
+      e.type === 'click' ||
+      e.type === 'screen_changed'
+    ) {
+      let host = e.data?.urlHost
+      let path = e.data?.urlPath
+      let query = e.data?.urlQuery
+      // Chrome often puts the page URL in AXDocument / documentTitle with no urlHost.
+      const titleAsUrl = e.data?.documentTitle || e.data?.windowTitle
+      if (!host && titleAsUrl && /^https?:\/\//i.test(titleAsUrl)) {
+        const sanitized = sanitizeUrl(titleAsUrl)
+        if (!sanitized.rejected && sanitized.urlHost) {
+          host = sanitized.urlHost
+          path = sanitized.urlPath
+          query = sanitized.urlQuery
+        }
+      }
       // Host/path were already sanitized at capture — do not re-reject stable record ids.
       if (host) {
         candidates.push({
           kind: 'url',
           host,
           path,
-          query: e.data?.urlQuery,
+          query,
           eventId: e.eventId,
           appName: e.data?.appName,
           documentTitle: e.data?.documentTitle ?? e.data?.windowTitle,
@@ -218,7 +234,7 @@ function buildUrlAddress(c: RawCandidate, index: number): Address | null {
     id,
     kind: 'url',
     template,
-    params: Object.keys(params).length ? params : null,
+    params: paramsToEntries(params),
     identityAccount: null,
     identityProvider: identityProviderForHost(c.host),
     stability,
@@ -251,7 +267,7 @@ function buildFileAddress(c: RawCandidate, index: number): Address | null {
     id: `addr_${index + 1}`,
     kind: 'file',
     template: truncated,
-    params: Object.keys(params).length ? params : null,
+    params: paramsToEntries(params),
     identityAccount: null,
     identityProvider: null,
     stability: needsReview ? 'low' : 'medium',
@@ -261,6 +277,25 @@ function buildFileAddress(c: RawCandidate, index: number): Address | null {
     policy: 'assist',
     needsReview: needsReview || null
   }
+}
+
+function paramsToEntries(
+  params: Record<string, string>
+): Array<{ key: string; value: string }> | null {
+  const entries = Object.entries(params).map(([key, value]) => ({ key, value }))
+  return entries.length ? entries : null
+}
+
+export function paramsToRecord(
+  params: Array<{ key: string; value: string }> | Record<string, string> | null | undefined
+): Record<string, string> | null {
+  if (!params) return null
+  if (Array.isArray(params)) {
+    const out: Record<string, string> = {}
+    for (const e of params) out[e.key] = e.value
+    return Object.keys(out).length ? out : null
+  }
+  return Object.keys(params).length ? params : null
 }
 
 export function parameterizePath(
@@ -457,8 +492,13 @@ function identityProviderForHost(host: string): string | null {
 /** Fill `{param}` slots in an address template for compile/runtime. */
 export function resolveAddressTemplate(
   template: string,
-  params: Record<string, string> | null | undefined
+  params:
+    | Array<{ key: string; value: string }>
+    | Record<string, string>
+    | null
+    | undefined
 ): string {
-  if (!params) return template
-  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => params[key] ?? `{${key}}`)
+  const map = paramsToRecord(params)
+  if (!map) return template
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => map[key] ?? `{${key}}`)
 }

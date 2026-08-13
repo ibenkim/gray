@@ -310,7 +310,9 @@ export function registerTelemetryIpc(): void {
       const meta = await store.getSessionMeta(id)
       if (meta) {
         const auth = requireSessionOwner(meta.ownerEmail)
-        if (!auth.ok) return { ok: false, error: auth.error }
+        if (!auth.ok) {
+          return { ok: false, error: auth.error }
+        }
       }
 
       try {
@@ -369,7 +371,7 @@ export function registerTelemetryIpc(): void {
         }
 
         return safeProcessResult(result)
-      } catch {
+      } catch (err) {
         recorder.setProcessing(false)
         if (id) {
           try {

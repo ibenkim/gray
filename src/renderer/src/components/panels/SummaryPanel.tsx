@@ -18,6 +18,7 @@ export default function SummaryPanel() {
     summaryMeta,
     finishSummary,
     runRemaining,
+    runAgain,
     lastRunId
   } = useWorkflow()
   const isStopped = summaryOutcome === 'stopped'
@@ -134,6 +135,9 @@ export default function SummaryPanel() {
               Run remaining
             </button>
           )}
+          <button className="btn btn-outline" onClick={runAgain}>
+            Run again
+          </button>
           <button className="btn btn-outline btn-done" onClick={finishSummary}>
             Done
           </button>

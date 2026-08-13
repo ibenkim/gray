@@ -64,7 +64,7 @@ describe('extractAddresses', () => {
     expect(addrs).toHaveLength(1)
     expect(addrs[0]!.kind).toBe('url')
     expect(addrs[0]!.template).toContain('/spreadsheets/d/{sheet_id}/edit')
-    expect(addrs[0]!.params?.sheet_id).toBeTruthy()
+    expect(addrs[0]!.params?.find((p) => p.key === 'sheet_id')?.value).toBeTruthy()
     expect(addrs[0]!.policy).toBe('auto')
     expect(addrs[0]!.verify.urlMatches).toContain('docs.google.com')
     expect(addrs[0]!.verify.elementPresent?.text).toBe('Invoices')
@@ -131,6 +131,24 @@ describe('extractAddresses', () => {
       expect(a.verify).toBeTruthy()
       expect(a.verify.urlMatches != null || a.verify.elementPresent != null).toBe(true)
     }
+  })
+
+  it('extracts urlHost from documentTitle when urlHost is missing', () => {
+    const events = [
+      evt({
+        type: 'click',
+        eventId: 'e1',
+        sequence: 1,
+        data: {
+          appName: 'Google Chrome',
+          documentTitle: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit'
+        }
+      })
+    ]
+    const addrs = extractAddresses(events, emptyPolished)
+    expect(addrs).toHaveLength(1)
+    expect(addrs[0]!.template).toContain('docs.google.com')
+    expect(addrs[0]!.template).toContain('{sheet_id}')
   })
 
   it('dedupes identical templates', () => {

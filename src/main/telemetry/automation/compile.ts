@@ -258,11 +258,24 @@ export function validateAndGroundScript(
   const withAddresses = preferAddressNavigation(withInferred, workflow, warnings)
   const withIntent = applyEditorIntentToOps(withAddresses, workflow, polished, warnings)
   const withInjected = injectClickOpsFromEvidence(withIntent, workflow, polished, warnings)
-  const withWaits = injectWaitOpsFromStepSemantics(withInjected, workflow, polished, warnings)
+  // After click injection — Drive "New → Sheets" coords are flaky; prefer create URL.
+  const withCreateSheet = rewriteCreateSheetClicks(withInjected, workflow, polished, warnings)
+  // Capture often misses the Sheets menu click and typed rename — recover from polished evidence.
+  const withEvidence = ensureCreateRenameFromEvidence(
+    withCreateSheet,
+    workflow,
+    polished,
+    warnings
+  )
+  const withWaits = injectWaitOpsFromStepSemantics(withEvidence, workflow, polished, warnings)
   const withNav = collapseRedundantBrowserNav(withWaits, warnings)
+  // Re-order again after wait injection / nav collapse so Untitled waits never precede create.
+  const ordered = orderCreateSheetSequences(withNav, warnings)
+  const finalOps = hoistCreateSheetBeforeMisplacedWaits(ordered, warnings)
+
 
   return AutomationScriptSchema.parse({
-    ops: withNav,
+    ops: finalOps,
     warnings: warnings.slice(0, 20)
   })
 }
@@ -361,24 +374,45 @@ export function injectWaitOpsFromStepSemantics(
   return out
 }
 
+function isPlausibleWaitValue(value: string): boolean {
+  const t = value.trim()
+  if (t.length < 2 || t.length > 80) return false
+  // Reject completionCheck prose leaked as the wait value.
+  if (/\.\s+\S/.test(t)) return false
+  if (/^(is|are|becomes|will|should|the|an|a)\b/i.test(t)) return false
+  return true
+}
+
 function inferWaitFromText(
   text: string,
   appName: string | null
 ): { condition: 'app_frontmost' | 'window_title_contains' | 'element_exists'; value: string; label: string } | null {
   if (!text.trim()) return null
-  const windowMatch = text.match(/window(?: title)?(?:\s+contains)?\s+[“"']?([^”"']+)[”"']?/i)
-  if (windowMatch?.[1]) {
+  const quotedWindow = text.match(
+    /window(?: title)?(?:\s+contains)?\s+[“"']([^”"']+)[”"']/i
+  )
+  if (quotedWindow?.[1] && isPlausibleWaitValue(quotedWindow[1])) {
     return {
       condition: 'window_title_contains',
-      value: windowMatch[1].slice(0, 200),
-      label: `Wait for window ${windowMatch[1].slice(0, 40)}`
+      value: quotedWindow[1].slice(0, 80),
+      label: `Wait for window ${quotedWindow[1].slice(0, 40)}`
     }
   }
-  const elementMatch = text.match(/(?:element|field|button|control)\s+[“"']?([^”"']+)[”"']?/i)
-  if (elementMatch?.[1]) {
+  const titledDoc = text.match(
+    /\b((?:Untitled(?:\s+spreadsheet|\s+document)?)|[\w][\w\s-]{1,40})\s*[-—|]\s*Google (?:Sheets|Docs|Drive)\b/i
+  )
+  if (titledDoc?.[0] && isPlausibleWaitValue(titledDoc[0])) {
+    return {
+      condition: 'window_title_contains',
+      value: titledDoc[0].slice(0, 80),
+      label: `Wait for ${titledDoc[0].slice(0, 40)}`
+    }
+  }
+  const elementMatch = text.match(/(?:element|field|button|control)\s+[“"']([^”"']+)[”"']/i)
+  if (elementMatch?.[1] && isPlausibleWaitValue(elementMatch[1])) {
     return {
       condition: 'element_exists',
-      value: elementMatch[1].slice(0, 200),
+      value: elementMatch[1].slice(0, 80),
       label: `Wait for ${elementMatch[1].slice(0, 40)}`
     }
   }
@@ -418,6 +452,352 @@ function quotedName(text: string): string | null {
   return name
 }
 
+/** True when the step means "create a new Google Sheet", not "create columns…". */
+export function isCreateSheetIntent(blob: string): boolean {
+  if (/\bcreate\s+columns?\b/i.test(blob)) return false
+  // Opening a named sheet (even if UI passed through Untitled) is not "create".
+  if (/\bopen(?:ed|ing)?\b/i.test(blob) && /\bspreadsheet\b/i.test(blob) && !/\buntitled\b/i.test(blob)) {
+    return false
+  }
+  if (/\b(inspect|select|edit|enter|type|fill|rename|renamed)\b/i.test(blob) && !/\b(create|new)\b/i.test(blob)) {
+    return false
+  }
+  if (/\b(create|new)\s+(a\s+)?(new\s+)?(google\s*)?(spreadsheet|sheets?)\b/i.test(blob)) {
+    return true
+  }
+  if (/\b(create|new)\b/i.test(blob) && /\bgoogle\s*sheets?\b/i.test(blob)) return true
+  if (/\bcreate\b/i.test(blob) && /\bspreadsheet\b/i.test(blob) && !/\bcolumns?\b/i.test(blob)) {
+    return true
+  }
+  // Exact create phrasing from polish/model — not "open Data Logs … untitled view".
+  if (/\bopen(?:ed)?\s+(an?\s+)?untitled\s+spreadsheet\b/i.test(blob)) return true
+  if (/\b(create|new)\b/i.test(blob) && /untitled\s+spreadsheet/i.test(blob)) return true
+  return false
+}
+
+const CREATE_SHEET_URL = 'https://docs.google.com/spreadsheets/create'
+
+function isCreateSheetUrl(url: string | null | undefined): boolean {
+  return !!url && /docs\.google\.com\/spreadsheets\/create/i.test(url)
+}
+
+/** Capture saw navigation through docs.google.com/spreadsheets/create. */
+export function polishedImpliesCreateSheet(polished: PolishedSession): boolean {
+  for (const a of polished.actions) {
+    const detail = a.screenAfter?.stateChangeDetail ?? ''
+    if (/spreadsheets\/create/i.test(detail)) return true
+    if (/spreadsheets\/create/i.test(a.documentTitle ?? '')) return true
+  }
+  return false
+}
+
+/**
+ * Infer rename target from polished title transitions
+ * (Untitled spreadsheet → Data Collection - Google Sheets).
+ */
+export function renameNameFromPolishedTitleChange(polished: PolishedSession): string | null {
+  for (const a of polished.actions) {
+    const detail = a.screenAfter?.stateChangeDetail ?? ''
+    const m = detail.match(
+      /Title:\s*Untitled(?:\s+spreadsheet)?(?:\s*[-—|]\s*Google Sheets)?\s*→\s*(.+?)(?:\s*[-—|]\s*Google Sheets)?\s*$/i
+    )
+    if (m?.[1]) {
+      const name = m[1].trim()
+      if (name.length >= 2 && name.length <= 120 && !/^untitled/i.test(name)) return name
+    }
+  }
+  let sawUntitled = false
+  for (const a of polished.actions) {
+    const t = (a.documentTitle ?? '').trim()
+    if (/^untitled(\s+spreadsheet)?(\s*[-—|].*)?$/i.test(t)) {
+      sawUntitled = true
+      continue
+    }
+    if (!sawUntitled) continue
+    const named = t.match(/^(.+?)\s*[-—|]\s*Google Sheets$/i)
+    if (named?.[1] && !/^untitled/i.test(named[1])) return named[1].trim()
+  }
+  return null
+}
+
+function isDriveDocumentTitle(title: string | null | undefined): boolean {
+  return !!title && (/drive\.google\.com/i.test(title) || /google drive/i.test(title))
+}
+
+/**
+ * When Drive New → Sheets menu clicks are missing from capture, still emit create URL.
+ * When typed rename is missing but the title changed, emit click + type + Enter.
+ * Drop open_url to the captured sheet id / unresolved file variable during create flows.
+ */
+export function ensureCreateRenameFromEvidence(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  let out = [...ops]
+  const addrImpliesCreate = (workflow.addresses ?? []).some((a) =>
+    /spreadsheets\/create/i.test(a.template)
+  )
+  const impliesCreate = polishedImpliesCreateSheet(polished) || addrImpliesCreate
+  const hasCreate = out.some((o) => o.op === 'open_url' && isCreateSheetUrl(o.url))
+
+  if (impliesCreate && !hasCreate) {
+    const untitledWaitIdx = out.findIndex(
+      (o) => o.op === 'wait_for' && /untitled/i.test(o.waitValue ?? '')
+    )
+    const driveClickIdx = out.findIndex((o) => {
+      if (o.op !== 'click_at' || o.clickX == null) return false
+      return polished.actions.some(
+        (a) =>
+          a.sourceEventIds.some((id) => o.evidenceEventIds.includes(id)) &&
+          isDriveDocumentTitle(a.documentTitle)
+      )
+    })
+    const seedIdx = driveClickIdx >= 0 ? driveClickIdx : untitledWaitIdx
+    if (seedIdx >= 0) {
+      const seed = out[seedIdx]!
+      const createOp = baseFromOp(seed, {
+        op: 'open_url',
+        url: CREATE_SHEET_URL,
+        label: 'Create a new Google Sheet',
+        clickX: null,
+        clickY: null,
+        urlVariableKey: null,
+        waitCondition: null,
+        waitValue: null,
+        confidence: Math.min(seed.confidence, 0.85),
+        timeoutMs: Math.max(seed.timeoutMs, 15_000)
+      })
+      if (driveClickIdx >= 0) {
+        out[driveClickIdx] = createOp
+        warnings.push(
+          'Replaced Drive New-menu click_at with spreadsheets/create (menu follow-up often uncaptured)'
+        )
+      } else {
+        out.splice(untitledWaitIdx, 0, createOp)
+        warnings.push('Inserted spreadsheets/create before Untitled wait from capture evidence')
+      }
+    }
+  }
+
+  const hasCreateNow = out.some((o) => o.op === 'open_url' && isCreateSheetUrl(o.url))
+  if (hasCreateNow) {
+    out = out.filter((o) => {
+      if (o.op !== 'open_url') return true
+      if (isCreateSheetUrl(o.url)) return true
+      if (o.url && /spreadsheets\/d\//i.test(o.url)) {
+        warnings.push(`Dropped open_url to existing sheet id at step ${o.stepOrder} (create flow)`)
+        return false
+      }
+      if (!o.url && o.urlVariableKey) {
+        warnings.push(
+          `Dropped unresolved open_url variable “${o.urlVariableKey}” at step ${o.stepOrder} (create flow)`
+        )
+        return false
+      }
+      return true
+    })
+  } else {
+    out = out.map((o) => {
+      if (o.op !== 'open_url' || o.url || !o.urlVariableKey) return o
+      const v = workflow.variables?.find((x) => x.key === o.urlVariableKey)
+      const ex = v?.exampleSanitized
+      if (ex && /^https?:\/\//i.test(ex)) {
+        warnings.push(`Resolved open_url from variable “${o.urlVariableKey}”`)
+        return { ...o, url: ex, urlVariableKey: null }
+      }
+      warnings.push(`Downgraded open_url missing url for variable “${o.urlVariableKey}”`)
+      return toManual(o, `Missing URL for variable ${o.urlVariableKey}`)
+    })
+  }
+
+  const renameName = renameNameFromPolishedTitleChange(polished)
+  const alreadyTypesRename =
+    !!renameName &&
+    out.some(
+      (o) =>
+        o.op === 'type_text' &&
+        (o.literalText ?? '').trim().toLowerCase() === renameName.toLowerCase()
+    )
+  if (renameName && !alreadyTypesRename) {
+    const untitledWaitIdx = out.findIndex(
+      (o) => o.op === 'wait_for' && /untitled/i.test(o.waitValue ?? '')
+    )
+    const titleClick = polished.actions.find(
+      (a) =>
+        a.clickX != null &&
+        a.clickY != null &&
+        a.clickY < 160 &&
+        /docs\.google\.com|spreadsheet/i.test(a.documentTitle ?? '')
+    )
+    const seed =
+      (untitledWaitIdx >= 0 ? out[untitledWaitIdx] : null) ??
+      out.find((o) => o.op === 'click_at' && o.clickY != null && o.clickY < 160) ??
+      out.find((o) => o.op === 'open_url' && isCreateSheetUrl(o.url)) ??
+      out[0]
+    if (seed) {
+      if (titleClick) {
+        const dropIdx = out.findIndex(
+          (o) =>
+            o.op === 'click_at' &&
+            o.clickX === titleClick.clickX &&
+            o.clickY === titleClick.clickY
+        )
+        if (dropIdx >= 0) out.splice(dropIdx, 1)
+      }
+      const renameOps = renameOpsFor(seed, renameName, polished, warnings)
+      const insertAt = untitledWaitIdx >= 0 ? untitledWaitIdx + 1 : out.length
+      out.splice(Math.min(insertAt, out.length), 0, ...renameOps)
+      warnings.push(`Inferred rename “${renameName}” from polished title change`)
+    }
+  }
+
+  return orderCreateSheetSequences(out, warnings)
+}
+
+/**
+ * Replace the first create-sheet click_at in a step with the stable create URL,
+ * then reorder that step so create → wait Untitled → rename/type → later waits.
+ */
+export function rewriteCreateSheetClicks(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  const stepByOrder = new Map(workflow.steps.map((s) => [s.order, s]))
+  const rewritten = new Set<number>()
+  const out: AutomationOp[] = []
+
+  for (const op of ops) {
+    const step = stepByOrder.get(op.stepOrder)
+    const stepBlob = [op.label, step?.action, step?.summary].filter(Boolean).join(' ')
+    const evidenceBlob = polished.actions
+      .filter((a) => a.sourceEventIds.some((id) => op.evidenceEventIds.includes(id)))
+      .map((a) => `${a.documentTitle ?? ''} ${a.text ?? ''}`)
+      .join(' ')
+    const wantsCreate =
+      isCreateSheetIntent(stepBlob) ||
+      (/\b(create|new)\b/i.test(stepBlob) && /untitled\s+spreadsheet/i.test(evidenceBlob))
+
+    const stepAlreadyCreates = ops.some(
+      (o) => o.stepOrder === op.stepOrder && o.op === 'open_url' && isCreateSheetUrl(o.url)
+    )
+
+    if (
+      op.op === 'click_at' &&
+      !rewritten.has(op.stepOrder) &&
+      !stepAlreadyCreates &&
+      wantsCreate
+    ) {
+      rewritten.add(op.stepOrder)
+      warnings.push(`Rewrote create-sheet click_at → open_url at step ${op.stepOrder}`)
+      out.push(
+        baseFromOp(op, {
+          op: 'open_url',
+          url: CREATE_SHEET_URL,
+          label: 'Create a new Google Sheet',
+          clickX: null,
+          clickY: null,
+          confidence: Math.min(op.confidence, 0.85),
+          timeoutMs: Math.max(op.timeoutMs, 15_000)
+        })
+      )
+      continue
+    }
+
+    out.push(op)
+  }
+
+  return orderCreateSheetSequences(out, warnings)
+}
+
+/**
+ * Cross-step: if Untitled wait_for (or rename clicks) appear before the create URL
+ * in the flat op list, move them immediately after create + its Untitled wait.
+ */
+export function hoistCreateSheetBeforeMisplacedWaits(
+  ops: AutomationOp[],
+  warnings: string[]
+): AutomationOp[] {
+  const createIdx = ops.findIndex((o) => o.op === 'open_url' && isCreateSheetUrl(o.url))
+  if (createIdx < 0) return ops
+
+  const before = ops.slice(0, createIdx)
+  const createOp = ops[createIdx]!
+  const after = ops.slice(createIdx + 1)
+
+  const misplaced = before.filter(
+    (o) =>
+      (o.op === 'wait_for' && /untitled/i.test(o.waitValue ?? '')) ||
+      (o.op === 'click_at' && o.stepOrder === createOp.stepOrder) ||
+      (o.op === 'type_text' && o.stepOrder === createOp.stepOrder)
+  )
+  if (misplaced.length === 0) return ops
+
+  const keptBefore = before.filter((o) => !misplaced.includes(o))
+  warnings.push('Hoisted create-sheet URL ahead of misplaced Untitled wait/rename ops')
+  return [...keptBefore, createOp, ...misplaced, ...after]
+}
+
+/**
+ * Ensure create-sheet steps run as: open_url create → wait Untitled → clicks/type → other waits.
+ * Fixes stalled runs where wait_for Untitled preceded the create URL.
+ */
+export function orderCreateSheetSequences(
+  ops: AutomationOp[],
+  warnings: string[]
+): AutomationOp[] {
+  const orders = [...new Set(ops.map((o) => o.stepOrder))].sort((a, b) => a - b)
+  const out: AutomationOp[] = []
+
+  for (const order of orders) {
+    const stepOps = ops.filter((o) => o.stepOrder === order)
+    const createIdx = stepOps.findIndex((o) => o.op === 'open_url' && isCreateSheetUrl(o.url))
+    if (createIdx < 0) {
+      out.push(...stepOps)
+      continue
+    }
+
+    const createOp = stepOps[createIdx]!
+    const rest = stepOps.filter((_, i) => i !== createIdx)
+    const prefix = rest.filter((o) => o.op === 'open_app')
+    const untitledWaits = rest.filter(
+      (o) =>
+        o.op === 'wait_for' &&
+        o.waitCondition === 'window_title_contains' &&
+        /untitled/i.test(o.waitValue ?? '')
+    )
+    const otherWaits = rest.filter(
+      (o) => o.op === 'wait_for' && !untitledWaits.includes(o)
+    )
+    const actions = rest.filter((o) => o.op !== 'open_app' && o.op !== 'wait_for')
+
+    let waitUntitled = untitledWaits[0]
+    if (!waitUntitled) {
+      waitUntitled = baseFromOp(createOp, {
+        op: 'wait_for',
+        url: null,
+        waitCondition: 'window_title_contains',
+        waitValue: 'Untitled spreadsheet',
+        label: 'Wait for new spreadsheet',
+        timeoutMs: 20_000,
+        confidence: Math.min(createOp.confidence, 0.8)
+      })
+      warnings.push(`Injected wait_for Untitled after create at step ${order}`)
+    }
+
+    const ordered = [...prefix, createOp, waitUntitled, ...actions, ...otherWaits]
+    if (createIdx > 0 || untitledWaits.length === 0 || rest.indexOf(untitledWaits[0]!) < createIdx) {
+      warnings.push(`Reordered create-sheet sequence at step ${order}`)
+    }
+    out.push(...ordered)
+  }
+
+  return out
+}
+
 /**
  * Intent-aware destination. Prefer create/rename/open-by-name over a bare site URL.
  */
@@ -426,15 +806,21 @@ export function inferUrlFromText(text: string): { url: string; label: string } |
   if (https?.[0]) {
     return { url: https[0].replace(/[.,);]+$/, ''), label: `Open ${https[0]}` }
   }
-  // Creating a Doc is not the Drive homepage.
+  // Creating a Doc/Sheet is not the Drive homepage.
   if (/\b(create|new)\b/i.test(text) && /\b(google\s*)?docs?\b/i.test(text)) {
     return {
       url: 'https://docs.google.com/document/create',
       label: 'Create a new Google Doc'
     }
   }
+  if (isCreateSheetIntent(text)) {
+    return {
+      url: 'https://docs.google.com/spreadsheets/create',
+      label: 'Create a new Google Sheet'
+    }
+  }
   // Rename / open-by-name need typing — not a homepage open_url.
-  if (/\brename\b/i.test(text) || quotedName(text)) {
+  if (/\brenam(?:e|ed|ing)\b/i.test(text) || quotedName(text)) {
     return null
   }
   for (const d of DESTINATION_URLS) {
@@ -467,15 +853,17 @@ function renameTargetFromText(text: string): string | null {
   const quoted = quotedName(text)
   if (quoted && !/^untitled$/i.test(quoted)) return quoted
   const patterns = [
-    /\brename(?:\s+the\s+(?:document|file|doc))?\s+to\s+(.+?)(?:\s+in\s+google|\s*[.!,:]|$)/i,
-    /\brename\s+to\s+(.+?)(?:\s+document\b|\s+in\s+google|\s*[.!,:]|$)/i
+    /\brenam(?:e|ed|ing)(?:\s+the\s+(?:document|file|doc|spreadsheet))?\s+to\s+(.+?)(?:\s+in\s+google|\s*[.!,:]|$)/i,
+    /\brenam(?:e|ed|ing)\s+to\s+(.+?)(?:\s+document\b|\s+spreadsheet\b|\s+in\s+google|\s*[.!,:]|$)/i
   ]
   for (const re of patterns) {
     const m = text.match(re)
-    const name = m?.[1]?.replace(/[“"]/g, '').trim()
+    let name = m?.[1]?.replace(/[“"]/g, '').trim()
     if (!name || name.length < 2 || name.length > 120) continue
     if (/^untitled$/i.test(name)) continue
-    return name.replace(/\s+document$/i, '').trim()
+    // "Data Outputs from Lab spreadsheet" → drop trailing type noun.
+    name = name.replace(/\s+(?:document|spreadsheet|sheet|file|doc)$/i, '').trim()
+    if (name.length >= 2) return name
   }
   return null
 }
@@ -531,7 +919,7 @@ export function applyEditorIntentToOps(
     const preserved = stepOps.filter((o) => o.op === 'wait_for' || o.op === 'open_app')
     const seed = stepOps[0]!
 
-    if (/\brename\b/i.test(step.action)) {
+    if (/\brenam(?:e|ed|ing)\b/i.test(step.action)) {
       const name = renameTargetFromText(step.action)
       if (name) {
         out.push(...renameOpsFor(seed, name, polished, warnings))
@@ -649,12 +1037,12 @@ function inferOpsFromStepText(
   polished: PolishedSession | null = null
 ): AutomationOp[] {
   // Rename must win over "… document" open-by-name heuristics.
-  if (/\brename\b/i.test(blob)) {
+  if (/\brenam(?:e|ed|ing)\b/i.test(blob)) {
     const name = renameTargetFromText(blob)
     if (name) return renameOpsFor(op, name, polished, warnings)
   }
 
-  if (/\b(create|new)\b/i.test(blob) && /\bsheets?\b/i.test(blob)) {
+  if (isCreateSheetIntent(blob)) {
     warnings.push(`Inferred create-sheet flow for step ${op.stepOrder}`)
     return [
       baseFromOp(op, {
@@ -706,7 +1094,7 @@ function inferOpsFromStepText(
     docName.length <= 120 &&
     !/ground|element|button|fake|manual/i.test(docName) &&
     /\b(open|select|ending on)\b/i.test(blob) &&
-    !/\brename\b/i.test(blob)
+    !/\brenam(?:e|ed|ing)\b/i.test(blob)
   ) {
     warnings.push(`Inferred type_text “${docName}” for document open at step ${op.stepOrder}`)
     return [
@@ -784,7 +1172,7 @@ export function recoverInferredActions(
 
     // Rename steps: never "open document named X" — click title (if known) + type + confirm.
     // Do not fall back to op.literalText (often the old Untitled title from capture).
-    if (/\brename\b/i.test(blob) && !renameStepsDone.has(op.stepOrder)) {
+    if (/\brenam(?:e|ed|ing)\b/i.test(blob) && !renameStepsDone.has(op.stepOrder)) {
       const name = renameTargetFromText(blob)
       if (name) {
         renameStepsDone.add(op.stepOrder)

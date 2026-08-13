@@ -278,7 +278,12 @@ export function sanitizeWindowTitle(title?: string | null): string | undefined {
 }
 
 export function sanitizeLabel(label?: string | null): string | undefined {
-  return truncate(label, MAX_LABEL)
+  if (label == null) return undefined
+  const trimmed = String(label).trim()
+  if (!trimmed) return undefined
+  // JXA/ObjC bridge failure — never persist as an AX role/label.
+  if (/^\[object \w+\]$/i.test(trimmed)) return undefined
+  return truncate(trimmed, MAX_LABEL)
 }
 
 /** Re-apply redaction to a normalized event (server-side second pass). */
