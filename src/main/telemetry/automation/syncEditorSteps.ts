@@ -32,6 +32,7 @@ export async function syncEditorStepsToStoredWorkflow(
     const title = edit.title.trim().slice(0, 400) || `Step ${i + 1}`
     const matched =
       prev.find((s) => s.order === edit.index) ?? prev[i] ?? prev[prev.length - 1] ?? null
+    const titleChanged = !!matched && title !== (matched.action ?? '')
     return withWorkflowStepDefaults({
       order: i + 1,
       action: title,
@@ -54,8 +55,9 @@ export async function syncEditorStepsToStoredWorkflow(
       completionCheck: matched?.completionCheck ?? null,
       dependsOnSteps: matched?.dependsOnSteps ?? null,
       retryHint: matched?.retryHint ?? null,
-      alternatives: matched?.alternatives ?? null,
-      needsClarification: matched?.needsClarification ?? null
+      alternatives: titleChanged ? null : (matched?.alternatives ?? null),
+      // User specified the step — stop asking / emitting ask_user for it.
+      needsClarification: titleChanged ? false : (matched?.needsClarification ?? null)
     })
   })
 
@@ -65,7 +67,8 @@ export async function syncEditorStepsToStoredWorkflow(
       (s, i) =>
         s.action !== prev[i]?.action ||
         s.order !== prev[i]?.order ||
-        s.evidenceEventIds.join() !== (prev[i]?.evidenceEventIds ?? []).join()
+        s.evidenceEventIds.join() !== (prev[i]?.evidenceEventIds ?? []).join() ||
+        s.needsClarification !== prev[i]?.needsClarification
     )
 
   const workflow: ExtractedWorkflow = { ...stored.workflow, steps }

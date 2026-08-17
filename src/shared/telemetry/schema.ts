@@ -15,6 +15,8 @@ export const TelemetryEventTypeSchema = z.enum([
   'selection_changed',
   'form_submitted',
   'keyboard_shortcut',
+  /** Bare special key (Enter/Esc/Tab/arrows) when no typing buffer absorbed it. */
+  'key_pressed',
   'error',
   'screen_changed',
   'state_change',
@@ -539,6 +541,12 @@ export const PolishedActionSchema = z
     clickCount: z.number().int().positive().max(10).optional(),
     clickX: z.number().int().optional(),
     clickY: z.number().int().optional(),
+    /** Window-relative click offset (top-left of owning window). */
+    clickWindowX: z.number().int().optional(),
+    clickWindowY: z.number().int().optional(),
+    /** Window size at record time — used to rescale the offset after resize. */
+    windowWidth: z.number().int().nonnegative().optional(),
+    windowHeight: z.number().int().nonnegative().optional(),
     /** How well the click/activation target was resolved. */
     targetResolution: TargetResolutionSchema.optional(),
     /** Semantic classification of typed/field values (never raw secrets). */
@@ -562,6 +570,9 @@ export const PolishedActionSchema = z
     listContext: ListContextSchema.optional(),
     clickModifiers: ClickModifiersSchema.optional(),
     elementNorm: ElementNormSchema.optional(),
+    /** Aggregated scroll for reveal actions. */
+    scrollAxis: z.enum(['vertical', 'horizontal']).optional(),
+    scrollDelta: z.number().optional(),
     narrationText: z.string().max(800).optional(),
     marker: NarrationMarkerSchema.optional(),
     userInitiated: z.boolean().optional()
@@ -1074,6 +1085,7 @@ export const AutomationOpKindSchema = z.enum([
   'open_url',
   'activate_element',
   'click_at',
+  'scroll',
   'keystroke',
   'type_text',
   'set_clipboard',
@@ -1124,7 +1136,29 @@ export const AutomationOpSchema = z
     prompt: z.string().max(300).nullable(),
     /** Absolute screen point for click_at (top-left origin). */
     clickX: z.number().int().nullable(),
-    clickY: z.number().int().nullable()
+    clickY: z.number().int().nullable(),
+    /** Window-relative click offset — preferred over absolute when available. */
+    clickWindowX: z.number().int().nullable().optional(),
+    clickWindowY: z.number().int().nullable().optional(),
+    /** Recorded window size for rescaling the offset after resize. */
+    windowWidth: z.number().int().nonnegative().nullable().optional(),
+    windowHeight: z.number().int().nonnegative().nullable().optional(),
+    clickButton: z.enum(['left', 'right', 'middle']).nullable().optional(),
+    clickCount: z.number().int().positive().max(10).nullable().optional(),
+    /** Modifier flags for click_at — all fields required-nullable for Structured Outputs. */
+    clickModifiers: z
+      .object({
+        cmd: z.boolean().nullable(),
+        opt: z.boolean().nullable(),
+        ctrl: z.boolean().nullable(),
+        shift: z.boolean().nullable()
+      })
+      .strict()
+      .nullable()
+      .optional(),
+    /** Scroll wheel: axis + signed delta (positive = down / right). */
+    scrollAxis: z.enum(['vertical', 'horizontal']).nullable().optional(),
+    scrollDelta: z.number().nullable().optional()
   })
   .strict()
 

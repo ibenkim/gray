@@ -16,6 +16,8 @@ export type ActuatorResult = {
   matchedRole?: string
   /** Optional field value from readback. */
   value?: string
+  /** Window frame from windowBounds query. */
+  bounds?: { x: number; y: number; width: number; height: number }
 }
 
 export type QueryParams = {
@@ -25,6 +27,17 @@ export type QueryParams = {
   appBundleId?: string | null
   elementRole?: string | null
   elementLabel?: string | null
+}
+
+export type ClickAtOptions = {
+  button?: 'left' | 'right'
+  count?: number
+  modifiers?: {
+    cmd?: boolean
+    opt?: boolean
+    ctrl?: boolean
+    shift?: boolean
+  }
 }
 
 /** Platform actuation surface — JXA in prod, fake in tests. */
@@ -39,12 +52,28 @@ export interface Actuator {
     elementRole: string | null
     elementLabel: string
     elementPath?: string[] | null
+    windowTitle?: string | null
   }): Promise<ActuatorResult>
   keystroke(chord: string): Promise<ActuatorResult>
   query(params: QueryParams): Promise<ActuatorResult>
   typeText?(text: string): Promise<ActuatorResult>
   setClipboard?(text: string): ActuatorResult
-  clickAt?(x: number, y: number, button?: 'left' | 'right'): Promise<ActuatorResult>
+  clickAt?(
+    x: number,
+    y: number,
+    options?: ClickAtOptions
+  ): Promise<ActuatorResult>
+  scrollAt?(
+    x: number,
+    y: number,
+    axis: 'vertical' | 'horizontal',
+    delta: number
+  ): Promise<ActuatorResult>
+  windowBounds?(
+    appName: string | null,
+    appBundleId: string | null,
+    windowTitle?: string | null
+  ): Promise<ActuatorResult>
   /** Optional readback — stub may always return ok. */
   readField?(params: QueryParams): Promise<ActuatorResult>
 }

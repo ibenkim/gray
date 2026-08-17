@@ -82,26 +82,62 @@ function openUrlInNewTab(url, preferredApp) {
   return { ok: false };
 }
 
-function clickAtPoint(x, y, button) {
+function clickAtPoint(x, y, button, count, mods) {
   try {
     var pt = $.CGPointMake(Number(x), Number(y));
     var downType = button === 'right' ? $.kCGEventRightMouseDown : $.kCGEventLeftMouseDown;
     var upType = button === 'right' ? $.kCGEventRightMouseUp : $.kCGEventLeftMouseUp;
     var buttonType = button === 'right' ? $.kCGMouseButtonRight : $.kCGMouseButtonLeft;
+    var n = Math.max(1, Math.min(10, Number(count) || 1));
+    var flags = 0;
+    try {
+      if (mods) {
+        if (mods.cmd) flags |= $.kCGEventFlagMaskCommand;
+        if (mods.opt) flags |= $.kCGEventFlagMaskAlternate;
+        if (mods.ctrl) flags |= $.kCGEventFlagMaskControl;
+        if (mods.shift) flags |= $.kCGEventFlagMaskShift;
+      }
+    } catch (eFlags) {}
     /* Move first — many web UIs ignore down/up that never hovered the target. */
     var move = $.CGEventCreateMouseEvent($(), $.kCGEventMouseMoved, pt, buttonType);
+    if (flags) $.CGEventSetFlags(move, flags);
     $.CGEventPost($.kCGHIDEventTap, move);
     try { $.NSThread.sleepForTimeInterval(0.03); } catch (eSleep0) {}
-    var down = $.CGEventCreateMouseEvent($(), downType, pt, buttonType);
-    $.CGEventSetIntegerValueField(down, $.kCGMouseEventClickState, 1);
-    $.CGEventPost($.kCGHIDEventTap, down);
-    try { $.NSThread.sleepForTimeInterval(0.04); } catch (eSleep1) {}
-    var up = $.CGEventCreateMouseEvent($(), upType, pt, buttonType);
-    $.CGEventSetIntegerValueField(up, $.kCGMouseEventClickState, 1);
-    $.CGEventPost($.kCGHIDEventTap, up);
+    for (var c = 1; c <= n; c++) {
+      var down = $.CGEventCreateMouseEvent($(), downType, pt, buttonType);
+      $.CGEventSetIntegerValueField(down, $.kCGMouseEventClickState, c);
+      if (flags) $.CGEventSetFlags(down, flags);
+      $.CGEventPost($.kCGHIDEventTap, down);
+      try { $.NSThread.sleepForTimeInterval(0.04); } catch (eSleep1) {}
+      var up = $.CGEventCreateMouseEvent($(), upType, pt, buttonType);
+      $.CGEventSetIntegerValueField(up, $.kCGMouseEventClickState, c);
+      if (flags) $.CGEventSetFlags(up, flags);
+      $.CGEventPost($.kCGHIDEventTap, up);
+      if (c < n) {
+        try { $.NSThread.sleepForTimeInterval(0.05); } catch (eSleep2) {}
+      }
+    }
     return { ok: true };
   } catch (e) {
     return { ok: false, error: 'click_failed' };
+  }
+}
+
+function scrollAtPoint(x, y, axis, delta) {
+  try {
+    var pt = $.CGPointMake(Number(x), Number(y));
+    var move = $.CGEventCreateMouseEvent($(), $.kCGEventMouseMoved, pt, $.kCGMouseButtonLeft);
+    $.CGEventPost($.kCGHIDEventTap, move);
+    try { $.NSThread.sleepForTimeInterval(0.02); } catch (eSleep) {}
+    var d = Number(delta) || 0;
+    /* CGEventCreateScrollWheelEvent: units, wheelCount, wheel1 (vertical), wheel2 (horizontal) */
+    var wheel1 = axis === 'horizontal' ? 0 : Math.round(d);
+    var wheel2 = axis === 'horizontal' ? Math.round(d) : 0;
+    var scroll = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 2, wheel1, wheel2);
+    $.CGEventPost($.kCGHIDEventTap, scroll);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'scroll_failed' };
   }
 }
 
@@ -126,6 +162,47 @@ function findProcess(appName, bundleId) {
     } catch (e2) {}
   }
   return null;
+}
+
+function pickWindow(proc, windowTitle) {
+  try {
+    var wins = proc.windows();
+    if (!wins || wins.length === 0) return null;
+    if (windowTitle) {
+      var want = String(windowTitle).toLowerCase();
+      for (var i = 0; i < wins.length; i++) {
+        try {
+          var t = String(wins[i].name() || '');
+          if (t.toLowerCase().indexOf(want) !== -1 || want.indexOf(t.toLowerCase()) !== -1) {
+            return wins[i];
+          }
+        } catch (eT) {}
+      }
+    }
+    return wins[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+function windowFrame(win) {
+  if (!win) return null;
+  try {
+    var posAttr = win.attributes.byName('AXPosition');
+    var sizeAttr = win.attributes.byName('AXSize');
+    if (!posAttr || !sizeAttr) return null;
+    var pos = posAttr.value();
+    var size = sizeAttr.value();
+    if (!pos || !size) return null;
+    var x = Math.round(Number(pos.x !== undefined ? pos.x : pos[0]));
+    var y = Math.round(Number(pos.y !== undefined ? pos.y : pos[1]));
+    var w = Math.round(Number(size.width !== undefined ? size.width : size[0]));
+    var h = Math.round(Number(size.height !== undefined ? size.height : size[1]));
+    if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h)) return null;
+    return { x: x, y: y, width: w, height: h };
+  } catch (e) {
+    return null;
+  }
 }
 
 function walkPressOnce(root, role, label, maxDepth, requireRole) {
@@ -172,6 +249,42 @@ function walkPress(root, role, label, maxDepth) {
     if (hit) return hit;
   }
   return { ok: false, error: 'element_not_found' };
+}
+
+/** Walk an elementPath of menu/ancestor labels (outer → inner). */
+function pressByPath(root, pathLabels, maxDepth) {
+  if (!pathLabels || !pathLabels.length) return null;
+  var cur = root;
+  for (var i = 0; i < pathLabels.length; i++) {
+    var want = String(pathLabels[i] || '');
+    if (!want) continue;
+    var hit = walkPressOnce(cur, null, want, maxDepth, false);
+    if (!hit || !hit.ok) return null;
+  }
+  return { ok: true };
+}
+
+function pressInProcess(proc, role, label, path, windowTitle) {
+  /* Menu bar first — AXMenuItem lives outside windows. */
+  try {
+    var bars = proc.menuBars();
+    if (bars && bars.length) {
+      if (path && path.length) {
+        var byPath = pressByPath(bars[0], path.slice().reverse(), 10);
+        if (byPath && byPath.ok) return byPath;
+      }
+      var menuHit = walkPress(bars[0], role, label, 10);
+      if (menuHit && menuHit.ok) return menuHit;
+    }
+  } catch (eMenu) {}
+
+  var win = pickWindow(proc, windowTitle);
+  if (!win) return { ok: false, error: 'no_window' };
+  if (path && path.length) {
+    var pathHit = pressByPath(win, path.slice().reverse(), 12);
+    if (pathHit && pathHit.ok) return pathHit;
+  }
+  return walkPress(win, role, label, 12);
 }
 
 function elementExists(root, role, label, maxDepth) {
@@ -288,18 +401,54 @@ function handle(cmd) {
       if (typeof cx !== 'number' || typeof cy !== 'number') {
         return { id: id, ok: false, error: 'missing_point' };
       }
-      var clicked = clickAtPoint(cx, cy, cmd.button === 'right' ? 'right' : 'left');
+      var clicked = clickAtPoint(
+        cx,
+        cy,
+        cmd.button === 'right' ? 'right' : 'left',
+        cmd.count,
+        cmd.modifiers || null
+      );
       clicked.id = id;
       return clicked;
+    }
+
+    if (type === 'scrollAt') {
+      var sx = cmd.x;
+      var sy = cmd.y;
+      if (typeof sx !== 'number' || typeof sy !== 'number') {
+        return { id: id, ok: false, error: 'missing_point' };
+      }
+      var scrolled = scrollAtPoint(
+        sx,
+        sy,
+        cmd.axis === 'horizontal' ? 'horizontal' : 'vertical',
+        cmd.delta
+      );
+      scrolled.id = id;
+      return scrolled;
+    }
+
+    if (type === 'windowBounds') {
+      var procB = findProcess(cmd.appName, cmd.appBundleId) || frontProcess();
+      if (!procB) return { id: id, ok: false, error: 'app_not_found' };
+      try { procB.frontmost = true; } catch (eB) {}
+      var winB = pickWindow(procB, cmd.windowTitle || null);
+      var frame = windowFrame(winB);
+      if (!frame) return { id: id, ok: false, error: 'no_window' };
+      return { id: id, ok: true, bounds: frame };
     }
 
     if (type === 'pressElement') {
       var proc = findProcess(cmd.appName, cmd.appBundleId) || frontProcess();
       if (!proc) return { id: id, ok: false, error: 'app_not_found' };
       try { proc.frontmost = true; } catch (e) {}
-      var wins = proc.windows();
-      if (!wins || wins.length === 0) return { id: id, ok: false, error: 'no_window' };
-      var result = walkPress(wins[0], cmd.elementRole || null, cmd.elementLabel || '', 12);
+      var result = pressInProcess(
+        proc,
+        cmd.elementRole || null,
+        cmd.elementLabel || '',
+        cmd.elementPath || null,
+        cmd.windowTitle || null
+      );
       result.id = id;
       return result;
     }

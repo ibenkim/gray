@@ -257,4 +257,32 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
     // Prose restates structured fields — omit t.
     expect(input.acts[0].t).toBeUndefined()
   })
+
+  it('packs click coordinates and tr=coords for positional clicks', () => {
+    const rich: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Clicked point (100,200)',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_click'],
+          appName: 'Figma',
+          elementRole: 'AXGroup',
+          targetResolution: 'coords',
+          clickX: 100,
+          clickY: 200,
+          clickWindowX: 20,
+          clickWindowY: 40
+        }
+      ]
+    }
+    const input = createWorkflowModelInput(session, rich)
+    expect(input.acts[0].tr).toBe('coords')
+    expect(input.acts[0].x).toBe(100)
+    expect(input.acts[0].y).toBe(200)
+    expect(input.acts[0].wx).toBe(20)
+    expect(input.acts[0].wy).toBe(40)
+  })
 })

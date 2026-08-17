@@ -70,6 +70,12 @@ export type CompactModelAction = {
   sa?: string
   w?: number
   tr?: string
+  /** Absolute screen click when recorded. */
+  x?: number
+  y?: number
+  /** Window-relative click offset when recorded. */
+  wx?: number
+  wy?: number
   op?: string
   inf?: true
   v?: true
@@ -314,7 +320,11 @@ function packAction(
   if (sb) row.sb = sb
   if (sa) row.sa = sa
   if (a.waitedMs && a.waitedMs >= 1000) row.w = a.waitedMs
-  if (a.targetResolution && a.targetResolution !== 'ax') row.tr = a.targetResolution
+  if (a.targetResolution) row.tr = a.targetResolution
+  if (a.clickX != null) row.x = a.clickX
+  if (a.clickY != null) row.y = a.clickY
+  if (a.clickWindowX != null) row.wx = a.clickWindowX
+  if (a.clickWindowY != null) row.wy = a.clickWindowY
   if (a.semanticOp) row.op = a.semanticOp
   if (a.inferred) row.inf = true
   if (a.verified) row.v = true

@@ -293,6 +293,73 @@ describe('polishSession', () => {
     expect(polished.actions.some((a) => a.sourceEventIds.includes('c2'))).toBe(false)
   })
 
+  it('treats unlabeled AXGroup clicks as coords when x/y exist', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'click',
+        eventId: 'c1',
+        sequence: 0,
+        data: {
+          appName: 'Figma',
+          elementRole: 'AXGroup',
+          clickX: 120,
+          clickY: 240,
+          clickWindowX: 40,
+          clickWindowY: 80,
+          windowBounds: { x: 80, y: 160, width: 800, height: 600 }
+        }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions[0].targetResolution).toBe('coords')
+    expect(polished.actions[0].text).toContain('point (120,240)')
+    expect(polished.actions[0].clickWindowX).toBe(40)
+    expect(polished.actions[0].windowWidth).toBe(800)
+  })
+
+  it('keeps labeled AXButton clicks as ax', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'click',
+        eventId: 'c1',
+        sequence: 0,
+        data: {
+          appName: 'Messages',
+          elementRole: 'AXButton',
+          elementLabel: 'Send',
+          clickX: 10,
+          clickY: 20
+        }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions[0].targetResolution).toBe('ax')
+    expect(polished.actions[0].text).toContain('Send')
+  })
+
+  it('polishes bare key_pressed into a shortcut action', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'key_pressed',
+        eventId: 'k1',
+        sequence: 0,
+        data: { appName: 'Finder', shortcut: 'Escape' }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    expect(polished.actions[0].category).toBe('shortcut')
+    expect(polished.actions[0].text).toBe('Pressed Escape')
+  })
+
   it('attaches screen transitions and produces segments', async () => {
     const store = new InMemoryTelemetryStore()
     await store.createSession({ sessionId: 'tsess_polish' })

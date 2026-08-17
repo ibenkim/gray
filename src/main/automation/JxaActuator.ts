@@ -108,9 +108,43 @@ export class JxaActuator implements Actuator {
   async clickAt(
     x: number,
     y: number,
-    button: 'left' | 'right' = 'left'
+    options?: import('./types').ClickAtOptions | 'left' | 'right'
   ): Promise<ActuatorResult> {
-    return this.send({ type: 'clickAt', x, y, button })
+    // Back-compat: third arg used to be button string.
+    const opts =
+      typeof options === 'string'
+        ? { button: options as 'left' | 'right' }
+        : options ?? {}
+    return this.send({
+      type: 'clickAt',
+      x,
+      y,
+      button: opts.button ?? 'left',
+      count: opts.count ?? 1,
+      modifiers: opts.modifiers ?? null
+    })
+  }
+
+  async scrollAt(
+    x: number,
+    y: number,
+    axis: 'vertical' | 'horizontal',
+    delta: number
+  ): Promise<ActuatorResult> {
+    return this.send({ type: 'scrollAt', x, y, axis, delta })
+  }
+
+  async windowBounds(
+    appName: string | null,
+    appBundleId: string | null,
+    windowTitle?: string | null
+  ): Promise<ActuatorResult> {
+    return this.send({
+      type: 'windowBounds',
+      appName,
+      appBundleId,
+      windowTitle: windowTitle ?? null
+    })
   }
 
   async pressElement(params: {
@@ -119,6 +153,7 @@ export class JxaActuator implements Actuator {
     elementRole: string | null
     elementLabel: string
     elementPath?: string[] | null
+    windowTitle?: string | null
   }): Promise<ActuatorResult> {
     return this.send({
       type: 'pressElement',
@@ -126,7 +161,8 @@ export class JxaActuator implements Actuator {
       appBundleId: params.appBundleId,
       elementRole: params.elementRole,
       elementLabel: params.elementLabel,
-      elementPath: params.elementPath ?? null
+      elementPath: params.elementPath ?? null,
+      windowTitle: params.windowTitle ?? null
     })
   }
 

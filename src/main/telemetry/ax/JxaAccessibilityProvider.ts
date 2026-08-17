@@ -7,6 +7,7 @@ import {
 } from '../../../shared/telemetry/sanitize'
 import type { InteractionPartial, InteractionProvider } from '../providers'
 import { looksLikeShellNoise } from '../automation/groundText'
+import { resolveTargetTier } from '../axTarget'
 import { JXA_SENSOR_SCRIPT } from './jxaScript'
 
 export type JxaElementBounds = {
@@ -85,6 +86,8 @@ export type JxaClickEvent = {
   enabled?: boolean | null
   path?: string[]
   bounds?: JxaElementBounds | null
+  /** Frame of the owning AXWindow when known. */
+  windowBounds?: JxaElementBounds | null
   containerRole?: string | null
   containerLabel?: string | null
   rowIndex?: number | null
@@ -405,10 +408,13 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         this.handleScroll(parsed as {
           axis?: 'vertical' | 'horizontal'
           delta?: number
+          x?: number | null
+          y?: number | null
           app?: string | null
           appBundleId?: string | null
           role?: string | null
           label?: string | null
+          windowBounds?: JxaElementBounds | null
           containerRole?: string | null
           containerLabel?: string | null
         })
@@ -782,17 +788,29 @@ export class JxaAccessibilityProvider implements InteractionProvider {
 
     if (code === KEY_RETURN || code === KEY_KEYPAD_ENTER) {
       this.countKey(event)
-      this.flushTyping('Return')
+      if (this.typing && this.typing.keyCount > 0) {
+        this.flushTyping('Return')
+      } else {
+        this.emitBareKey('Return', event)
+      }
       return
     }
     if (code === KEY_TAB) {
       this.countKey(event)
-      this.flushTyping('Tab')
+      if (this.typing && this.typing.keyCount > 0) {
+        this.flushTyping('Tab')
+      } else {
+        this.emitBareKey('Tab', event)
+      }
       return
     }
     if (code === KEY_ESCAPE) {
       this.countKey(event)
-      this.flushTyping('Escape')
+      if (this.typing && this.typing.keyCount > 0) {
+        this.flushTyping('Escape')
+      } else {
+        this.emitBareKey('Escape', event)
+      }
       return
     }
     if (code === KEY_BACKSPACE) {
@@ -802,7 +820,18 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       this.armTypingTimer()
       return
     }
-    if (code === KEY_FORWARD_DELETE || NAVIGATION_KEYS.has(code)) {
+    if (NAVIGATION_KEYS.has(code)) {
+      if (event.repeat === true) return
+      if (this.typing && this.typing.keyCount > 0) {
+        this.countKey(event)
+        this.armTypingTimer()
+        return
+      }
+      const name = SPECIAL_KEY_NAMES[code]
+      if (name) this.emitBareKey(name, event)
+      return
+    }
+    if (code === KEY_FORWARD_DELETE) {
       // Editing/caret movement: keeps the entry open but adds no characters.
       this.countKey(event)
       this.armTypingTimer()
@@ -824,16 +853,30 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   handleScroll(event: {
     axis?: 'vertical' | 'horizontal'
     delta?: number
+    x?: number | null
+    y?: number | null
     app?: string | null
     appBundleId?: string | null
     role?: string | null
     label?: string | null
+    windowBounds?: JxaElementBounds | null
     containerRole?: string | null
     containerLabel?: string | null
   }): void {
     if (!this.onEvent) return
     const appName = sanitizeLabel(event.app ?? undefined) ?? this.context.appName
     const appBundleId = sanitizeLabel(event.appBundleId ?? undefined) ?? this.context.appBundleId
+    const clickX =
+      typeof event.x === 'number' && Number.isFinite(event.x) ? Math.round(event.x) : undefined
+    const clickY =
+      typeof event.y === 'number' && Number.isFinite(event.y) ? Math.round(event.y) : undefined
+    const windowBounds = sanitizeBounds(event.windowBounds)
+    let clickWindowX: number | undefined
+    let clickWindowY: number | undefined
+    if (windowBounds && clickX != null && clickY != null) {
+      clickWindowX = clickX - windowBounds.x
+      clickWindowY = clickY - windowBounds.y
+    }
     this.onEvent({
       type: 'scroll',
       target: {
@@ -856,7 +899,12 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         scrollContainerRole: sanitizeLabel(event.containerRole ?? undefined),
         scrollContainerLabel: sanitizeLabel(event.containerLabel ?? undefined),
         elementRole: sanitizeLabel(event.role ?? undefined),
-        elementLabel: sanitizeLabel(event.label ?? undefined)
+        elementLabel: sanitizeLabel(event.label ?? undefined),
+        clickX,
+        clickY,
+        clickWindowX,
+        clickWindowY,
+        windowBounds
       }
     })
   }
@@ -888,6 +936,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     const clickY =
       typeof event.y === 'number' && Number.isFinite(event.y) ? Math.round(event.y) : undefined
     const bounds = sanitizeBounds(event.bounds)
+    const windowBounds = sanitizeBounds(event.windowBounds)
     const identifier = sanitizeLabel(event.identifier ?? undefined)
     const enabled = typeof event.enabled === 'boolean' ? event.enabled : undefined
     const listContext =
@@ -923,6 +972,20 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     const hasModifiers =
       event.cmd === true || event.opt === true || event.ctrl === true || event.shift === true
 
+    let clickWindowX: number | undefined
+    let clickWindowY: number | undefined
+    if (windowBounds && clickX != null && clickY != null) {
+      clickWindowX = clickX - windowBounds.x
+      clickWindowY = clickY - windowBounds.y
+    }
+
+    const tier = resolveTargetTier({
+      role,
+      label,
+      clickX,
+      clickY
+    })
+
     this.onEvent({
       type: 'click',
       target: {
@@ -933,7 +996,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         appName,
         appBundleId,
         enabled,
-        tier: role || label ? 'ax' : clickX != null ? 'coords' : 'none',
+        tier,
         listContext,
         fieldType: role && TEXT_ROLES.has(role) ? 'text' : undefined
       },
@@ -948,7 +1011,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         elementEnabled: enabled,
         elementPath: path.length ? path : undefined,
         listContext,
-        targetTier: role || label ? 'ax' : clickX != null ? 'coords' : 'none',
+        targetTier: tier,
         clickButton: event.button === 'right' ? 'right' : 'left',
         clickCount: clampClickCount(event.count),
         clickModifiers: hasModifiers
@@ -961,6 +1024,9 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           : undefined,
         clickX,
         clickY,
+        clickWindowX,
+        clickWindowY,
+        windowBounds,
         elementNorm,
         elementBounds: bounds
       }
@@ -1042,6 +1108,29 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         typedTextRedacted: redacted || buffer.redacted ? true : undefined,
         keyCount: buffer.keyCount,
         submitKey
+      }
+    })
+  }
+
+  /** Bare Enter/Esc/Tab/arrows when no typing buffer absorbed them. */
+  private emitBareKey(key: string, event: JxaKeyEvent): void {
+    if (!this.onEvent) return
+    if (event.repeat === true) return
+    this.onEvent({
+      type: 'key_pressed',
+      target: {
+        appName: this.context.appName,
+        appBundleId: this.context.appBundleId,
+        accessibleLabel: this.context.elementLabel,
+        role: this.context.elementRole
+      },
+      data: {
+        appName: event.app ? sanitizeLabel(event.app) : this.context.appName,
+        appBundleId: this.context.appBundleId,
+        documentTitle: this.context.documentTitle,
+        elementRole: this.context.elementRole,
+        elementLabel: this.context.elementLabel,
+        shortcut: key
       }
     })
   }

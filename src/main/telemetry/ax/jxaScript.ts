@@ -195,12 +195,16 @@ function describeElement(el) {
   var containerLabel = null;
   var rowIndex = null;
   var siblingCount = null;
+  var windowBounds = null;
   for (var i = 0; i < MAX_ANCESTORS + 4 && path.length < 8; i++) {
     cur = axCopy(cur, 'AXParent');
     if (!cur) break;
     var pRole = axString(cur, 'AXRole');
     var pLabel = axString(cur, 'AXTitle') || axString(cur, 'AXDescription');
     if (pLabel) path.push(pLabel.slice(0, 80));
+    if (!windowBounds && pRole === 'AXWindow') {
+      windowBounds = axFrameBounds(cur);
+    }
     if (!containerRole && pRole && /AX(Table|List|Outline|ScrollArea|Grid|Row|Cell)/.test(pRole)) {
       containerRole = pRole;
       containerLabel = pLabel ? pLabel.slice(0, 120) : null;
@@ -218,6 +222,9 @@ function describeElement(el) {
       } catch (eKids) {}
     }
   }
+  if (!windowBounds && role === 'AXWindow') {
+    windowBounds = axFrameBounds(el);
+  }
 
   return {
     role: role,
@@ -228,6 +235,7 @@ function describeElement(el) {
     enabled: enabled,
     path: path,
     bounds: axFrameBounds(el),
+    windowBounds: windowBounds,
     containerRole: containerRole,
     containerLabel: containerLabel,
     rowIndex: rowIndex,
@@ -599,6 +607,7 @@ function onMouse(evt, button) {
       enabled: target ? target.enabled : null,
       path: target ? target.path : [],
       bounds: target ? target.bounds : null,
+      windowBounds: target ? target.windowBounds : null,
       containerRole: target ? target.containerRole : null,
       containerLabel: target ? target.containerLabel : null,
       rowIndex: target ? target.rowIndex : null,
@@ -634,6 +643,7 @@ function onScroll(evt) {
       appBundleId: front.bundleId,
       role: target ? target.role : null,
       label: target ? target.label : null,
+      windowBounds: target ? target.windowBounds : null,
       containerRole: target ? target.containerRole : null,
       containerLabel: target ? target.containerLabel : null
     });

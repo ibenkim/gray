@@ -21,6 +21,7 @@ function urlHostFromEvent(event: TelemetryEvent): string | undefined {
 }
 import { attachNarration } from './narration'
 import { classifyInputKind, segmentActions, semanticOpFromShortcut } from './segment'
+import { resolveTargetResolution } from './axTarget'
 import type { TelemetryStore } from './store/TelemetryStore'
 
 const IDLE_GAP_MS = 30_000
@@ -366,7 +367,7 @@ export async function polishSession(
           documentTitle: event.data?.documentTitle,
           elementLabel: label,
           elementRole: role,
-          targetResolution: label || role ? 'ax' : 'none',
+          targetResolution: resolveTargetResolution({ role, label }),
           inputKind: classifyInputKind(undefined, {
             fieldLabel: label,
             fieldType: event.data?.field?.fieldType || event.target?.fieldType,
@@ -423,7 +424,7 @@ export async function polishSession(
             elementLabel: label,
             elementRole: role,
             inputKind,
-            targetResolution: label || role ? 'ax' : 'none'
+            targetResolution: resolveTargetResolution({ role, label })
           }
           foldPendingFocus(draft, ts)
           if (draft.sourceEventIds.length > 1 || isTextFieldRole(role)) {
@@ -448,7 +449,7 @@ export async function polishSession(
               elementRole: role,
               inputKind,
               semanticOp: submitKey === 'Return' || submitKey === 'Enter' ? 'submit' : undefined,
-              targetResolution: label || role ? 'ax' : 'none'
+              targetResolution: resolveTargetResolution({ role, label })
             }
             foldPendingFocus(draft, ts)
             push(draft)
@@ -470,7 +471,7 @@ export async function polishSession(
           inputKind,
           semanticOp:
             submitKey === 'Return' || submitKey === 'Enter' ? 'submit' : undefined,
-          targetResolution: label || role ? 'ax' : 'none',
+          targetResolution: resolveTargetResolution({ role, label }),
           elementBounds: event.data?.elementBounds
         }
         foldPendingFocus(draft, ts)
@@ -569,6 +570,10 @@ export async function polishSession(
             clickCount: event.data?.clickCount,
             clickX: event.data?.clickX,
             clickY: event.data?.clickY,
+            clickWindowX: event.data?.clickWindowX,
+            clickWindowY: event.data?.clickWindowY,
+            windowWidth: event.data?.windowBounds?.width,
+            windowHeight: event.data?.windowBounds?.height,
             elementBounds: event.data?.elementBounds
           }
           foldPendingFocus(draft, ts)
@@ -594,6 +599,10 @@ export async function polishSession(
           clickCount: event.data?.clickCount,
           clickX: event.data?.clickX,
           clickY: event.data?.clickY,
+          clickWindowX: event.data?.clickWindowX,
+          clickWindowY: event.data?.clickWindowY,
+          windowWidth: event.data?.windowBounds?.width,
+          windowHeight: event.data?.windowBounds?.height,
           targetResolution: resolution,
           semanticOp: isSend ? 'submit' : undefined,
           elementBounds: event.data?.elementBounds,
@@ -823,6 +832,10 @@ export async function polishSession(
           // Keep the latest scroll position semantics in the text.
           const label = containerLabel || containerRole
           prior.text = label ? `Scrolled ${label}` : 'Scrolled'
+          if (typeof event.data?.scrollDelta === 'number') {
+            prior.scrollDelta = (prior.scrollDelta ?? 0) + event.data.scrollDelta
+          }
+          if (event.data?.scrollAxis) prior.scrollAxis = event.data.scrollAxis
           break
         }
         const label = containerLabel || containerRole
@@ -836,15 +849,47 @@ export async function polishSession(
           elementLabel: containerLabel,
           elementRole: containerRole,
           l1Op: 'reveal',
-          targetResolution: containerRole || containerLabel ? 'ax' : 'none'
+          targetResolution: resolveTargetResolution({
+            role: containerRole,
+            label: containerLabel,
+            clickX: event.data?.clickX,
+            clickY: event.data?.clickY
+          }),
+          clickX: event.data?.clickX,
+          clickY: event.data?.clickY,
+          clickWindowX: event.data?.clickWindowX,
+          clickWindowY: event.data?.clickWindowY,
+          windowWidth: event.data?.windowBounds?.width,
+          windowHeight: event.data?.windowBounds?.height,
+          scrollAxis: event.data?.scrollAxis,
+          scrollDelta: event.data?.scrollDelta
         })
         break
       }
-      case 'keyboard_shortcut': {
+      case 'keyboard_shortcut':
+      case 'key_pressed': {
         const shortcut = event.data?.shortcut || 'a shortcut'
-        const semanticOp = semanticOpFromShortcut(shortcut)
+        const semanticOp =
+          event.type === 'keyboard_shortcut' ? semanticOpFromShortcut(shortcut) : undefined
+        // Collapse long arrow runs into one action with a repeat count in the text.
+        const prior = drafts[drafts.length - 1]
+        if (
+          event.type === 'key_pressed' &&
+          prior?.category === 'shortcut' &&
+          prior.text.startsWith(`Pressed ${shortcut}`) &&
+          (prior.appName ?? '') === (event.data?.appName ?? '') &&
+          /^(Up|Down|Left|Right)$/i.test(shortcut)
+        ) {
+          if (!prior.sourceEventIds.includes(event.eventId)) {
+            prior.sourceEventIds.push(event.eventId)
+          }
+          const n = prior.sourceEventIds.length
+          prior.text = n > 1 ? `Pressed ${shortcut} ×${n}` : `Pressed ${shortcut}`
+          break
+        }
         push({
-          text: `Used shortcut ${shortcut}`,
+          text:
+            event.type === 'key_pressed' ? `Pressed ${shortcut}` : `Used shortcut ${shortcut}`,
           category: 'shortcut',
           timestamp: event.timestamp,
           sourceEventIds: [event.eventId],
@@ -967,9 +1012,12 @@ function isTextFieldRole(role: string | undefined): boolean {
 }
 
 function resolveTarget(event: TelemetryEvent, axLabel: string | undefined): TargetResolution {
-  if (axLabel || event.data?.elementRole || event.target?.role) return 'ax'
-  if (event.data?.clickX != null && event.data?.clickY != null) return 'coords'
-  return 'none'
+  return resolveTargetResolution({
+    role: event.data?.elementRole || event.target?.role,
+    label: axLabel,
+    clickX: event.data?.clickX,
+    clickY: event.data?.clickY
+  })
 }
 
 function changedOnly(

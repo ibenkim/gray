@@ -315,6 +315,53 @@ describe('JxaAccessibilityProvider click capture', () => {
     expect(click?.target?.tier).toBe('coords')
   })
 
+  it('marks unlabeled AXGroup clicks as coords tier', () => {
+    const { provider, events } = harness()
+    provider.handleClick({
+      button: 'left',
+      count: 1,
+      x: 150,
+      y: 250,
+      app: 'Figma',
+      role: 'AXGroup',
+      label: undefined,
+      windowBounds: { x: 100, y: 200, width: 900, height: 700 }
+    })
+    const click = events.find((e) => e.type === 'click')
+    expect(click?.data?.targetTier).toBe('coords')
+    expect(click?.data?.clickWindowX).toBe(50)
+    expect(click?.data?.clickWindowY).toBe(50)
+  })
+
+  it('emits key_pressed for bare Escape with no typing buffer', () => {
+    const { provider, events } = harness()
+    provider.handleKey({
+      code: 53,
+      chars: '\u001b',
+      app: 'Finder'
+    })
+    expect(events.some((e) => e.type === 'key_pressed' && e.data?.shortcut === 'Escape')).toBe(
+      true
+    )
+  })
+
+  it('folds Enter into submitKey when typing is in progress', () => {
+    const { provider, events } = harness()
+    provider.emitFromSample({
+      appName: 'Messages',
+      elementRole: 'AXTextArea',
+      elementLabel: 'Message',
+      valueLength: 0,
+      selectedLabels: []
+    })
+    for (const ch of 'hi') provider.handleKey(char(ch))
+    provider.handleKey({ code: 36, chars: '\r', app: 'Messages' })
+    const typed = events.find((e) => e.type === 'text_input')
+    expect(typed?.data?.typedText).toBe('hi')
+    expect(typed?.data?.submitKey).toBe('Return')
+    expect(events.some((e) => e.type === 'key_pressed')).toBe(false)
+  })
+
   it('clamps an implausible click count', () => {
     const { provider, events } = harness()
     provider.handleClick({ button: 'right', count: 99, label: 'Row' })

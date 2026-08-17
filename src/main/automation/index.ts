@@ -6,6 +6,10 @@ import {
   collapseRedundantBrowserNav,
   ensureCreateRenameFromEvidence,
   injectClickOpsFromEvidence,
+  injectKeystrokeOpsFromEvidence,
+  injectScrollOpsFromEvidence,
+  injectTypeTextOpsFromEvidence,
+  preferClickAtWhenGrounded,
   recoverInferredActions,
   rewriteCreateSheetClicks
 } from '../telemetry/automation/compile'
@@ -98,12 +102,41 @@ export function registerAutomationIpc(): void {
         const polished = await store.readPolishedSession(sessionId)
         if (polished) {
           const warnings: string[] = [...script.script.warnings]
+          const byEvent = new Map<string, (typeof polished.actions)[number]>()
+          for (const a of polished.actions) {
+            for (const id of a.sourceEventIds) byEvent.set(id, a)
+          }
           const recovered = collapseRedundantBrowserNav(
             ensureCreateRenameFromEvidence(
               rewriteCreateSheetClicks(
-                injectClickOpsFromEvidence(
-                  applyEditorIntentToOps(
-                    recoverInferredActions(script.script.ops, storedWorkflow, polished, warnings),
+                injectKeystrokeOpsFromEvidence(
+                  injectTypeTextOpsFromEvidence(
+                    injectScrollOpsFromEvidence(
+                      injectClickOpsFromEvidence(
+                        preferClickAtWhenGrounded(
+                          applyEditorIntentToOps(
+                            recoverInferredActions(
+                              script.script.ops,
+                              storedWorkflow,
+                              polished,
+                              warnings
+                            ),
+                            storedWorkflow,
+                            polished,
+                            warnings
+                          ),
+                          polished,
+                          byEvent,
+                          warnings
+                        ),
+                        storedWorkflow,
+                        polished,
+                        warnings
+                      ),
+                      storedWorkflow,
+                      polished,
+                      warnings
+                    ),
                     storedWorkflow,
                     polished,
                     warnings

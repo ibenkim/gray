@@ -771,20 +771,31 @@ export class TelemetryRecorder {
       }
     }
 
-    // Enrich clicks with window-relative coordinates when we have window bounds.
+    // Enrich clicks with window-relative coordinates.
+    // Prefer AX windowBounds from the hit-test; fall back to polled active-win bounds.
     let data = partial.data
     if (
       (partial.type === 'click' || partial.type === 'element_activated') &&
       data?.clickX != null &&
-      data?.clickY != null &&
-      this.lastBounds
+      data?.clickY != null
     ) {
-      const wx = this.lastBounds.x ?? 0
-      const wy = this.lastBounds.y ?? 0
-      data = {
-        ...data,
-        clickWindowX: data.clickX - wx,
-        clickWindowY: data.clickY - wy
+      const axWin = data.windowBounds
+      const polled = this.lastBounds
+        ? {
+            x: this.lastBounds.x ?? 0,
+            y: this.lastBounds.y ?? 0,
+            width: this.lastBounds.width ?? 0,
+            height: this.lastBounds.height ?? 0
+          }
+        : undefined
+      const win = axWin ?? polled
+      if (win) {
+        data = {
+          ...data,
+          windowBounds: win,
+          clickWindowX: data.clickWindowX ?? data.clickX - win.x,
+          clickWindowY: data.clickWindowY ?? data.clickY - win.y
+        }
       }
     }
 

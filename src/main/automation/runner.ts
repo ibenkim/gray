@@ -300,6 +300,7 @@ export class AutomationRunner {
     // Let UI settle between sequenced clicks / navigations / typing.
     if (
       op.op === 'click_at' ||
+      op.op === 'scroll' ||
       op.op === 'activate_element' ||
       op.op === 'keystroke' ||
       op.op === 'type_text'
@@ -402,22 +403,38 @@ export class AutomationRunner {
           const focus = await this.actuator.keystroke('Cmd+L')
           if (focus.ok) return focus
         }
-        if (op.clickX != null && op.clickY != null && this.actuator.clickAt) {
-          return this.actuator.clickAt(op.clickX, op.clickY)
+        const fallback = await this.resolveClickPoint(op)
+        if (fallback && this.actuator.clickAt) {
+          return this.actuator.clickAt(fallback.x, fallback.y, clickOptionsFromOp(op))
         }
         return pressed
       }
       case 'click_at': {
-        if (op.clickX == null || op.clickY == null) {
-          return { ok: false, error: 'missing_point' }
-        }
         if (!this.actuator.clickAt) return { ok: false, error: 'click_unsupported' }
         // Ensure the recorded app is frontmost so coords land in the right window.
         if (op.appName) {
           const act = await this.actuator.activateApp(op.appName, op.appBundleId)
           if (act.ok) await sleep(120)
         }
-        return this.actuator.clickAt(op.clickX, op.clickY)
+        const point = await this.resolveClickPoint(op)
+        if (!point) return { ok: false, error: 'missing_point' }
+        return this.actuator.clickAt(point.x, point.y, clickOptionsFromOp(op))
+      }
+      case 'scroll': {
+        if (!this.actuator.scrollAt) return { ok: false, error: 'scroll_unsupported' }
+        if (op.scrollDelta == null) return { ok: false, error: 'missing_delta' }
+        if (op.appName) {
+          const act = await this.actuator.activateApp(op.appName, op.appBundleId)
+          if (act.ok) await sleep(80)
+        }
+        const point = await this.resolveClickPoint(op)
+        if (!point) return { ok: false, error: 'missing_point' }
+        return this.actuator.scrollAt(
+          point.x,
+          point.y,
+          op.scrollAxis === 'horizontal' ? 'horizontal' : 'vertical',
+          op.scrollDelta
+        )
       }
       case 'keystroke':
         if (!op.chord) return { ok: false, error: 'missing_chord' }
@@ -471,6 +488,20 @@ export class AutomationRunner {
       await sleep(400)
     }
     return { ok: false, error: 'wait_timeout' }
+  }
+
+  /**
+   * Prefer window-relative offset re-anchored to the live window frame;
+   * fall back to absolute screen coordinates.
+   */
+  private async resolveClickPoint(
+    op: AutomationOp
+  ): Promise<{ x: number; y: number } | null> {
+    return resolveClickPoint(op, async () => {
+      if (!this.actuator.windowBounds) return null
+      const r = await this.actuator.windowBounds(op.appName, op.appBundleId)
+      return r.ok && r.bounds ? r.bounds : null
+    })
   }
 
   private async holdForApproval(
@@ -644,6 +675,8 @@ function isMutatingOp(op: AutomationOp): boolean {
     case 'activate_element':
     case 'click_at':
       return true
+    case 'scroll':
+      return true
     case 'keystroke':
       return isMutatingKeystroke(op.chord ?? '')
     default:
@@ -768,6 +801,8 @@ function defaultLabel(op: AutomationOp): string {
       return `Click ${op.elementLabel ?? 'element'}`
     case 'click_at':
       return 'Click at position'
+    case 'scroll':
+      return 'Scroll'
     case 'keystroke':
       return `Press ${op.chord ?? 'keys'}`
     case 'type_text':
@@ -788,6 +823,83 @@ function defaultLabel(op: AutomationOp): string {
 function truncateLabel(text: string, max = 40): string {
   const clean = text.replace(/\s+/g, ' ').trim()
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean
+}
+
+function clickOptionsFromOp(op: AutomationOp): {
+  button?: 'left' | 'right'
+  count?: number
+  modifiers?: { cmd?: boolean; opt?: boolean; ctrl?: boolean; shift?: boolean }
+} {
+  return {
+    button: op.clickButton === 'right' ? 'right' : 'left',
+    count: op.clickCount ?? 1,
+    modifiers: op.clickModifiers
+      ? {
+          cmd: op.clickModifiers.cmd === true,
+          opt: op.clickModifiers.opt === true,
+          ctrl: op.clickModifiers.ctrl === true,
+          shift: op.clickModifiers.shift === true
+        }
+      : undefined
+  }
+}
+
+const SIZE_TOLERANCE = 8
+
+/**
+ * Resolve a click/scroll point: window anchor when the offset is inside the
+ * recorded window, otherwise absolute screen coordinates.
+ */
+export async function resolveClickPoint(
+  op: Pick<
+    AutomationOp,
+    | 'clickX'
+    | 'clickY'
+    | 'clickWindowX'
+    | 'clickWindowY'
+    | 'windowWidth'
+    | 'windowHeight'
+  >,
+  fetchBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+): Promise<{ x: number; y: number } | null> {
+  const hasAnchor =
+    op.clickWindowX != null &&
+    op.clickWindowY != null &&
+    op.windowWidth != null &&
+    op.windowHeight != null &&
+    op.windowWidth > 0 &&
+    op.windowHeight > 0
+
+  // Menu bar / Dock / Spotlight: offset outside the recorded window → absolute.
+  if (
+    hasAnchor &&
+    (op.clickWindowX! < 0 ||
+      op.clickWindowY! < 0 ||
+      op.clickWindowX! > op.windowWidth! ||
+      op.clickWindowY! > op.windowHeight!)
+  ) {
+    if (op.clickX != null && op.clickY != null) return { x: op.clickX, y: op.clickY }
+    return null
+  }
+
+  if (hasAnchor) {
+    const now = await fetchBounds()
+    if (now && now.width > 0 && now.height > 0) {
+      const dw = Math.abs(now.width - op.windowWidth!)
+      const dh = Math.abs(now.height - op.windowHeight!)
+      const sx = dw > SIZE_TOLERANCE ? now.width / op.windowWidth! : 1
+      const sy = dh > SIZE_TOLERANCE ? now.height / op.windowHeight! : 1
+      let x = now.x + Math.round(op.clickWindowX! * sx)
+      let y = now.y + Math.round(op.clickWindowY! * sy)
+      // Clamp inside the current window rect.
+      x = Math.min(now.x + now.width - 1, Math.max(now.x, x))
+      y = Math.min(now.y + now.height - 1, Math.max(now.y, y))
+      return { x, y }
+    }
+  }
+
+  if (op.clickX != null && op.clickY != null) return { x: op.clickX, y: op.clickY }
+  return null
 }
 
 function humanError(code?: string): string {

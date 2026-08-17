@@ -11,7 +11,7 @@ vi.mock('electron', () => ({
 }))
 
 import type { AutomationScript } from '../../shared/telemetry/schema'
-import { AutomationRunner, toFailureCode } from './runner'
+import { AutomationRunner, resolveClickPoint, toFailureCode } from './runner'
 import type { Actuator, ActuatorResult, QueryParams, RunEvent } from './types'
 
 class FakeActuator implements Actuator {
@@ -40,9 +40,38 @@ class FakeActuator implements Actuator {
     return { ok: true }
   }
 
-  async clickAt(x: number, y: number): Promise<ActuatorResult> {
-    this.calls.push(`clickAt:${x},${y}`)
+  async clickAt(
+    x: number,
+    y: number,
+    options?: { button?: 'left' | 'right'; count?: number; modifiers?: { cmd?: boolean } }
+  ): Promise<ActuatorResult> {
+    const btn = typeof options === 'object' ? options?.button ?? 'left' : 'left'
+    const count = typeof options === 'object' ? options?.count ?? 1 : 1
+    const mods =
+      typeof options === 'object' && options?.modifiers?.cmd ? '+cmd' : ''
+    this.calls.push(`clickAt:${x},${y}:${btn}x${count}${mods}`)
     return { ok: true }
+  }
+
+  async scrollAt(
+    x: number,
+    y: number,
+    axis: 'vertical' | 'horizontal',
+    delta: number
+  ): Promise<ActuatorResult> {
+    this.calls.push(`scrollAt:${x},${y}:${axis}:${delta}`)
+    return { ok: true }
+  }
+
+  windowBoundsResult: { x: number; y: number; width: number; height: number } | null = null
+
+  async windowBounds(
+    appName: string | null,
+    _appBundleId: string | null
+  ): Promise<ActuatorResult> {
+    this.calls.push(`windowBounds:${appName}`)
+    if (!this.windowBoundsResult) return { ok: false, error: 'no_window' }
+    return { ok: true, bounds: this.windowBoundsResult }
   }
 
   async pressElement(params: {
@@ -579,6 +608,114 @@ describe('AutomationRunner', () => {
     await runner.start()
     expect(actuator.calls).not.toContain('activateApp:Slack')
     expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'stopped' })
+  })
+
+  it('replays click_at with count and button fidelity', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({
+          op: 'click_at',
+          clickX: 50,
+          clickY: 60,
+          clickButton: 'right',
+          clickCount: 2,
+          clickModifiers: { cmd: true },
+          label: 'Cmd-right double'
+        })
+      ],
+      warnings: []
+    }
+    const runner = new AutomationRunner({
+      runId: 'run_click',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      onEvent: (e) => events.push(e)
+    })
+    await runner.start()
+    expect(actuator.calls.some((c) => c.includes('clickAt:50,60:rightx2+cmd'))).toBe(true)
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+  })
+
+  it('anchors click_at to a moved window via windowBounds', async () => {
+    const actuator = new FakeActuator()
+    actuator.windowBoundsResult = { x: 200, y: 100, width: 800, height: 600 }
+    const events: RunEvent[] = []
+    const script: AutomationScript = {
+      ops: [
+        baseOp({
+          op: 'click_at',
+          appName: 'Figma',
+          clickX: 140,
+          clickY: 180,
+          clickWindowX: 40,
+          clickWindowY: 80,
+          windowWidth: 800,
+          windowHeight: 600,
+          label: 'Anchored click'
+        })
+      ],
+      warnings: []
+    }
+    const runner = new AutomationRunner({
+      runId: 'run_anchor',
+      sessionId: 'tsess_1',
+      script,
+      actuator,
+      onEvent: (e) => events.push(e)
+    })
+    await runner.start()
+    // origin moved to 200,100 → click at 240,180
+    expect(actuator.calls.some((c) => c.startsWith('clickAt:240,180'))).toBe(true)
+  })
+})
+
+describe('resolveClickPoint', () => {
+  it('falls back to absolute when windowBounds query fails', async () => {
+    const pt = await resolveClickPoint(
+      {
+        clickX: 10,
+        clickY: 20,
+        clickWindowX: 5,
+        clickWindowY: 5,
+        windowWidth: 100,
+        windowHeight: 100
+      },
+      async () => null
+    )
+    expect(pt).toEqual({ x: 10, y: 20 })
+  })
+
+  it('keeps out-of-window offsets absolute', async () => {
+    const pt = await resolveClickPoint(
+      {
+        clickX: 50,
+        clickY: -10,
+        clickWindowX: 10,
+        clickWindowY: -20,
+        windowWidth: 100,
+        windowHeight: 100
+      },
+      async () => ({ x: 0, y: 0, width: 100, height: 100 })
+    )
+    expect(pt).toEqual({ x: 50, y: -10 })
+  })
+
+  it('scales the offset when the window was resized', async () => {
+    const pt = await resolveClickPoint(
+      {
+        clickX: 50,
+        clickY: 50,
+        clickWindowX: 50,
+        clickWindowY: 50,
+        windowWidth: 100,
+        windowHeight: 100
+      },
+      async () => ({ x: 0, y: 0, width: 200, height: 200 })
+    )
+    expect(pt).toEqual({ x: 100, y: 100 })
   })
 })
 

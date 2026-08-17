@@ -12,6 +12,9 @@ import {
   compileAutomationScript,
   ensureBrowserNewTab,
   injectClickOpsFromEvidence,
+  injectScrollOpsFromEvidence,
+  injectTypeTextOpsFromEvidence,
+  injectKeystrokeOpsFromEvidence,
   injectWaitOpsFromStepSemantics,
   isCreateSheetIntent,
   ensureCreateRenameFromEvidence,
@@ -19,6 +22,7 @@ import {
   orderCreateSheetSequences,
   polishedImpliesCreateSheet,
   preferAddressNavigation,
+  preferClickAtWhenGrounded,
   recoverInferredActions,
   renameNameFromPolishedTitleChange,
   rewriteCreateSheetClicks,
@@ -1517,5 +1521,228 @@ describe('compileAutomationScript', () => {
     expect(stored.script.ops).toHaveLength(1)
     expect(stored.script.ops[0].op).toBe('open_app')
     expect(store.automation.get('tsess_auto')).toBeTruthy()
+  })
+})
+
+describe('preferClickAtWhenGrounded / inject recorded inputs', () => {
+  const seed = {
+    stepOrder: 1,
+    evidenceEventIds: ['tevt_g'],
+    confidence: 0.7,
+    timeoutMs: 10_000,
+    label: 'Click',
+    appName: 'Figma',
+    appBundleId: null,
+    url: null,
+    urlVariableKey: null,
+    elementRole: null as string | null,
+    elementLabel: null as string | null,
+    elementPath: null,
+    chord: null,
+    variableKey: null,
+    literalText: null,
+    waitCondition: null,
+    waitValue: null,
+    prompt: null,
+    clickX: null as number | null,
+    clickY: null as number | null
+  }
+
+  it('rewrites AXGroup activate_element to click_at when coords exist', () => {
+    const warnings: string[] = []
+    const groupPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Clicked point (62,210)',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:47.000Z',
+          sourceEventIds: ['tevt_g'],
+          appName: 'Figma',
+          elementRole: 'AXGroup',
+          targetResolution: 'coords',
+          clickX: 62,
+          clickY: 210,
+          clickWindowX: 12,
+          clickWindowY: 40,
+          windowWidth: 800,
+          windowHeight: 600
+        }
+      ]
+    }
+    const byEvent = new Map(groupPolished.actions.flatMap((a) => a.sourceEventIds.map((id) => [id, a] as const)))
+    const ops = preferClickAtWhenGrounded(
+      [
+        {
+          ...seed,
+          op: 'activate_element',
+          elementRole: 'AXGroup',
+          elementLabel: 'Figma'
+        }
+      ],
+      groupPolished,
+      byEvent,
+      warnings
+    )
+    expect(ops[0]?.op).toBe('click_at')
+    expect(ops[0]?.clickX).toBe(62)
+    expect(ops[0]?.clickWindowX).toBe(12)
+    expect(ops[0]?.windowWidth).toBe(800)
+  })
+
+  it('still injects click_at when a weak activate_element covered the event', () => {
+    const warnings: string[] = []
+    const groupPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Clicked point (10,20)',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:47.000Z',
+          sourceEventIds: ['tevt_g'],
+          appName: 'Figma',
+          elementRole: 'AXGroup',
+          clickX: 10,
+          clickY: 20
+        }
+      ]
+    }
+    const ops = injectClickOpsFromEvidence(
+      [
+        {
+          ...seed,
+          op: 'activate_element',
+          elementRole: 'AXGroup',
+          elementLabel: null
+        }
+      ],
+      {
+        ...workflow,
+        steps: [
+          wfStep({
+            order: 1,
+            action: 'Click canvas',
+            category: 'interaction',
+            appName: 'Figma',
+            evidenceEventIds: ['tevt_g'],
+            confidence: 0.7
+          })
+        ]
+      },
+      groupPolished,
+      warnings
+    )
+    expect(ops.some((o) => o.op === 'click_at' && o.clickX === 10)).toBe(true)
+  })
+
+  it('injects type_text and keystroke from polished evidence', () => {
+    const warnings: string[] = []
+    const typedPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Typed "hello"',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:47.000Z',
+          sourceEventIds: ['tevt_type'],
+          appName: 'Notes',
+          typedText: 'hello'
+        },
+        {
+          order: 2,
+          text: 'Pressed Escape',
+          category: 'shortcut',
+          timestamp: '2026-07-29T04:28:48.000Z',
+          sourceEventIds: ['tevt_esc'],
+          appName: 'Notes'
+        }
+      ]
+    }
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      steps: [
+        wfStep({
+          order: 1,
+          action: 'Type a note',
+          category: 'input',
+          appName: 'Notes',
+          evidenceEventIds: ['tevt_type', 'tevt_esc'],
+          confidence: 0.8
+        })
+      ]
+    }
+    const base = [
+      {
+        ...seed,
+        op: 'open_app' as const,
+        evidenceEventIds: ['tevt_type'],
+        appName: 'Notes',
+        label: 'Open Notes'
+      }
+    ]
+    const withType = injectTypeTextOpsFromEvidence(base, wf, typedPolished, warnings)
+    const withKeys = injectKeystrokeOpsFromEvidence(withType, wf, typedPolished, warnings)
+    expect(withKeys.some((o) => o.op === 'type_text' && o.literalText === 'hello')).toBe(true)
+    expect(withKeys.some((o) => o.op === 'keystroke' && o.chord === 'Escape')).toBe(true)
+  })
+
+  it('injects scroll ahead of click_at', () => {
+    const warnings: string[] = []
+    const scrollPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Scrolled',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:47.000Z',
+          sourceEventIds: ['tevt_scroll'],
+          appName: 'Figma',
+          l1Op: 'reveal',
+          scrollAxis: 'vertical',
+          scrollDelta: 120,
+          clickX: 200,
+          clickY: 300
+        },
+        {
+          order: 2,
+          text: 'Clicked point (200,400)',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:48.000Z',
+          sourceEventIds: ['tevt_click'],
+          appName: 'Figma',
+          clickX: 200,
+          clickY: 400
+        }
+      ]
+    }
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      steps: [
+        wfStep({
+          order: 1,
+          action: 'Scroll then click',
+          category: 'interaction',
+          appName: 'Figma',
+          evidenceEventIds: ['tevt_scroll', 'tevt_click'],
+          confidence: 0.8
+        })
+      ]
+    }
+    const withClicks = injectClickOpsFromEvidence(
+      [{ ...seed, op: 'open_app', appName: 'Figma', label: 'Open' }],
+      wf,
+      scrollPolished,
+      warnings
+    )
+    const withScroll = injectScrollOpsFromEvidence(withClicks, wf, scrollPolished, warnings)
+    const scrollIdx = withScroll.findIndex((o) => o.op === 'scroll')
+    const clickIdx = withScroll.findIndex((o) => o.op === 'click_at')
+    expect(scrollIdx).toBeGreaterThanOrEqual(0)
+    expect(clickIdx).toBeGreaterThan(scrollIdx)
+    expect(withScroll[scrollIdx]?.scrollDelta).toBe(120)
   })
 })

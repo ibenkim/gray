@@ -106,14 +106,23 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
   /** Picking a chip resolves the card into a chip-token (never terminal). */
   function pickFixOption(step: EditorStep, optionId: string, custom?: string) {
     onChange((s) =>
-      s.map((x) =>
-        x.id === step.id && x.fix
-          ? {
-              ...x,
-              fix: { ...x.fix, selectedOptionId: optionId, customValue: custom, collapsed: true }
-            }
-          : x
-      )
+      s.map((x) => {
+        if (x.id !== step.id || !x.fix) return x
+        const opt = x.fix.options.find((o) => o.id === optionId)
+        const applyTitle =
+          optionId !== 'ask-each-time' &&
+          (custom?.trim() || (opt && opt.kind !== 'other' ? opt.label : undefined))
+        return {
+          ...x,
+          title: applyTitle ? applyTitle.slice(0, 400) : x.title,
+          fix: {
+            ...x.fix,
+            selectedOptionId: optionId,
+            customValue: custom,
+            collapsed: true
+          }
+        }
+      })
     )
     setCustomFixId(null)
     setCustomFixText('')

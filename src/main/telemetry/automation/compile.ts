@@ -25,6 +25,7 @@ import {
   pickLiteralFromEvidence,
   searchQueryFromTitle
 } from './groundText'
+import { isActionableAxTarget } from '../axTarget'
 
 export type CompileAutomationDeps = {
   createClient?: (apiKey: string) => OpenAIResponsesClient
@@ -89,6 +90,15 @@ function toManual(op: AutomationOp, reason: string): AutomationOp {
     waitValue: null,
     clickX: null,
     clickY: null,
+    clickWindowX: null,
+    clickWindowY: null,
+    windowWidth: null,
+    windowHeight: null,
+    clickButton: null,
+    clickCount: null,
+    clickModifiers: null,
+    scrollAxis: null,
+    scrollDelta: null,
     confidence: Math.min(op.confidence, 0.4)
   }
 }
@@ -258,8 +268,11 @@ export function validateAndGroundScript(
   const withAddresses = preferAddressNavigation(withInferred, workflow, warnings)
   const withIntent = applyEditorIntentToOps(withAddresses, workflow, polished, warnings)
   const withInjected = injectClickOpsFromEvidence(withIntent, workflow, polished, warnings)
+  const withScroll = injectScrollOpsFromEvidence(withInjected, workflow, polished, warnings)
+  const withTyped = injectTypeTextOpsFromEvidence(withScroll, workflow, polished, warnings)
+  const withKeys = injectKeystrokeOpsFromEvidence(withTyped, workflow, polished, warnings)
   // After click injection — Drive "New → Sheets" coords are flaky; prefer create URL.
-  const withCreateSheet = rewriteCreateSheetClicks(withInjected, workflow, polished, warnings)
+  const withCreateSheet = rewriteCreateSheetClicks(withKeys, workflow, polished, warnings)
   // Capture often misses the Sheets menu click and typed rename — recover from polished evidence.
   const withEvidence = ensureCreateRenameFromEvidence(
     withCreateSheet,
@@ -845,6 +858,15 @@ function baseFromOp(op: AutomationOp, patch: Partial<AutomationOp>): AutomationO
     prompt: null,
     clickX: null,
     clickY: null,
+    clickWindowX: null,
+    clickWindowY: null,
+    windowWidth: null,
+    windowHeight: null,
+    clickButton: null,
+    clickCount: null,
+    clickModifiers: null,
+    scrollAxis: null,
+    scrollDelta: null,
     ...patch
   }
 }
@@ -1434,10 +1456,20 @@ export function injectClickOpsFromEvidence(
   const coveredXy = new Set<string>()
   const coveredEvents = new Set<string>()
   for (const op of ops) {
-    if (op.op !== 'click_at' && op.op !== 'activate_element') continue
-    for (const id of op.evidenceEventIds) coveredEvents.add(id)
-    if (op.clickX != null && op.clickY != null) {
-      coveredXy.add(`${op.clickX},${op.clickY}`)
+    if (op.op === 'click_at') {
+      for (const id of op.evidenceEventIds) coveredEvents.add(id)
+      if (op.clickX != null && op.clickY != null) {
+        coveredXy.add(`${op.clickX},${op.clickY}`)
+      }
+      continue
+    }
+    // Strong activate_element (actionable + labeled) covers the click.
+    // Weak AXGroup presses do not — still inject click_at.
+    if (op.op === 'activate_element' && isActionableAxTarget(op.elementRole, op.elementLabel)) {
+      for (const id of op.evidenceEventIds) coveredEvents.add(id)
+      if (op.clickX != null && op.clickY != null) {
+        coveredXy.add(`${op.clickX},${op.clickY}`)
+      }
     }
   }
 
@@ -1466,8 +1498,7 @@ export function injectClickOpsFromEvidence(
       stepOrder,
       evidenceEventIds:
         action.sourceEventIds.length > 0 ? action.sourceEventIds : seed.evidenceEventIds,
-      clickX: action.clickX!,
-      clickY: action.clickY!,
+      ...clickFieldsFromAction(action),
       appName: action.appName ?? seed.appName,
       label: action.elementLabel
         ? `Click ${action.elementLabel}`
@@ -1493,7 +1524,49 @@ export function injectClickOpsFromEvidence(
   return orders.flatMap((order) => byStep.get(order) ?? [])
 }
 
-/** Prefer click_at when evidence has screen coordinates and activate_element is ungrounded. */
+function clickFieldsFromAction(a: PolishedAction): Partial<AutomationOp> {
+  return {
+    clickX: a.clickX ?? null,
+    clickY: a.clickY ?? null,
+    clickWindowX: a.clickWindowX ?? null,
+    clickWindowY: a.clickWindowY ?? null,
+    windowWidth: a.windowWidth ?? null,
+    windowHeight: a.windowHeight ?? null,
+    clickButton: a.clickButton ?? null,
+    clickCount: a.clickCount ?? null,
+    clickModifiers: a.clickModifiers
+      ? {
+          cmd: a.clickModifiers.cmd ?? null,
+          opt: a.clickModifiers.opt ?? null,
+          ctrl: a.clickModifiers.ctrl ?? null,
+          shift: a.clickModifiers.shift ?? null
+        }
+      : null
+  }
+}
+
+function evidenceActionForOp(
+  op: AutomationOp,
+  polished: PolishedSession,
+  byEvent: Map<string, PolishedAction>
+): PolishedAction | null {
+  for (const id of op.evidenceEventIds) {
+    const a = byEvent.get(id)
+    if (a?.clickX != null && a?.clickY != null) return a
+  }
+  for (const a of polished.actions) {
+    if (
+      a.clickX != null &&
+      a.clickY != null &&
+      a.sourceEventIds.some((id) => op.evidenceEventIds.includes(id))
+    ) {
+      return a
+    }
+  }
+  return null
+}
+
+/** Prefer click_at when evidence has screen coordinates and activate_element is weak/ungrounded. */
 export function preferClickAtWhenGrounded(
   ops: AutomationOp[],
   polished: PolishedSession,
@@ -1502,37 +1575,32 @@ export function preferClickAtWhenGrounded(
 ): AutomationOp[] {
   return ops.map((op) => {
     if (op.op !== 'manual' && op.op !== 'activate_element') return op
-    let x: number | null = null
-    let y: number | null = null
-    for (const id of op.evidenceEventIds) {
-      const a = byEvent.get(id)
-      if (a?.clickX != null && a?.clickY != null) {
-        x = a.clickX
-        y = a.clickY
-        break
+    const action = evidenceActionForOp(op, polished, byEvent)
+    if (!action || action.clickX == null || action.clickY == null) {
+      // Still attach coords onto activate_element for runner fallback when possible.
+      if (op.op === 'activate_element') {
+        const any = evidenceActionForOp(op, polished, byEvent)
+        if (any) return { ...op, ...clickFieldsFromAction(any) }
       }
+      return op
     }
-    if (x == null || y == null) {
-      for (const a of polished.actions) {
-        if (
-          a.clickX != null &&
-          a.clickY != null &&
-          a.sourceEventIds.some((id) => op.evidenceEventIds.includes(id))
-        ) {
-          x = a.clickX
-          y = a.clickY
-          break
-        }
-      }
+
+    const keepActivate =
+      op.op === 'activate_element' &&
+      isActionableAxTarget(op.elementRole ?? action.elementRole, op.elementLabel ?? action.elementLabel) &&
+      !!op.elementLabel &&
+      !isWeakOrAppNameLabel(op.elementLabel, action.appName)
+
+    if (keepActivate) {
+      // Attach coords so press failure can fall back to click_at.
+      return { ...op, ...clickFieldsFromAction(action) }
     }
-    if (x == null || y == null) return op
-    if (op.op === 'activate_element' && op.elementLabel) return op
-    warnings.push(`Using click_at (${x},${y}) for step ${op.stepOrder}`)
+
+    warnings.push(`Using click_at (${action.clickX},${action.clickY}) for step ${op.stepOrder}`)
     return {
       ...op,
       op: 'click_at',
-      clickX: x,
-      clickY: y,
+      ...clickFieldsFromAction(action),
       label: op.label ?? 'Click at recorded position',
       prompt: null,
       elementLabel: null,
@@ -1540,6 +1608,189 @@ export function preferClickAtWhenGrounded(
       elementPath: null
     }
   })
+}
+
+function isWeakOrAppNameLabel(label: string | null | undefined, appName?: string | null): boolean {
+  if (!label?.trim()) return true
+  const l = label.trim().toLowerCase()
+  if (appName && l === appName.trim().toLowerCase()) return true
+  if (/^(window|group|untitled|content|view|canvas)$/i.test(l)) return true
+  return false
+}
+
+/** Inject type_text for polished typedText not already covered by an op. */
+export function injectTypeTextOpsFromEvidence(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  const covered = new Set<string>()
+  for (const op of ops) {
+    if (op.op !== 'type_text') continue
+    for (const id of op.evidenceEventIds) covered.add(id)
+  }
+
+  const typed = polished.actions
+    .filter((a) => !!a.typedText?.trim())
+    .sort((a, b) => a.order - b.order)
+  if (!typed.length) return ops
+
+  const byStep = new Map<number, AutomationOp[]>()
+  for (const op of ops) {
+    const list = byStep.get(op.stepOrder) ?? []
+    list.push(op)
+    byStep.set(op.stepOrder, list)
+  }
+
+  let injected = 0
+  for (const action of typed) {
+    if (action.sourceEventIds.some((id) => covered.has(id))) continue
+    const stepOrder = resolveStepOrderForClick(action, workflow, polished)
+    const seed = (byStep.get(stepOrder) ?? [])[0] ?? ops[0]
+    if (!seed) continue
+    const typeOp = baseFromOp(seed, {
+      op: 'type_text',
+      stepOrder,
+      evidenceEventIds: action.sourceEventIds.length ? action.sourceEventIds : seed.evidenceEventIds,
+      literalText: action.typedText!.trim(),
+      appName: action.appName ?? seed.appName,
+      label: `Type “${action.typedText!.trim().slice(0, 40)}”`,
+      confidence: Math.min(seed.confidence, 0.8),
+      timeoutMs: 8000
+    })
+    const list = byStep.get(stepOrder) ?? []
+    list.push(typeOp)
+    byStep.set(stepOrder, list)
+    for (const id of action.sourceEventIds) covered.add(id)
+    injected += 1
+  }
+  if (injected) warnings.push(`Injected ${injected} type_text op(s) from recorded typing`)
+  const orders = [...byStep.keys()].sort((a, b) => a - b)
+  return orders.flatMap((order) => byStep.get(order) ?? [])
+}
+
+/** Inject keystroke for polished shortcut / bare-key actions not already covered. */
+export function injectKeystrokeOpsFromEvidence(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  const covered = new Set<string>()
+  for (const op of ops) {
+    if (op.op !== 'keystroke') continue
+    for (const id of op.evidenceEventIds) covered.add(id)
+  }
+
+  const shortcuts = polished.actions
+    .filter((a) => a.category === 'shortcut' && /^(Used shortcut |Pressed )/.test(a.text))
+    .sort((a, b) => a.order - b.order)
+  if (!shortcuts.length) return ops
+
+  const byStep = new Map<number, AutomationOp[]>()
+  for (const op of ops) {
+    const list = byStep.get(op.stepOrder) ?? []
+    list.push(op)
+    byStep.set(op.stepOrder, list)
+  }
+
+  let injected = 0
+  for (const action of shortcuts) {
+    if (action.sourceEventIds.some((id) => covered.has(id))) continue
+    const chord = chordFromShortcutAction(action)
+    if (!chord) continue
+    const stepOrder = resolveStepOrderForClick(action, workflow, polished)
+    const seed = (byStep.get(stepOrder) ?? [])[0] ?? ops[0]
+    if (!seed) continue
+    const ks = baseFromOp(seed, {
+      op: 'keystroke',
+      stepOrder,
+      evidenceEventIds: action.sourceEventIds.length ? action.sourceEventIds : seed.evidenceEventIds,
+      chord,
+      appName: action.appName ?? seed.appName,
+      label: `Press ${chord}`,
+      confidence: Math.min(seed.confidence, 0.8),
+      timeoutMs: 5000
+    })
+    const list = byStep.get(stepOrder) ?? []
+    list.push(ks)
+    byStep.set(stepOrder, list)
+    for (const id of action.sourceEventIds) covered.add(id)
+    injected += 1
+  }
+  if (injected) warnings.push(`Injected ${injected} keystroke op(s) from recorded keys`)
+  const orders = [...byStep.keys()].sort((a, b) => a - b)
+  return orders.flatMap((order) => byStep.get(order) ?? [])
+}
+
+function chordFromShortcutAction(a: PolishedAction): string | null {
+  const used = a.text.match(/^Used shortcut (.+)$/i)
+  if (used?.[1]) return used[1].trim()
+  const pressed = a.text.match(/^Pressed ([A-Za-z]+)(?:\s*×\d+)?$/i)
+  if (pressed?.[1]) return pressed[1].trim()
+  if (a.semanticOp === 'copy') return 'Cmd+C'
+  if (a.semanticOp === 'paste') return 'Cmd+V'
+  if (a.semanticOp === 'save') return 'Cmd+S'
+  if (a.semanticOp === 'submit') return 'Enter'
+  return null
+}
+
+/** Inject scroll ops from polished reveal actions ahead of following clicks. */
+export function injectScrollOpsFromEvidence(
+  ops: AutomationOp[],
+  workflow: ExtractedWorkflow,
+  polished: PolishedSession,
+  warnings: string[]
+): AutomationOp[] {
+  const covered = new Set<string>()
+  for (const op of ops) {
+    if (op.op !== 'scroll') continue
+    for (const id of op.evidenceEventIds) covered.add(id)
+  }
+
+  const scrolls = polished.actions
+    .filter((a) => a.l1Op === 'reveal' && a.scrollDelta != null)
+    .sort((a, b) => a.order - b.order)
+  if (!scrolls.length) return ops
+
+  const byStep = new Map<number, AutomationOp[]>()
+  for (const op of ops) {
+    const list = byStep.get(op.stepOrder) ?? []
+    list.push(op)
+    byStep.set(op.stepOrder, list)
+  }
+
+  let injected = 0
+  for (const action of scrolls) {
+    if (action.sourceEventIds.some((id) => covered.has(id))) continue
+    const stepOrder = resolveStepOrderForClick(action, workflow, polished)
+    const seed = (byStep.get(stepOrder) ?? [])[0] ?? ops[0]
+    if (!seed) continue
+    const scrollOp = baseFromOp(seed, {
+      op: 'scroll',
+      stepOrder,
+      evidenceEventIds: action.sourceEventIds.length ? action.sourceEventIds : seed.evidenceEventIds,
+      ...clickFieldsFromAction(action),
+      scrollAxis: action.scrollAxis ?? 'vertical',
+      scrollDelta: action.scrollDelta!,
+      appName: action.appName ?? seed.appName,
+      label: 'Scroll',
+      confidence: Math.min(seed.confidence, 0.75),
+      timeoutMs: 5000
+    })
+    const list = byStep.get(stepOrder) ?? []
+    // Place scroll before the first click_at in the step when present.
+    const clickIdx = list.findIndex((o) => o.op === 'click_at')
+    if (clickIdx >= 0) list.splice(clickIdx, 0, scrollOp)
+    else list.unshift(scrollOp)
+    byStep.set(stepOrder, list)
+    for (const id of action.sourceEventIds) covered.add(id)
+    injected += 1
+  }
+  if (injected) warnings.push(`Injected ${injected} scroll op(s) from recorded scrolling`)
+  const orders = [...byStep.keys()].sort((a, b) => a - b)
+  return orders.flatMap((order) => byStep.get(order) ?? [])
 }
 
 function toClipboardMap(
@@ -1828,7 +2079,16 @@ function prepareCompileInput(
         semanticOp: a.semanticOp ?? null,
         clickX: a.clickX ?? null,
         clickY: a.clickY ?? null,
+        clickWindowX: a.clickWindowX ?? null,
+        clickWindowY: a.clickWindowY ?? null,
+        windowWidth: a.windowWidth ?? null,
+        windowHeight: a.windowHeight ?? null,
         clickButton: a.clickButton ?? null,
+        clickCount: a.clickCount ?? null,
+        clickModifiers: a.clickModifiers ?? null,
+        scrollAxis: a.scrollAxis ?? null,
+        scrollDelta: a.scrollDelta ?? null,
+        l1Op: a.l1Op ?? null,
         clipboard: a.clipboard
           ? {
               contentType: a.clipboard.contentType,

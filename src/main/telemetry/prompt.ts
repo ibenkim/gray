@@ -10,17 +10,19 @@
  * Field legend: i=order c=nav|act|in|sub|sc|err|clip ty=action-type
  *   ids=evidence a=app d=document e=element r=role h=clipboardHost ct=clipType
  *   tx=typedText k=inputKind sb/sa=screenRefs w=waitMs tr=targetResolution
+ *   x/y=screen click wx/wy=window-relative click
  *   op=semanticOp inf=inferred v=verified; nt=narrationText mk=marker
  *   l1=l1Op (fill_field|transfer|reveal) cp=clipboardPairId
  *   vars k=key ex=exampleSanitized; addrs t=template p=params pol=policy nr=needsReview
  */
 export const WORKFLOW_INSTRUCTIONS = `Extract an executable L2 intent workflow from compact telemetry JSON.
 
-Schema: screens[], segs[].{i,kind,a,d,acts[]}, acts[].{i,c,ids,ty,t,a,d,e,r,h,ct,tx,k,sb,sa,w,tr,op,inf,v,nt,mk,l1,cp}, vars[], addrs[].
+Schema: screens[], segs[].{i,kind,a,d,acts[]}, acts[].{i,c,ids,ty,t,a,d,e,r,h,ct,tx,k,sb,sa,w,tr,x,y,wx,wy,op,inf,v,nt,mk,l1,cp}, vars[], addrs[].
 c codes: nav=navigation act=interaction in=input sub=submission sc=shortcut err=error clip=clipboard.
 ty codes: nav|act|type|click|copy|paste|sub|save|sc|err|clip. tr: ax|coords|none (omit means ax).
 k=inputKind (email|date|url|text|…). w=preceding wait ms. sb/sa reference screens[].id. elided=true means low-value acts were dropped.
 addrs[] are deterministic destinations already extracted — reference them by id in requires[].ref; do not invent URLs.
+x/y are recorded screen click coordinates; wx/wy are offsets inside the window. Prefer describing positional clicks via these fields when tr=coords.
 
 Intent verbs (REQUIRED on every step — pick exactly one):
   Locate | Read | Transform | Fill | Create | Decide | Verify | Commit | Wait
@@ -49,13 +51,13 @@ Rules:
 - Merge successive edits in the same field into one step. For search, when d ends with " - Google Search" (or Bing/DuckDuckGo), the query is the prefix of d — use that, not intermediate tx scraps.
 - If the session opens a browser New Tab before navigating, say so so replay does not reuse an old tab.
 - Never invent tx or clipboard contents. If clip has no usable text, say so in warnings.
-- Ambiguity: when tr=coords|none or inf=true, set needsClarification=true and provide alternatives[{interpretation,confidence}] (≤3) with the leading interpretation in action/objective. confidence≤0.6 when inf=true. Do not guess missing targets.
+- Ambiguity: when tr=coords|none or inf=true, set needsClarification=true and provide alternatives[{interpretation,confidence}] (≤3) with the leading interpretation in action/objective. confidence≤0.6 when inf=true. Do not invent labeled UI elements. When x/y (or wx/wy) exist, alternatives MUST describe a recorded click at those coordinates (and any following typed text / shortcut) — never claim that a generic AXGroup/container means "no inspection was performed".
 - Narration (nt/mk): decision_point/optional/skip_this/check_here → Decide/Verify steps or questions; conditionals become questions unless source=narration branch is justified.
 - Absolute position.strategy requires a question unless evidence clearly shows a fixed row/index.
 - outcome=completed only if some step has v=true; else partial/unknown.
 - Steps: verb-first summaries, concise, executable. Prefer addressing (requires.ref) over click-path navigation.`
 
-export const WORKFLOW_INSTRUCTIONS_VERSION = 7 as const
+export const WORKFLOW_INSTRUCTIONS_VERSION = 8 as const
 
 /** Pass 1 — assign intent verbs and coarse step boundaries. */
 export const CLASSIFY_INSTRUCTIONS = `Classify telemetry into L2 intent steps.

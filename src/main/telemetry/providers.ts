@@ -32,6 +32,7 @@ export type InteractionPartial = {
     | 'scroll'
     | 'text_input'
     | 'keyboard_shortcut'
+    | 'key_pressed'
     | 'field_completed'
     | 'selection_changed'
     | 'form_submitted'
