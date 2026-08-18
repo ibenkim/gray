@@ -187,12 +187,12 @@ export default function PermissionsStep({
                 )}
                 <div className="onb-block-actions">
                   <button
-                    className="onb-btn-primary"
+                    className="btn btn-primary btn-md"
                     onClick={() => window.ghostBridge?.openPermissionSettings?.(perm.id)}
                   >
                     Open System Settings
                   </button>
-                  <button className="onb-btn-secondary" onClick={() => checkAgain(perm.id)}>
+                  <button className="btn btn-secondary btn-md" onClick={() => checkAgain(perm.id)}>
                     Check again
                   </button>
                   {perm.id === 'screen' && (
@@ -211,7 +211,7 @@ export default function PermissionsStep({
               <>
                 <p className="onb-block-why">{perm.why}</p>
                 <div className="onb-block-actions">
-                  <button className="onb-btn-primary" onClick={() => allow(perm.id)}>
+                  <button className="btn btn-primary btn-md" onClick={() => allow(perm.id)}>
                     {perm.allow}
                   </button>
                   {perm.optional ? (
@@ -314,7 +314,7 @@ function CompleteCard({
           Done
         </button>
         <span className="onb-footer-spacer" />
-        <button className="onb-btn-primary" onClick={onRecord}>
+        <button className="btn btn-primary btn-md" onClick={onRecord}>
           Record your first workflow
         </button>
       </div>
@@ -327,7 +327,7 @@ function CheckGlyph() {
     <svg className="onb-check" width="12" height="9" viewBox="0 0 12 9" fill="none">
       <path
         d="M1 4.5 4.5 8 11 1"
-        stroke="var(--purple-70)"
+        stroke="var(--gray-color-ink)"
         strokeWidth="1.6"
         strokeLinecap="round"
         strokeLinejoin="round"

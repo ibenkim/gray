@@ -201,7 +201,7 @@ export default function WorkflowDetail({
         </div>
         <div className="ws-detail-actions" ref={menuRef}>
           <button
-            className="btn-small-outline"
+            className="btn btn-secondary"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={requestRun}
           >
@@ -209,7 +209,7 @@ export default function WorkflowDetail({
           </button>
           {onShareToTeam && (
             <button
-              className="btn-small-outline"
+              className="btn btn-secondary"
               disabled={workflow.scope === 'team'}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => {
@@ -388,11 +388,11 @@ export default function WorkflowDetail({
               can’t be undone.
             </div>
             <div className="delete-dialog-actions">
-              <button className="btn-small-outline" onClick={() => setDeleteOpen(false)}>
+              <button className="btn btn-secondary" onClick={() => setDeleteOpen(false)}>
                 Cancel
               </button>
               <button
-                className="btn-delete"
+                className="btn btn-danger"
                 onClick={() => {
                   setDeleteOpen(false)
                   onDelete()

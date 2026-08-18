@@ -91,7 +91,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
         </div>
       )}
 
-      <div className="onb-terms">
+      <div className="onb-terms type-meta">
         <button
           className="onb-terms-link"
           onClick={() => window.ghostBridge?.openExternalUrl?.(TERMS_URL)}

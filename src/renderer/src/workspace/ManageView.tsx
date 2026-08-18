@@ -133,7 +133,7 @@ export default function ManageView({
             ) : (
               <>
                 <button
-                  className="btn-small-outline"
+                  className="btn btn-secondary"
                   onClick={() => {
                     setInviting(true)
                     setEmailError(false)
@@ -142,7 +142,7 @@ export default function ManageView({
                   Invite to Team
                 </button>
                 <button
-                  className="btn-small-outline"
+                  className="btn btn-secondary"
                   onClick={() => {
                     setNameDraft(team.name)
                     setRenaming(true)
@@ -200,11 +200,11 @@ export default function ManageView({
               scheduled team runs stop today.
             </div>
             <div className="delete-dialog-actions">
-              <button className="btn-small-outline" onClick={() => setRemoveTarget(null)}>
+              <button className="btn btn-secondary" onClick={() => setRemoveTarget(null)}>
                 Cancel
               </button>
               <button
-                className="btn-delete"
+                className="btn btn-danger"
                 onClick={() => {
                   const id = removeTarget.id
                   setRemoveTarget(null)

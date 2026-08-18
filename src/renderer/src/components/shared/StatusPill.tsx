@@ -1,16 +1,26 @@
 import type { ReactNode } from 'react'
+import { BrandMark, PlayPauseControl } from './Marks'
 
-export type StatusPillTone = 'default' | 'amber' | 'rose' | 'teal' | 'apricot'
+export type StatusPillKind =
+  | 'idle'
+  | 'running'
+  | 'interpreting'
+  | 'error'
+  | 'reading'
+  | 'paused'
+  | 'editing'
+  | 'thinking'
+  | 'saved'
+  | 'permission'
 
 type StatusPillProps = {
-  /** Leading status copy (e.g. "Hello", "Learning...", "Workflow saved ·"). */
-  label: ReactNode
-  tone?: StatusPillTone
-  /** Optional trailing action (saved → "Open in Library"). */
+  kind?: StatusPillKind
+  label?: ReactNode
+  time?: string
   actionLabel?: string
   onAction?: () => void
-  /** Show the leading status dot (saved / hold tones). */
-  showDot?: boolean
+  paused?: boolean
+  onTogglePause?: () => void
   className?: string
   children?: ReactNode
   onClick?: () => void
@@ -18,46 +28,51 @@ type StatusPillProps = {
   onContextMenu?: (e: React.MouseEvent) => void
 }
 
+function markForKind(kind: StatusPillKind): 'fluid' | 'interpreting' | 'error' | 'muted' | null {
+  if (kind === 'idle') return 'fluid'
+  if (kind === 'running') return 'fluid'
+  if (kind === 'interpreting') return 'interpreting'
+  if (kind === 'error') return 'error'
+  return null
+}
+
 /**
- * Formalized pill status surface — idle mark / Learning / Thinking / running /
- * paused / saved. Tone props carry amber/rose/teal/apricot coloring.
+ * Compact paper status pill — 24px, 0.5px gray-2 hairline, brand mark / run states.
  */
 export default function StatusPill({
+  kind = 'idle',
   label,
-  tone = 'default',
+  time,
   actionLabel,
   onAction,
-  showDot,
+  paused,
+  onTogglePause,
   className = '',
   children,
   onClick,
   onMouseDown,
   onContextMenu
 }: StatusPillProps) {
-  const toneClass =
-    tone === 'amber'
-      ? 'pill-amber'
-      : tone === 'rose'
-        ? 'pill-rose'
-        : tone === 'teal'
-          ? 'pill-teal'
-          : tone === 'apricot'
-            ? 'pill-apricot'
-            : ''
-
-  // Default / teal / apricot read as translucent glass with white text;
-  // amber / rose are the white bordered active pill.
-  const isGlass = tone === 'default' || tone === 'teal' || tone === 'apricot'
+  const mark = markForKind(kind)
+  const showControl = kind === 'running' || kind === 'reading' || kind === 'paused'
+  const idle = kind === 'idle'
 
   return (
     <div
-      className={`pill ${isGlass ? 'pill-glass glass-stroke glass-stroke-pill' : 'pill-active'} ${toneClass} ${className}`}
+      className={`pill ${idle ? 'pill-idle' : 'pill-active'} ${className}`}
       onClick={onClick}
       onMouseDown={onMouseDown}
       onContextMenu={onContextMenu}
+      onDragStart={(e) => e.preventDefault()}
+      draggable={false}
     >
-      {showDot && <span className={`status-dot status-dot-${tone}`} />}
-      <span className={`pill-text ${isGlass ? 'pill-text-light' : ''}`}>{label}</span>
+      {showControl && onTogglePause && (
+        <PlayPauseControl paused={!!paused} onToggle={onTogglePause} />
+      )}
+      {kind === 'reading' && <span className="pill-reading-dot" />}
+      {kind === 'permission' && <span className="status-dot" />}
+      {mark && <BrandMark kind={mark} />}
+      {label && <span className="pill-text">{label}</span>}
       {actionLabel && (
         <button
           className="pill-action"
@@ -70,6 +85,7 @@ export default function StatusPill({
           {actionLabel}
         </button>
       )}
+      {time && <span className="pill-time">{time}</span>}
       {children}
     </div>
   )

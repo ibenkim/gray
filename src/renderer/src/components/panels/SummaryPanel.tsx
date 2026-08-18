@@ -3,6 +3,7 @@ import { useWorkflow } from '../../state/WorkflowContext'
 import type { RunStep, StepApp } from '../../state/types'
 import AppChip, { AppChipBlank, isAppSlotLabel, withAppSlotBlank } from '../shared/AppChip'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
+import RailCell, { type SummaryRailState } from '../shared/RailCell'
 
 /**
  * 07 — summary recap. Meta: "Done · 6 of 6 · 1:12" / "Stopped · 3 of 6 · 1:12".
@@ -86,10 +87,27 @@ export default function SummaryPanel() {
       </div>
 
       <div className="run-steps scroll">
-        {runSteps.map((step) => (
+        {runSteps.map((step, i) => {
+          const heldIndex = runSteps.findIndex(
+            (s) => s.status === 'active' || s.status === 'question' || s.status === 'error'
+          )
+          const summaryState =
+            heldIndex >= 0
+              ? i < heldIndex
+                ? 'complete'
+                : i === heldIndex
+                  ? 'stopped'
+                  : 'unrun'
+              : step.status === 'pending'
+                ? 'unrun'
+                : 'complete'
+          return (
           <SummaryStepRow
             key={step.id}
             step={step}
+            summaryState={summaryState}
+            leading={i > 0 && summaryState !== 'stopped'}
+            trailing={i < runSteps.length - 1 && summaryState !== 'stopped'}
             expanded={expandedId === step.id}
             onToggle={() => setExpandedId(expandedId === step.id ? null : step.id)}
             highlighted={
@@ -108,12 +126,13 @@ export default function SummaryPanel() {
             onRemoveApp={() => removeApp(step)}
             onPickSlotApp={(app) => pickSlotApp(step, app)}
           />
-        ))}
+          )
+        })}
       </div>
 
-      <div className="ledger-footer">
+      <div className="ledger-footer window-actions">
         <button
-          className="btn-text"
+          className="btn btn-quiet"
           onClick={() =>
             window.ghostBridge?.openWorkspace?.(
               lastRunId
@@ -124,10 +143,10 @@ export default function SummaryPanel() {
         >
           View log
         </button>
-        <div className="footer-actions">
+        <div className="window-actions-right">
           {isStopped && (
             <button
-              className="btn btn-outline"
+              className="btn btn-secondary"
               onClick={runRemaining}
               onMouseEnter={() => setPreviewRemaining(true)}
               onMouseLeave={() => setPreviewRemaining(false)}
@@ -135,10 +154,10 @@ export default function SummaryPanel() {
               Run remaining
             </button>
           )}
-          <button className="btn btn-outline" onClick={runAgain}>
+          <button className="btn btn-secondary" onClick={runAgain}>
             Run again
           </button>
-          <button className="btn btn-outline btn-done" onClick={finishSummary}>
+          <button className="btn btn-primary" onClick={finishSummary}>
             Done
           </button>
         </div>
@@ -149,6 +168,9 @@ export default function SummaryPanel() {
 
 function SummaryStepRow({
   step,
+  summaryState,
+  leading,
+  trailing,
   expanded,
   onToggle,
   highlighted,
@@ -162,6 +184,9 @@ function SummaryStepRow({
   onPickSlotApp
 }: {
   step: RunStep
+  summaryState: SummaryRailState
+  leading: boolean
+  trailing: boolean
   expanded: boolean
   onToggle: () => void
   highlighted: boolean
@@ -197,7 +222,13 @@ function SummaryStepRow({
           onToggle()
         }}
       >
-        <span className="step-num">{step.index}</span>
+        <RailCell
+          kind="summary"
+          anchor={isVoice ? 'voice' : 'standard'}
+          state={summaryState}
+          leading={leading}
+          trailing={trailing}
+        />
         <div className="run-step-body">
           {editing ? (
             <input

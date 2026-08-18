@@ -97,9 +97,12 @@ declare global {
         mode: 'pill' | 'glass' | 'panel',
         opts?: { durationMs?: number; pillDrive?: boolean; center?: boolean }
       ) => Promise<'above' | 'below'>
+      hideForRestore: () => Promise<boolean>
+      restorePill: () => Promise<{ x: number; y: number; width: number; height: number } | null>
       openWorkspace: (focus?: string | WorkspaceFocus) => Promise<void>
       closeWindow: () => Promise<void>
       minimizeWindow: () => Promise<void>
+      setIgnoreMouseEvents: (ignore: boolean, opts?: { forward?: boolean }) => void
       showContextMenu: () => Promise<void>
       setPillAppState: (state: string) => Promise<void>
       setEditorScrim: (visible: boolean) => Promise<void>

@@ -11,12 +11,10 @@ type ToastProps = {
 }
 
 /**
- * Shared toast — a white card that slides in above the pill. First consumer is
- * the permission-revoked notice (3.2); success / error / info variants exist
- * for future callers. The saved confirmation stays a status-pill, not a toast.
+ * Shared toast — a paper card that slides in above the pill. First consumer is
+ * the permission-revoked notice. The saved confirmation stays a status-pill.
  */
 export default function Toast({
-  tone = 'info',
   title,
   body,
   actionLabel,
@@ -25,21 +23,18 @@ export default function Toast({
   onDismiss
 }: ToastProps) {
   return (
-    <div className="toast glass-stroke">
-      <div className="toast-head">
-        <span className={`status-dot status-dot-${tone}`} />
-        <span className="toast-title">{title}</span>
-      </div>
-      {body && <div className="toast-body">{body}</div>}
+    <div className="toast">
+      <div className="toast-title type-label">{title}</div>
+      {body && <div className="toast-body type-meta">{body}</div>}
       {(actionLabel || onDismiss) && (
         <div className="toast-actions">
           {actionLabel && (
-            <button className="toast-btn" onClick={onAction}>
+            <button className="btn btn-primary" onClick={onAction}>
               {actionLabel}
             </button>
           )}
           {onDismiss && (
-            <button className="toast-dismiss" onClick={onDismiss}>
+            <button className="btn btn-quiet" onClick={onDismiss}>
               {dismissLabel}
             </button>
           )}

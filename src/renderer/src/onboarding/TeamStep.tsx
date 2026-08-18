@@ -109,13 +109,13 @@ export default function TeamStep({
       <div className="onb-gap-sm" />
 
       <div className="onb-footer">
-        <button className="onb-link" onClick={onBack}>
+        <button className="btn btn-quiet" onClick={onBack}>
           Back
         </button>
         <span className="onb-footer-spacer">
           {session && <span className="onb-footer-account">{session.email}</span>}
         </span>
-        <button className="onb-btn-primary" disabled={busy} onClick={onContinue}>
+        <button className="btn btn-primary btn-md" disabled={busy} onClick={onContinue}>
           Continue
         </button>
       </div>

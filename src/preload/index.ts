@@ -111,6 +111,10 @@ const ghostBridge = {
       pillDrive: opts?.pillDrive,
       center: opts?.center
     }),
+  /** Hide + park off-screen before idle CSS so the 266 frame cannot paint. */
+  hideForRestore: () => ipcRenderer.invoke('window:hideForRestore'),
+  /** Restore the window to the pill rect saved before the last close. */
+  restorePill: () => ipcRenderer.invoke('window:restorePill'),
   /** Open (or focus) the workspace window; optional deep-link to a workflow / run. */
   openWorkspace: (focus?: string | WorkspaceFocus) =>
     ipcRenderer.invoke('workspace:open', focus),
@@ -118,6 +122,9 @@ const ghostBridge = {
   closeWindow: () => ipcRenderer.invoke('window:close'),
   /** Minimize the calling window. */
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  /** Click-through empty glass chrome while idle in an oversized frame. */
+  setIgnoreMouseEvents: (ignore: boolean, opts?: { forward?: boolean }) =>
+    ipcRenderer.send('window:setIgnoreMouseEvents', ignore, opts),
   /** Show the native right-click context menu for the pill. */
   showContextMenu: () => ipcRenderer.invoke('pill:contextMenu'),
   /** Keep main's context-menu variant in sync with AppState. */

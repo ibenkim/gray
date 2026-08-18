@@ -116,7 +116,7 @@ export default function WorkflowsHome({
               yuh learns the steps — then does it for you, on schedule.
             </div>
             <button
-              className="ws-empty-cta"
+              className="btn btn-primary btn-md"
               onClick={() => {
                 window.ghostBridge?.minimizeWindow?.()
                 window.ghostBridge?.openRecordPanel?.()
@@ -160,7 +160,7 @@ export default function WorkflowsHome({
         </div>
         {!isShared && (
           <button
-            className="btn-small-outline"
+            className="btn btn-secondary"
             onClick={() => window.ghostBridge?.openRecordPanel?.()}
           >
             + Record a workflow
@@ -168,7 +168,8 @@ export default function WorkflowsHome({
         )}
       </div>
 
-      <div className="ws-rows">
+      <div className="ws-home-body scroll">
+        <div className="ws-rows">
         {workflows.map((w) => {
           const schedule = w.trigger.cadence ? formatSchedule(w.trigger.cadence) : null
           const sharedByLabel = w.sharedByName ? `shared by ${w.sharedByName}` : null
@@ -291,41 +292,42 @@ export default function WorkflowsHome({
             </div>
           )
         })}
-      </div>
+        </div>
 
-      {!isShared && suggestion && (
-        <div className="suggested-block">
-          <div className="suggested-label">Suggested</div>
-          <div className="suggested-card">
-            <div className="suggested-title">
-              {suggestion.title}
-              <span className="ws-row-schedule">  ·  {suggestion.schedule}</span>
-            </div>
-            <div className="suggested-desc">
-              {suggestion.descriptionBefore} <AppChip app={suggestion.app} />
-              {suggestion.descriptionAfter}
-            </div>
-            <div className="suggested-noticed">{suggestion.noticedLine}</div>
-            <div className="suggested-actions">
-              <button
-                className="btn-small-outline"
-                onClick={() => window.ghostBridge?.openEditor?.()}
-              >
-                Set it up for me
-              </button>
-              <button
-                className="btn-small-outline"
-                onClick={() => window.ghostBridge?.openRecordPanel?.()}
-              >
-                Record it myself
-              </button>
-              <button className="btn-text btn-text-sm" onClick={onDiscardSuggestion}>
-                Discard
-              </button>
+        {!isShared && suggestion && (
+          <div className="suggested-block">
+            <div className="suggested-label">Suggested</div>
+            <div className="suggested-card">
+              <div className="suggested-title">
+                {suggestion.title}
+                <span className="ws-row-schedule">  ·  {suggestion.schedule}</span>
+              </div>
+              <div className="suggested-desc">
+                {suggestion.descriptionBefore} <AppChip app={suggestion.app} />
+                {suggestion.descriptionAfter}
+              </div>
+              <div className="suggested-noticed">{suggestion.noticedLine}</div>
+              <div className="suggested-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => window.ghostBridge?.openEditor?.()}
+                >
+                  Set it up for me
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => window.ghostBridge?.openRecordPanel?.()}
+                >
+                  Record it myself
+                </button>
+                <button className="btn btn-quiet" onClick={onDiscardSuggestion}>
+                  Discard
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {deleteTarget && (
         <div
@@ -345,11 +347,11 @@ export default function WorkflowsHome({
               can’t be undone.
             </div>
             <div className="delete-dialog-actions">
-              <button className="btn-small-outline" onClick={() => setDeleteId(null)}>
+              <button className="btn btn-secondary" onClick={() => setDeleteId(null)}>
                 Cancel
               </button>
               <button
-                className="btn-delete"
+                className="btn btn-danger"
                 onClick={() => {
                   setDeleteId(null)
                   onDelete(deleteTarget.id)

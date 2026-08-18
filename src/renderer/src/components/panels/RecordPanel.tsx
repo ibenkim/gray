@@ -4,6 +4,7 @@ import MicIcon from '../ui/MicIcon'
 import Toggle from '../ui/Toggle'
 import type { RecordMode } from '../../state/types'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
+import { RecordDot } from '../shared/Marks'
 
 /** 02 — "Record a workflow" glass panel; Start Recording lives here. */
 export default function RecordPanel() {
@@ -27,7 +28,7 @@ export default function RecordPanel() {
   ]
 
   return (
-    <div className="glass-card record-panel glass-stroke glass-stroke-panel">
+    <div className="window-surface record-panel">
       <div className="record-header" onMouseDown={onDragMouseDown}>
         Record a workflow
       </div>
@@ -93,11 +94,12 @@ export default function RecordPanel() {
       </div>
 
       <button
-        className="start-recording-btn"
+        className="btn-record"
         disabled={!screenGranted}
         onClick={() => (screenGranted ? startRecording() : openScreenRecovery())}
       >
-        Start Recording
+        <RecordDot />
+        Record
       </button>
       {screenGranted ? null : (
         <button className="record-hint record-hint-warn" onClick={openScreenRecovery}>

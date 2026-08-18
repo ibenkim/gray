@@ -144,7 +144,7 @@ export function RunContractPanel({
         </dd>
       </dl>
       <div className="run-contract-actions">
-        <button className="btn-text" type="button" onClick={onCancel}>
+        <button className="btn btn-quiet" type="button" onClick={onCancel}>
           Cancel
         </button>
         <button className="btn btn-primary" type="button" onClick={onConfirm}>

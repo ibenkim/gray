@@ -5,6 +5,7 @@ import AppChip from '../shared/AppChip'
 import RunCard from '../shared/RunCard'
 import { PauseButton, ChevronDown } from '../GhostPill'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
+import RailCell from '../shared/RailCell'
 
 /**
  * 6.2 — running expanded: flat single-workflow ledger mirroring the editor.
@@ -84,11 +85,13 @@ export default function RunningPanel() {
             </div>
           </div>
         )}
-        {runSteps.map((step) => (
+        {runSteps.map((step, i) => (
           <RunStepRow
             key={step.id}
             step={step}
             runPaused={runPaused}
+            leading={i > 0}
+            trailing={i < runSteps.length - 1}
             onSkip={() => skipStep(step.id)}
             onAnswer={(optionId, custom) => answerQuestion(step.id, optionId, custom)}
             onResolveError={(action) => resolveError(step.id, action)}
@@ -96,11 +99,11 @@ export default function RunningPanel() {
         ))}
       </div>
 
-      <div className="ledger-footer">
-        <button className="cancel-link" onClick={stopRunning}>
+      <div className="ledger-footer window-actions">
+        <button className="btn btn-danger" onClick={stopRunning}>
           Stop
         </button>
-        <button className="btn-small-outline" onClick={editFromRunning}>
+        <button className="btn btn-secondary" onClick={editFromRunning}>
           Edit
         </button>
       </div>
@@ -111,51 +114,59 @@ export default function RunningPanel() {
 function RunStepRow({
   step,
   runPaused,
+  leading,
+  trailing,
   onSkip,
   onAnswer,
   onResolveError
 }: {
   step: RunStep
   runPaused: boolean
+  leading: boolean
+  trailing: boolean
   onSkip: () => void
   onAnswer: (optionId: string, custom?: string) => void
   onResolveError: (action: 'retry' | 'skip' | 'takeover') => void
 }) {
   const [hovered, setHovered] = useState(false)
 
-  // Amber question card — run holds here until answered.
   if (step.status === 'question' && step.question && step.question.answerId === null) {
     return (
-      <RunCard
-        variant="question"
-        title={`${step.index} · ${step.label}`}
-        message={step.question.prompt}
-        chips={step.question.options}
-        footer="Run is holding — answering resumes automatically"
-        onSelect={onAnswer}
-      />
+      <div className="step-rail-row">
+        <RailCell anchor="decision" state="forming" leading={leading} trailing={trailing} />
+        <RunCard
+          variant="question"
+          title={`${step.index} · ${step.label}`}
+          message={step.question.prompt}
+          chips={step.question.options}
+          footer="Run is holding — answering resumes automatically"
+          onSelect={onAnswer}
+        />
+      </div>
     )
   }
 
-  // Rose error card — Retry / Skip step / Take over.
   if (step.status === 'error' && step.error && !step.error.takenOver) {
     return (
-      <RunCard
-        variant="error"
-        title={`${step.index} · ${step.label}`}
-        message={step.error.message}
-        chips={[
-          { id: 'retry', label: 'Retry' },
-          { id: 'skip', label: 'Skip step' },
-          { id: 'takeover', label: 'Take over' }
-        ]}
-        footer="Held for 10 min — then the run stops and is logged"
-        onSelect={(id) => {
-          if (id === 'retry') onResolveError('retry')
-          else if (id === 'skip') onResolveError('skip')
-          else onResolveError('takeover')
-        }}
-      />
+      <div className="step-rail-row">
+        <RailCell anchor="decision" state="forming" leading={leading} trailing={trailing} />
+        <RunCard
+          variant="error"
+          title={`${step.index} · ${step.label}`}
+          message={step.error.message}
+          chips={[
+            { id: 'retry', label: 'Retry' },
+            { id: 'skip', label: 'Skip step' },
+            { id: 'takeover', label: 'Take over' }
+          ]}
+          footer="Held for 10 min — then the run stops and is logged"
+          onSelect={(id) => {
+            if (id === 'retry') onResolveError('retry')
+            else if (id === 'skip') onResolveError('skip')
+            else onResolveError('takeover')
+          }}
+        />
+      </div>
     )
   }
 
@@ -164,6 +175,8 @@ function RunStepRow({
   const isSkipped = step.status === 'skipped'
   const notDone = !isDone && !isSkipped
   const showSkip = notDone && hovered
+  const railState = isCurrent ? 'current' : isDone || isSkipped ? 'muted' : 'formed'
+  const hasVoice = isDone && !!step.voiceNote
 
   return (
     <div
@@ -175,7 +188,12 @@ function RunStepRow({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span className="step-num">{step.index}</span>
+      <RailCell
+        anchor={hasVoice ? 'voice' : 'running'}
+        state={railState}
+        leading={leading}
+        trailing={trailing}
+      />
       <div className="run-step-body">
         <span className={`run-step-label ${isCurrent ? 'run-step-label-current' : ''}`}>
           {isDone ? step.doneLabel : step.label}
@@ -186,7 +204,6 @@ function RunStepRow({
           <span className="run-voice-quote">{stripQuotes(step.voiceNote.text)}</span>
         )}
       </div>
-      {isDone && <CheckMark />}
       {isSkipped && <span className="run-skipped-mark">Skipped</span>}
       {showSkip && (
         <button className="run-skip" onClick={onSkip}>
@@ -199,20 +216,4 @@ function RunStepRow({
 
 function stripQuotes(text: string): string {
   return text.replace(/[“”"]/g, '').replace(/^\.{3}|^…/, '')
-}
-
-function CheckMark() {
-  return (
-    <svg
-      className="run-check"
-      width="11"
-      height="8"
-      viewBox="0 0 11 8"
-      fill="none"
-      stroke="rgba(51,25,217,0.7)"
-      strokeWidth="1.4"
-    >
-      <path d="M1 4 4 7 10 1" />
-    </svg>
-  )
 }

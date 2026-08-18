@@ -3,7 +3,7 @@
  * Window hugs the card via onboarding:setSize so the CSS shadow can paint. */
 
 :root {
-  --onb-bar: rgba(62, 43, 73, 0.06);
+  --onb-bar: rgba(20, 20, 15, 0.06);
 }
 
 .onb-root {
@@ -22,9 +22,10 @@
 
 .onb-card {
   width: 420px;
-  background: #fff;
+  background: var(--gray-color-surface);
+  border: 1px solid var(--gray-color-gray-1);
   border-radius: 20px;
-  box-shadow: 0 4px 30px rgba(62, 43, 73, 0.2);
+  box-shadow: 0 4px 30px rgba(67, 67, 67, 0.2);
   padding: 28px 32px 24px;
   display: flex;
   flex-direction: column;
@@ -48,14 +49,18 @@
 }
 
 .onb-eyebrow {
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 16px;
   font-weight: 500;
-  color: var(--text-40);
-  letter-spacing: 0.02em;
+  color: var(--gray-color-gray-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 .onb-title {
   font-size: 18px;
+  line-height: 24px;
   font-weight: 600;
+  letter-spacing: -0.18px;
   color: var(--text);
 }
 .onb-sub {
@@ -70,44 +75,13 @@
   height: 6px;
 }
 
-/* ── Buttons (Figma onboarding component shelf) ── */
-.onb-btn-primary {
-  background: var(--text);
-  color: var(--white-text);
-  border: none;
-  border-radius: 10px;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 9px 16px;
-  white-space: nowrap;
-}
-.onb-btn-primary:hover {
-  filter: brightness(1.2);
-}
-.onb-btn-primary:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-.onb-btn-secondary {
-  background: #fff;
-  border: 1px solid var(--text-40);
-  border-radius: 10px;
-  color: var(--text-70);
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 8px 14px;
-}
-.onb-btn-secondary:hover {
-  background: rgba(0, 0, 0, 0.03);
-}
+/* ── Buttons live in globals.css (.btn / .btn-md) ── */
 
 .onb-link {
   background: none;
   border: none;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -124,17 +98,23 @@
   justify-content: center;
   gap: 8px;
   width: 100%;
-  border: 1px solid var(--text-40);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--text-70);
+  height: 38px;
+  border: 1px solid var(--gray-color-ink);
+  border-radius: var(--gray-radius-control);
+  background: var(--gray-color-surface);
+  color: var(--gray-color-ink);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 18px;
   font-weight: 500;
-  padding: 10px 0;
+  padding: 0 16px;
 }
 .onb-google-btn:hover {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--gray-color-gray-1);
+}
+.onb-google-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--gray-color-ink);
 }
 .onb-google-btn:disabled {
   opacity: 0.6;
@@ -154,7 +134,7 @@
   background: none;
   border: none;
   font-family: inherit;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-40);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -164,7 +144,7 @@
   color: var(--text-70);
 }
 .onb-error {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--rose);
   padding-top: 2px;
 }
@@ -179,7 +159,7 @@
   color: var(--text);
 }
 .onb-inbox-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
   margin-top: 3px;
   line-height: 16px;
@@ -194,14 +174,15 @@
   font-family: inherit;
   font-size: 12px;
   color: var(--text);
-  background: #fff;
+  background: var(--gray-color-surface);
   outline: none;
 }
 .onb-input::placeholder {
   color: var(--text-40);
 }
 .onb-input:focus {
-  border-color: var(--text-70);
+  border-color: var(--gray-color-ink);
+  box-shadow: inset 0 0 0 1px var(--gray-color-ink);
 }
 .onb-input-error,
 .onb-input-error:focus {
@@ -236,7 +217,7 @@
   color: var(--text);
 }
 .onb-option-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
 }
 .onb-radio {
@@ -248,9 +229,9 @@
   box-sizing: border-box;
 }
 .onb-radio-on {
-  border-color: var(--purple);
-  background: var(--purple);
-  box-shadow: inset 0 0 0 2.5px #fff;
+  border-color: var(--gray-color-ink);
+  background: var(--gray-color-ink);
+  box-shadow: inset 0 0 0 2.5px var(--gray-color-surface);
 }
 .onb-join-field {
   display: flex;
@@ -275,7 +256,7 @@
   justify-content: center;
 }
 .onb-footer-account {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-40);
 }
 
@@ -286,7 +267,7 @@
 }
 .onb-counter {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
 }
 
@@ -299,7 +280,7 @@
   border-radius: 8px;
 }
 .onb-row-num {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
 }
 .onb-row-title {
@@ -324,7 +305,7 @@
   gap: 8px;
 }
 .onb-block-denied {
-  background: #fff;
+  background: var(--gray-color-surface);
   border: 1px solid var(--apricot);
   gap: 7px;
 }
@@ -334,7 +315,7 @@
   gap: 10px;
 }
 .onb-block-num {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
 }
 .onb-block-title {
@@ -343,16 +324,16 @@
   color: var(--text);
 }
 .onb-block-tag {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--apricot-text);
 }
 .onb-block-optional {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--icon-color);
   margin-left: auto;
 }
 .onb-block-why {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--icon-color);
 }
@@ -362,14 +343,14 @@
   gap: 10px;
 }
 .onb-block-hint {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-40);
 }
 .onb-skip {
   background: none;
   border: none;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--icon-color);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -381,8 +362,8 @@
 .onb-path-line {
   display: flex;
   gap: 8px;
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 12px;
+  line-height: 16px;
   color: var(--icon-color);
   padding-left: 21px;
 }
@@ -390,7 +371,7 @@
   color: var(--text-40);
 }
 .onb-still-off {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--apricot-text);
   padding-left: 21px;
 }
@@ -421,9 +402,9 @@
   bottom: calc(100% + 8px);
   left: 0;
   width: 300px;
-  background: #fff;
+  background: var(--gray-color-surface);
   border-radius: 12px;
-  box-shadow: 0 4px 30px rgba(62, 43, 73, 0.2);
+  box-shadow: 0 4px 30px rgba(67, 67, 67, 0.2);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -431,12 +412,12 @@
   z-index: 5;
 }
 .onb-why-line {
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 12px;
+  line-height: 16px;
   color: var(--text-70);
 }
 .onb-why-foot {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-40);
   padding-top: 2px;
 }

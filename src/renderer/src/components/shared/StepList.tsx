@@ -3,6 +3,7 @@ import type { EditorStep, StepApp } from '../../state/types'
 import AppChip, { AppChipBlank, isAppSlotLabel, withAppSlotBlank } from './AppChip'
 import MicIcon from '../ui/MicIcon'
 import { PencilIcon } from './TriggerSection'
+import RailCell from './RailCell'
 
 function renumber(steps: EditorStep[]): EditorStep[] {
   return steps.map((s, i) => ({ ...s, index: i + 1 }))
@@ -14,7 +15,13 @@ export function Transcript({ text }: { text: string }) {
   return (
     <>
       {parts.map((part, i) =>
-        ['Only', 'Skip', 'Never'].includes(part) ? <strong key={i}>{part}</strong> : part
+        ['Only', 'Skip', 'Never'].includes(part) ? (
+          <span className="transcript-op" key={i}>
+            {part}
+          </span>
+        ) : (
+          part
+        )
       )}
     </>
   )
@@ -171,12 +178,21 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
 
   return (
     <div className="step-list">
-      {steps.map((step) => {
-        // Amber question card, inline at its step number.
+      {steps.map((step, i) => {
+        const isFirst = i === 0
+        const isLast = i === steps.length - 1
+        const leading = !isFirst
+        const trailing = !isLast
+
         if (step.fix && !step.fix.collapsed) {
           return (
             <div className="fix-step-row" key={step.id}>
-              <span className="step-num fix-num">{step.index}</span>
+              <RailCell
+                anchor="decision"
+                state="forming"
+                leading={leading}
+                trailing={trailing}
+              />
               <div className="fix-step">
                 <div className="fix-step-title">
                   {step.intent && (
@@ -244,9 +260,18 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
 
         const lowConfidence =
           typeof step.confidence === 'number' && step.confidence < 0.6
+        const hasVoice = !!step.voiceNote
+        const railState = isForming ? 'forming' : isResolved ? 'current' : 'formed'
 
         return (
-          <div key={step.id}>
+          <div key={step.id} className="step-rail-row">
+            <RailCell
+              anchor={hasVoice ? 'voice' : 'standard'}
+              state={railState}
+              leading={leading}
+              trailing={trailing}
+            />
+            <div className="step-rail-body">
             <div
               className={`step ${isHovered && !isForming ? 'step-hovered' : ''} ${
                 isResolved ? 'step-flash' : ''
@@ -255,7 +280,6 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
               onMouseLeave={() => setHoveredId(null)}
               onDoubleClick={() => !isForming && beginEdit(step)}
             >
-              <span className="step-num">{step.index}</span>
               {isEditing ? (
                 <input
                   className="step-edit-input"
@@ -324,6 +348,7 @@ export default function StepList({ steps, onChange, initialEditStepId }: StepLis
                 </span>
               </div>
             )}
+            </div>
           </div>
         )
       })}

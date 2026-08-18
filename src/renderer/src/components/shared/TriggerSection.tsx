@@ -251,7 +251,7 @@ export default function TriggerSection({
 
           <div className="trigger-editor-footer">
             <button
-              className="cancel-link"
+              className="btn btn-quiet"
               onClick={() => {
                 // Workspace 1.6: Off + schedule retained. Editor: manual-only.
                 if (onTurnOff) onTurnOff()
@@ -262,7 +262,7 @@ export default function TriggerSection({
               Turn off trigger
             </button>
             <div className="footer-actions">
-              <button className="btn-text" onClick={() => setOpen(false)}>
+              <button className="btn btn-quiet" onClick={() => setOpen(false)}>
                 Cancel
               </button>
               <button

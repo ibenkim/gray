@@ -33,11 +33,18 @@ export function useWindowDrag() {
       endDrag()
       window.ghostBridge?.dragEnd?.()
     }
+    function onNativeDragStart(e: DragEvent) {
+      e.preventDefault()
+    }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
+    window.addEventListener('dragend', onUp)
+    window.addEventListener('dragstart', onNativeDragStart, true)
     return () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('dragend', onUp)
+      window.removeEventListener('dragstart', onNativeDragStart, true)
     }
   }, [beginDrag, endDrag])
 

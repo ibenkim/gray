@@ -77,23 +77,14 @@ export default function LearningPanel() {
         </div>
       </div>
 
-      <div className="ledger-footer">
-        <button className="cancel-link" onClick={cancelRecording}>
-          <XGlyph />
+      <div className="ledger-footer window-actions">
+        <button className="btn btn-quiet" onClick={cancelRecording}>
           Cancel
         </button>
-        <button className="btn-small-outline" onClick={finishRecording}>
+        <button className="btn btn-primary" onClick={finishRecording}>
           Finish
         </button>
       </div>
     </div>
-  )
-}
-
-function XGlyph() {
-  return (
-    <svg width="7" height="7" viewBox="0 0 7 7" stroke="currentColor" strokeWidth="1.2">
-      <path d="M0.8 0.8 6.2 6.2 M6.2 0.8 0.8 6.2" />
-    </svg>
   )
 }

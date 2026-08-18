@@ -98,6 +98,42 @@ export default function GhostShell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [state, closeHover])
 
+  // Empty glass chrome after close must not steal clicks from apps below.
+  useEffect(() => {
+    function applyIgnore(ignoreEmpty: boolean) {
+      if (!ignoreEmpty) {
+        window.ghostBridge?.setIgnoreMouseEvents?.(false)
+        return
+      }
+      window.ghostBridge?.setIgnoreMouseEvents?.(false)
+    }
+    const oversizedIdle = () => state === 'idle' && window.innerHeight > 48
+    if (!oversizedIdle()) {
+      applyIgnore(false)
+      return
+    }
+    applyIgnore(false)
+    function onMove(e: MouseEvent) {
+      if (!oversizedIdle()) {
+        window.ghostBridge?.setIgnoreMouseEvents?.(false)
+        return
+      }
+      const el = e.target as HTMLElement | null
+      const hit = el?.closest?.('.pill, .toast-slot, .toast')
+      window.ghostBridge?.setIgnoreMouseEvents?.(!hit, { forward: true })
+    }
+    function onResize() {
+      if (!oversizedIdle()) window.ghostBridge?.setIgnoreMouseEvents?.(false)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('resize', onResize)
+      window.ghostBridge?.setIgnoreMouseEvents?.(false)
+    }
+  }, [state])
+
   const expandedPanel =
     (state === 'recording' && watchExpanded) ||
     (state === 'editor' && !editorCollapsed) ||
@@ -110,8 +146,14 @@ export default function GhostShell() {
     !!organizeError && !expandedPanel && state === 'idle' && !showPermToast
   const showToast = showPermToast || showOrganizeError
 
-  // Pill mode: the window is sized exactly to the pill (native blur/shadow).
+  // Pill mode: the window is sized exactly to the pill (native blur/shadow)
+  // unless we kept the glass frame after close (no shrink snap).
+  const oversizedFrame =
+    typeof window !== 'undefined' && window.innerHeight > 48
   const pillMode = !expandedPanel && state !== 'hover' && !showToast
+  const dockBelow =
+    panelPlacement === 'below' &&
+    (state === 'hover' || (pillMode && oversizedFrame))
 
   const learningOpen = state === 'recording' && watchExpanded
   const panelFlush =
@@ -126,7 +168,7 @@ export default function GhostShell() {
     state === 'hover' && hoverFading ? 'ghost-root-closing' : '',
     state === 'summary' ? 'ghost-root-summary' : '',
     panelFlush ? 'ghost-root-panel' : '',
-    !pillMode && !panelFlush && panelPlacement === 'below' ? 'ghost-root-below' : '',
+    !panelFlush && dockBelow ? 'ghost-root-below' : '',
     switchFlash ? 'os-switch-flash' : ''
   ]
     .filter(Boolean)

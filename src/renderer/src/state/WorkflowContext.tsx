@@ -10,6 +10,7 @@ import {
   SetStateAction,
   ReactNode
 } from 'react'
+import { flushSync } from 'react-dom'
 import { newId } from '../../../shared/id'
 import { nextRun } from '../../../shared/schedule'
 import type {
@@ -100,8 +101,8 @@ const RUN_TICK_MS = 1800
 const ERROR_HOLD_MS = 10 * 60 * 1000
 /** Teal saved pill reverts to Hello after ~6s. */
 const SAVED_PILL_MS = 6000
-/** Stable record-panel height (Figma ~277–293). Never open glass shorter than this. */
-const HOVER_PANEL_H = 289
+/** Stable record-panel height. Matches `.record-panel` measured height (not min-height). */
+const HOVER_PANEL_H = 312
 /** Reject clipped measures from close/morph — 81px poisoned the next open to h=113. */
 const HOVER_PANEL_MEASURE_MIN = 200
 
@@ -303,6 +304,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const draggingRef = useRef(false)
   /** Prevents double-triggering morph-out / drag dismiss. */
   const hoverClosingRef = useRef(false)
+  /** True while glass bounds are applied and the panel has not mounted yet. */
+  const hoverOpeningRef = useRef(false)
+  const hoverOpenSeqRef = useRef(0)
   const prevStateRef = useRef<AppState>(state)
   /** True while the glass open ease is running — ignore height churn mid-anim. */
   const hoverOpenAnimRef = useRef(false)
@@ -506,7 +510,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const idleSize: Size = savedConfirm
       ? { w: 210, h: 24, mode: 'pill' }
       : permToastVisible || !!organizeError
-        ? { w: 392, h: 232, mode: 'panel' }
+        ? { w: 410, h: 232, mode: 'panel' }
         : permissionPaused
           ? { w: 224, h: 24, mode: 'pill' }
           : { w: 94, h: 24, mode: 'pill' }
@@ -532,12 +536,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const prev = prevStateRef.current
     prevStateRef.current = state
     if (hoverClosingRef.current && state === 'hover') return
+    if (prev === 'hover' && state === 'idle') {
+      return
+    }
     const isOpenTransition = prev === 'idle' && state === 'hover'
     if (state === 'hover' && !isOpenTransition && hoverOpenAnimRef.current) {
       return
     }
-    const durationMs = isOpenTransition ? 420 : 0
-    const pillDrive = isOpenTransition
     if (isOpenTransition) {
       hoverOpenAnimRef.current = true
       if (openAnimTimerRef.current) clearTimeout(openAnimTimerRef.current)
@@ -550,7 +555,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           setHoverPanelH((prevH) => (prevH === pending ? prevH : pending))
         }
       }, 440)
+      return
     }
+    const durationMs = 0
+    const pillDrive = false
     window.ghostBridge
       ?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
       ?.then((placement) => {
@@ -1051,6 +1059,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const openHover = useCallback(() => {
     if (draggingRef.current || hoverClosingRef.current) return
+    if (hoverOpeningRef.current) {
+      hoverOpeningRef.current = false
+      hoverOpenSeqRef.current += 1
+      return
+    }
+    if (stateRef.current !== 'idle') return
     setSavedConfirm(null)
     setHoverFading(false)
     setHoverDismissMode(null)
@@ -1058,7 +1072,26 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     if (hoverPanelHRef.current < HOVER_PANEL_MEASURE_MIN) {
       setHoverPanelH(HOVER_PANEL_H)
     }
-    setState((s) => (s === 'idle' ? 'hover' : s))
+    const glassPanelH = Math.max(hoverPanelHRef.current, HOVER_PANEL_H)
+    const w = 266
+    const h = glassPanelH + 8 + 24
+    hoverOpeningRef.current = true
+    const seq = ++hoverOpenSeqRef.current
+    const pending = window.ghostBridge?.setBounds?.(w, h, 'glass', {
+      durationMs: 420,
+      pillDrive: true
+    })
+    if (!pending) {
+      hoverOpeningRef.current = false
+      return
+    }
+    void pending.then((placement) => {
+        if (seq !== hoverOpenSeqRef.current) return
+        hoverOpeningRef.current = false
+        if (stateRef.current !== 'idle') return
+        if (placement) setPanelPlacement(placement)
+        setState('hover')
+      })
   }, [])
 
   const reportHoverPanelHeight = useCallback((h: number) => {
@@ -1085,11 +1118,18 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         durationMs: 400,
         pillDrive: true
       })
-      ?.then(() => {
-        setHoverFading(false)
-        setHoverDismissMode(null)
-        hoverClosingRef.current = false
-        setState((s) => (s === 'hover' ? 'idle' : s))
+      ?.then(async () => {
+        try {
+          await window.ghostBridge?.hideForRestore?.()
+          flushSync(() => {
+            setHoverFading(false)
+            setHoverDismissMode(null)
+            setState((s) => (s === 'hover' ? 'idle' : s))
+          })
+          await window.ghostBridge?.restorePill?.()
+        } finally {
+          hoverClosingRef.current = false
+        }
       })
   }, [])
 
@@ -1383,8 +1423,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   // ── Commands from the workspace window / global hotkey ──
   useEffect(() => {
     const offRecord = window.ghostBridge?.onOpenRecordPanel?.(() => {
-      setSavedConfirm(null)
-      setState((s) => (s === 'idle' || s === 'hover' ? 'hover' : s))
+      openHover()
     })
     const offRun = window.ghostBridge?.onRunWorkflow?.(async (workflowId) => {
       runInFlightRef.current = false
@@ -1434,7 +1473,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       offReveal?.()
       offWorkflowReady?.()
     }
-  }, [beginRun, computeStake])
+  }, [beginRun, computeStake, openHover])
 
   const value: WorkflowContextValue = {
     state,

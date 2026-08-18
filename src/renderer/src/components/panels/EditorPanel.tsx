@@ -179,26 +179,25 @@ export default function EditorPanel() {
       </div>
 
       <div className="panel-divider" />
-      <div className="panel-footer">
+      <div className="panel-footer window-actions">
         {confirmDiscard ? (
           <div className="discard-confirm">
             <span>Discard these {workflow.steps.length} steps?</span>
-            <button className="cancel-link discard-yes" onClick={cancelEditor}>
+            <button className="btn btn-danger discard-yes" onClick={cancelEditor}>
               Discard
             </button>
-            <button className="btn-text" onClick={() => setConfirmDiscard(false)}>
+            <button className="btn btn-quiet" onClick={() => setConfirmDiscard(false)}>
               Keep
             </button>
           </div>
         ) : (
           <>
-            <button className="cancel-link" onClick={() => setConfirmDiscard(true)}>
-              <XGlyph />
+            <button className="btn btn-quiet" onClick={() => setConfirmDiscard(true)}>
               Cancel
             </button>
-            <div className="footer-actions">
+            <div className="window-actions-right">
               <button
-                className="btn btn-outline"
+                className="btn btn-secondary"
                 onClick={requestRun}
                 disabled={showContract}
               >
