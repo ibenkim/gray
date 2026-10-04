@@ -52,11 +52,11 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
 
   it('remaps source event IDs to short indices and can resolve them back', () => {
     const prepared = prepareWorkflowModelInput(session, polished)
-    expect(prepared.body.acts[0].ids).toEqual(['0'])
+    expect(prepared.body.acts[0].ids).toEqual(['e0'])
     expect(JSON.stringify(prepared.body)).not.toContain(
       'tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'
     )
-    expect(prepared.resolveEvidence(['0'])).toEqual([
+    expect(prepared.resolveEvidence(['e0'])).toEqual([
       'tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'
     ])
   })

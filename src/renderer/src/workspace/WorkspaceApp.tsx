@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { newId } from '../../../shared/id'
 import { hoursReturnedThisMonth } from '../../../shared/runFormat'
+import type { RecordingSummary } from '../../../shared/types'
 import type {
   ActivityEntry,
   Run,
@@ -17,6 +18,7 @@ import WorkflowsHome from './WorkflowsHome'
 import WorkflowDetail from './WorkflowDetail'
 import ActivityView from './ActivityView'
 import ManageView from './ManageView'
+import UploadReview from './UploadReview'
 
 export type WorkspaceNav = 'workflows' | 'activity' | 'shared' | 'teams'
 
@@ -40,6 +42,9 @@ export default function WorkspaceApp() {
   const [team, setTeam] = useState<Team>(null)
   const [session, setSession] = useState<Session>(null)
   const [ready, setReady] = useState(false)
+  /** Saved recordings from the telemetry store (authoritative; separate from workflows). */
+  const [recordings, setRecordings] = useState<RecordingSummary[]>([])
+  const [reviewSessionId, setReviewSessionId] = useState<string | null>(null)
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
   function applySnapshot(snap: StoreSnapshot) {
@@ -64,11 +69,51 @@ export default function WorkspaceApp() {
     }
   }, [])
 
-  // Deep-link from saved pill / View log / Activity Done.
+  // Recordings: load on open, then follow main's state-change notifications (no polling).
+  useEffect(() => {
+    let cancelled = false
+    void window.ghostBridge?.telemetryListRecordings?.().then((list) => {
+      if (!cancelled && list) setRecordings(list)
+    })
+    const off = window.ghostBridge?.onRecordingChanged?.((summary) => {
+      setRecordings((prev) => {
+        const rest = prev.filter((r) => r.sessionId !== summary.sessionId)
+        return [summary, ...rest].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      })
+    })
+    return () => {
+      cancelled = true
+      off?.()
+    }
+  }, [])
+
+  /** Open a completed interpretation as a Library draft, reusing its stable id. */
+  async function openInterpretation(sessionId: string) {
+    const r = await window.ghostBridge?.telemetryOpenResult?.(sessionId)
+    if (!r?.ok || !r.workflow) return
+    // Upsert only when missing so local edits to an opened draft are kept.
+    if (!workflows.some((w) => w.id === r.workflow!.id)) {
+      await window.ghostBridge?.upsertWorkflow?.(r.workflow)
+    }
+    setReviewSessionId(null)
+    setDetailId(r.workflow.id)
+    setFocusRunId(null)
+  }
+
+  // Deep-link from saved pill / View log / Activity Done / saved-recording toast.
   useEffect(() => {
     async function applyFocus(focus: WorkspaceFocus) {
       setNav('workflows')
       setSpace('Personal')
+      if (focus.sessionId) {
+        setDetailId(null)
+        setFocusRunId(null)
+        setReviewSessionId(focus.sessionId)
+        const list = await window.ghostBridge?.telemetryListRecordings?.()
+        if (list) setRecordings(list)
+        return
+      }
+      setReviewSessionId(null)
       if (focus.runId) {
         let workflowId = focus.workflowId
         if (!workflowId) {
@@ -206,6 +251,7 @@ export default function WorkspaceApp() {
           nav={nav}
           onNav={(n) => {
             setNav(n)
+            setReviewSessionId(null)
             setDetailId(null)
             setFocusRunId(null)
             setEditStepId(null)
@@ -216,7 +262,13 @@ export default function WorkspaceApp() {
           isOwner={isOwner}
         />
         <div className="workspace-content">
-          {detail ? (
+          {reviewSessionId ? (
+            <UploadReview
+              sessionId={reviewSessionId}
+              onClose={() => setReviewSessionId(null)}
+              onOpenResult={(id) => void openInterpretation(id)}
+            />
+          ) : detail ? (
             <WorkflowDetail
               workflow={detail}
               runs={spaceRuns.filter((r) => r.workflowId === detail.id)}
@@ -266,6 +318,12 @@ export default function WorkspaceApp() {
           ) : nav === 'workflows' ? (
             <WorkflowsHome
               workflows={spaceWorkflows}
+              recordings={inPersonal ? recordings : []}
+              onOpenRecording={(r) =>
+                r.interpretationState === 'complete'
+                  ? void openInterpretation(r.sessionId)
+                  : setReviewSessionId(r.sessionId)
+              }
               hoursLine={hoursReturnedThisMonth(spaceRuns)}
               suggestion={inPersonal ? suggestion : null}
               ownerTeamSize={isOwner ? team?.memberCount : undefined}

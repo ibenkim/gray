@@ -196,6 +196,8 @@ type TypingBuffer = {
 export class JxaAccessibilityProvider implements InteractionProvider {
   enabled = true
   private child: ChildProcessWithoutNullStreams | null = null
+  /** Owned termination of `child`; the child is retained until its exit is observed. */
+  private terminating: Promise<void> | null = null
   private rl: ReadlineInterface | null = null
   private onEvent: ((partial: InteractionPartial) => void) | null = null
   private disabled = false
@@ -268,6 +270,14 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       this.enabled = false
       return
     }
+    // Never overlap children: a previous child that has not been observed to exit blocks
+    // a replacement (the recorder refuses to start while `teardownPending`).
+    if (this.child) {
+      console.error('[telemetry/ax] previous sensor has not exited; not starting another')
+      this.enabled = false
+      return
+    }
+    this.enabled = true
     this.onEvent = onEvent
     this.lastFocusKey = null
     this.lastSelectionKey = null
@@ -279,33 +289,44 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.context = { secure: false }
     this.typing = null
 
+    let child: ChildProcessWithoutNullStreams
     try {
-      this.child = spawn('osascript', ['-l', 'JavaScript', '-e', JXA_SENSOR_SCRIPT], {
-        stdio: ['pipe', 'pipe', 'pipe']
+      child = spawn('osascript', ['-l', 'JavaScript', '-e', JXA_SENSOR_SCRIPT], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // The sensor exits on its own once this process is no longer its parent.
+        env: { ...process.env, GRAY_JXA_PARENT_PID: String(process.pid) }
       })
     } catch (err) {
       console.error('[telemetry/ax] spawn failed', err instanceof Error ? err.name : 'error')
       this.disable()
       return
     }
+    this.child = child
 
-    this.rl = createInterface({ input: this.child.stdout })
-    this.rl.on('line', (line) => this.handleLine(line))
-
-    this.child.stderr.on('data', (chunk: Buffer) => {
-      // The sensor speaks on stdout; anything here is a real failure. Log only the
-      // first line and never the payload, which could contain AX contents.
-      const first = String(chunk).split('\n')[0]?.trim()
-      if (first) console.error('[telemetry/ax] sensor stderr:', first.slice(0, 200))
+    // Every callback is bound to this exact child: an old child's late output or exit can
+    // never feed or clear a newer generation.
+    const rl = createInterface({ input: child.stdout })
+    this.rl = rl
+    rl.on('line', (line) => {
+      if (this.child === child) this.handleLine(line)
     })
 
-    this.child.on('error', (err) => {
+    child.stderr.on('data', (chunk: Buffer) => {
+      // The sensor speaks on stdout; anything here is a real failure. Log only that it
+      // happened, never the payload, which could contain AX contents.
+      if (this.child === child && String(chunk).trim()) console.error('[telemetry/ax] sensor stderr')
+    })
+
+    child.on('error', (err) => {
+      if (this.child !== child) return
       console.error('[telemetry/ax] process error', err.name)
       this.disable()
     })
 
-    this.child.on('exit', (code) => {
-      if (!this.disabled && code !== 0 && code !== null) {
+    child.on('exit', (code) => {
+      if (this.child !== child) return
+      // An exit during an intentional stop (onEvent already cleared) is the expected outcome.
+      if (this.onEvent && !this.disabled && code !== 0 && code !== null) {
         console.error('[telemetry/ax] exited', code)
         this.disable()
       }
@@ -314,7 +335,17 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     })
   }
 
-  stop(): void {
+  /** True while a stopped child has not yet been observed to exit (no replacement allowed). */
+  get teardownPending(): boolean {
+    return !!this.child && !this.onEvent
+  }
+
+  /**
+   * Resolves once the child is observed to exit (SIGTERM, then SIGKILL after a grace
+   * period); rejects with ChildTerminationError if it has not exited by the deadline. The
+   * child stays owned until it exits; repeated calls join the same termination.
+   */
+  stop(): Promise<void> {
     this.flush()
     if (this.fieldSettleTimer) {
       clearTimeout(this.fieldSettleTimer)
@@ -333,19 +364,22 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       /* ignore */
     }
     this.rl = null
-    if (this.child) {
-      try {
-        this.child.stdin.end()
-      } catch {
-        /* ignore */
-      }
-      try {
-        this.child.kill('SIGTERM')
-      } catch {
-        /* ignore */
-      }
-      this.child = null
+    const child = this.child
+    if (!child) return Promise.resolve()
+    if (!this.terminating) {
+      const t = terminateChild(child)
+      this.terminating = t
+      // Only an observed exit releases ownership (the exit handler clears `child`).
+      void t.then(
+        () => {
+          if (this.terminating === t) this.terminating = null
+        },
+        () => {
+          if (this.terminating === t) this.terminating = null
+        }
+      )
     }
+    return this.terminating
   }
 
   /**
@@ -1138,8 +1172,63 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   private disable(): void {
     this.disabled = true
     this.enabled = false
-    this.stop()
+    void this.stop().catch(() => undefined)
   }
+}
+
+/** Grace period before SIGKILL; the barrier never waits longer than grace + settle. */
+export const CHILD_STOP_GRACE_MS = 1000
+const CHILD_STOP_SETTLE_MS = 500
+
+/** The child was not observed to exit by the deadline: teardown is unconfirmed. */
+export class ChildTerminationError extends Error {
+  constructor() {
+    super('[telemetry/ax] sensor did not exit')
+  }
+}
+
+/**
+ * End stdin, SIGTERM, then SIGKILL after the grace period. Resolves only on an observed
+ * exit; rejects with ChildTerminationError at the deadline (never a silent success). Every
+ * teardown path is attempted even if one throws; timers and the listener are removed.
+ */
+export function terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    let kill: ReturnType<typeof setTimeout> | null = null
+    let giveUp: ReturnType<typeof setTimeout> | null = null
+    const clear = () => {
+      if (kill) clearTimeout(kill)
+      if (giveUp) clearTimeout(giveUp)
+      child.removeListener('exit', done)
+    }
+    const done = () => {
+      clear()
+      resolve()
+    }
+    child.once('exit', done)
+    try {
+      child.stdin.end()
+    } catch {
+      /* ignore */
+    }
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      /* ignore */
+    }
+    kill = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+    }, CHILD_STOP_GRACE_MS)
+    giveUp = setTimeout(() => {
+      clear()
+      reject(new ChildTerminationError())
+    }, CHILD_STOP_GRACE_MS + CHILD_STOP_SETTLE_MS)
+  })
 }
 
 function clampClickCount(count?: number): number | undefined {

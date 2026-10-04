@@ -1,27 +1,46 @@
-import { useWorkflow } from '../../state/WorkflowContext'
-import { MOCK_APPS } from '../../state/mockData'
 import MicIcon from '../ui/MicIcon'
 import Toggle from '../ui/Toggle'
 import type { RecordMode } from '../../state/types'
-import { useWindowDrag } from '../../hooks/useWindowDrag'
 import { RecordDot } from '../shared/Marks'
 
-/** 02 — "Record a workflow" glass panel; Start Recording lives here. */
-export default function RecordPanel() {
-  const {
-    recordMode,
-    setRecordMode,
-    selectedAppId,
-    setSelectedAppId,
-    narrate,
-    setNarrate,
-    startRecording,
-    screenGranted,
-    micGranted,
-    openScreenRecovery
-  } = useWorkflow()
-  const { onMouseDown: onDragMouseDown } = useWindowDrag()
+export type RecordPanelProps = {
+  recordMode: RecordMode
+  onRecordMode: (mode: RecordMode) => void
+  apps: Array<{ id: string; name: string; detail: string }>
+  selectedAppId: string
+  onSelectApp: (id: string) => void
+  narrate: boolean
+  onNarrate: (on: boolean) => void
+  screenGranted: boolean
+  micGranted: boolean
+  /** Start is in flight or another state owns the pill: Record is unavailable. */
+  busy?: boolean
+  onRecord: () => void
+  onScreenRecovery: () => void
+  onMicSettings: () => void
+  onHeaderMouseDown?: (e: React.MouseEvent) => void
+}
 
+/**
+ * 02 — "Record a workflow" panel; Start Recording lives here. A view only: it renders in the
+ * Record dropdown window from the pill's snapshot and sends every choice back as a command.
+ */
+export default function RecordPanel({
+  recordMode,
+  onRecordMode,
+  apps,
+  selectedAppId,
+  onSelectApp,
+  narrate,
+  onNarrate,
+  screenGranted,
+  micGranted,
+  busy = false,
+  onRecord,
+  onScreenRecovery,
+  onMicSettings,
+  onHeaderMouseDown
+}: RecordPanelProps) {
   const modes: { value: RecordMode; label: string }[] = [
     { value: 'one-app', label: 'One app' },
     { value: 'full-screen', label: 'Full screen' }
@@ -29,7 +48,7 @@ export default function RecordPanel() {
 
   return (
     <div className="window-surface record-panel">
-      <div className="record-header" onMouseDown={onDragMouseDown}>
+      <div className="record-header" onMouseDown={onHeaderMouseDown}>
         Record a workflow
       </div>
 
@@ -38,7 +57,7 @@ export default function RecordPanel() {
           <button
             key={m.value}
             className={`segment ${recordMode === m.value ? 'segment-active' : ''}`}
-            onClick={() => setRecordMode(m.value)}
+            onClick={() => onRecordMode(m.value)}
           >
             {m.label}
           </button>
@@ -47,13 +66,13 @@ export default function RecordPanel() {
 
       {recordMode === 'one-app' ? (
         <div className="app-list">
-          {MOCK_APPS.map((app) => {
+          {apps.map((app) => {
             const selected = app.id === selectedAppId
             return (
               <button
                 key={app.id}
                 className={`app-row ${selected ? 'app-row-selected' : ''}`}
-                onClick={() => setSelectedAppId(app.id)}
+                onClick={() => onSelectApp(app.id)}
               >
                 <span className="app-icon" />
                 <span className="app-name">{app.name}</span>
@@ -82,12 +101,9 @@ export default function RecordPanel() {
           </span>
         </div>
         {micGranted ? (
-          <Toggle checked={narrate} onChange={setNarrate} />
+          <Toggle checked={narrate} onChange={onNarrate} />
         ) : (
-          <button
-            className="narrate-settings"
-            onClick={() => window.ghostBridge?.openPermissionSettings?.('microphone')}
-          >
+          <button className="narrate-settings" onClick={onMicSettings}>
             Settings
           </button>
         )}
@@ -95,14 +111,14 @@ export default function RecordPanel() {
 
       <button
         className="btn-record"
-        disabled={!screenGranted}
-        onClick={() => (screenGranted ? startRecording() : openScreenRecovery())}
+        disabled={!screenGranted || busy}
+        onClick={() => (screenGranted ? onRecord() : onScreenRecovery())}
       >
         <RecordDot />
         Record
       </button>
       {screenGranted ? null : (
-        <button className="record-hint record-hint-warn" onClick={openScreenRecovery}>
+        <button className="record-hint record-hint-warn" onClick={onScreenRecovery}>
           Screen Recording is off — turn it on to record
         </button>
       )}

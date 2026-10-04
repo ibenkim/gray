@@ -276,9 +276,119 @@ export type ActivityEntry = {
 }
 
 /** Deep-link payload for opening the workspace on a workflow / run. */
+/** Main's acknowledgement of a pill bounds transition; act on it only while `current`. */
+export type TransitionAck = {
+  placement: 'above' | 'below'
+  generation: number
+  current: boolean
+}
+
+/** M1-HF3: why a dropdown request did not leave it open. Content-free. */
+export type DropdownError =
+  | 'no_owner'
+  | 'invalid_size'
+  | 'no_room'
+  | 'unavailable'
+  | 'load_failed'
+  | 'timeout'
+  | 'closed'
+
+/** Main's acknowledgement of a Record dropdown request; act on it only while `current`. */
+export type DropdownAck = {
+  generation: number
+  current: boolean
+  open: boolean
+  placement: 'above' | 'below'
+  bounds: { x: number; y: number; width: number; height: number } | null
+  error?: DropdownError
+}
+
+/** Main → pill: the dropdown closed. Apply only if newer than the open it ends. */
+export type DropdownClosed = {
+  generation: number
+  reason: 'request' | 'outside' | 'child_closed' | 'failed'
+  error?: DropdownError
+}
+
+/**
+ * Pill → dropdown view snapshot: bounded form choices and flags only. The pill stays the
+ * sole form/recording owner; no captured content, paths or keys.
+ */
+export type RecordDropdownSnapshot = {
+  revision: number
+  recordMode: 'one-app' | 'full-screen'
+  selectedAppId: string
+  narrate: boolean
+  apps: Array<{ id: string; name: string; detail: string }>
+  screenGranted: boolean
+  micGranted: boolean
+  busy: boolean
+}
+
+/** Dropdown → pill: explicit UI commands only (validated and de-duplicated in main). */
+export type RecordDropdownCommand =
+  | { id: string; type: 'setRecordMode'; value: 'one-app' | 'full-screen' }
+  | { id: string; type: 'selectApp'; value: string }
+  | { id: string; type: 'setNarrate'; value: boolean }
+  | { id: string; type: 'start' }
+  | { id: string; type: 'openScreenSettings' }
+  | { id: string; type: 'openMicSettings' }
+
 export type WorkspaceFocus = {
   workflowId?: string
   runId?: string
+  /** Saved recording to open in Review Upload. */
+  sessionId?: string
+}
+
+/**
+ * Safe per-recording state for Library/toast (M1-HF). No captured content, titles,
+ * URLs or paths. `legacy_unverified` = saved before completion manifests existed.
+ */
+export type RecordingSummary = {
+  sessionId: string
+  startedAt: string
+  stoppedAt?: string
+  saveState: 'recording' | 'saving' | 'complete' | 'incomplete' | 'legacy_unverified'
+  saveErrorCode?: string
+  saveMessage?: string
+  /** Same-session local retry can still fix the save (only pending events/manifest). */
+  canRetrySave: boolean
+  reviewState: 'pending' | 'prepared' | 'approved' | 'cancelled' | 'unavailable'
+  reviewErrorCode?: string
+  reviewMessage?: string
+  interpretationState: 'not_started' | 'sending' | 'complete' | 'failed' | 'interrupted_unknown'
+  interpretationErrorCode?: string
+  interpretationMessage?: string
+  stage?: 'classify' | 'extract' | 'single'
+  /** Explicit approval receipt exists (transfer history is known only from these). */
+  approvedAt?: string
+  approvedModel?: string
+  /** False when the receipt covers an older review revision/digest (fresh approval needed). */
+  approvalCurrent?: boolean
+  partial?: boolean
+  workflowId?: string
+  storedEvents?: number
+  artifactsSaved?: number
+  audio?: 'none' | 'complete' | 'incomplete'
+}
+
+/** The exact sanitized dataset a user approves before an interpretation request. */
+export type ReviewPreview = {
+  sessionId: string
+  revision: number
+  digest: string
+  provider: string
+  model: string
+  purpose: string
+  stages: string
+  payloadText: string
+  bytes: number
+  actionCount: number
+  elided: boolean
+  categories: string[]
+  exclusions: string[]
+  legacyUnverified: boolean
 }
 
 export type RecordMode = 'one-app' | 'full-screen'

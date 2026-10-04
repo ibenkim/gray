@@ -15,6 +15,15 @@
  *   l1=l1Op (fill_field|transfer|reveal) cp=clipboardPairId
  *   vars k=key ex=exampleSanitized; addrs t=template p=params pol=policy nr=needsReview
  */
+/**
+ * One model-facing evidence namespace (M1-HF2). Aliases come from acts[].ids only; the
+ * app maps them to canonical event ids locally and rejects anything else.
+ */
+const EVIDENCE_CONTRACT = `Evidence contract (strict):
+- evidenceEventIds is a NONEMPTY array of exact strings copied from acts[].ids (segment rows repeat the same ids), e.g. "e3".
+- Never cite acts[].i (an order number), step ids (step_N), screens[].id (sN), addrs[].id, or any tevt_* value.
+- Never guess, renumber, compute or combine ids. If no act supports a step, omit the step.`
+
 export const WORKFLOW_INSTRUCTIONS = `Extract an executable L2 intent workflow from compact telemetry JSON.
 
 Schema: screens[], segs[].{i,kind,a,d,acts[]}, acts[].{i,c,ids,ty,t,a,d,e,r,h,ct,tx,k,sb,sa,w,tr,x,y,wx,wy,op,inf,v,nt,mk,l1,cp}, vars[], addrs[].
@@ -55,9 +64,11 @@ Rules:
 - Narration (nt/mk): decision_point/optional/skip_this/check_here → Decide/Verify steps or questions; conditionals become questions unless source=narration branch is justified.
 - Absolute position.strategy requires a question unless evidence clearly shows a fixed row/index.
 - outcome=completed only if some step has v=true; else partial/unknown.
-- Steps: verb-first summaries, concise, executable. Prefer addressing (requires.ref) over click-path navigation.`
+- Steps: verb-first summaries, concise, executable. Prefer addressing (requires.ref) over click-path navigation.
 
-export const WORKFLOW_INSTRUCTIONS_VERSION = 8 as const
+${EVIDENCE_CONTRACT}`
+
+export const WORKFLOW_INSTRUCTIONS_VERSION = 9 as const
 
 /** Pass 1 — assign intent verbs and coarse step boundaries. */
 export const CLASSIFY_INSTRUCTIONS = `Classify telemetry into L2 intent steps.
@@ -72,9 +83,11 @@ Do NOT collapse create + rename + cell edits into one step — sequences of clic
 Only merge duplicate jitter on the same control. Title = user outcome. Echo vars. addresses may be null here.
 When the app is a browser, bind steps to addrs[] / URL hosts from evidence (d/urlHost), not only window titles.
 Leave requires/position/effect null if unsure — the extract pass fills them.
-Never invent evidence ids. Cite acts[].ids only.`
+Never invent evidence ids.
 
-export const CLASSIFY_INSTRUCTIONS_VERSION = 1 as const
+${EVIDENCE_CONTRACT}`
+
+export const CLASSIFY_INSTRUCTIONS_VERSION = 2 as const
 
 /** Pass 2 — fill structured fields given classified steps + addresses. */
 export const EXTRACT_INSTRUCTIONS = `Enrich classified intent steps into a full ExtractedWorkflow.
@@ -89,9 +102,12 @@ Browser steps: set requires.ref to the matching addrs[].id (Drive/Sheets/Docs UR
 Keep create, rename, and cell-entry as separate steps with their own evidenceEventIds.
 branches[] only with source narration|cross_run|user; otherwise omit (questions come next).
 Preserve classified intent/summary/ids/evidence. Never invent UI or evidence.
-FORBIDDEN as intent: navigate/click/open (resolvers only).`
+classified.steps[].evidenceEventIds already use the same acts[].ids aliases as telemetry.
+FORBIDDEN as intent: navigate/click/open (resolvers only).
 
-export const EXTRACT_INSTRUCTIONS_VERSION = 1 as const
+${EVIDENCE_CONTRACT}`
+
+export const EXTRACT_INSTRUCTIONS_VERSION = 2 as const
 
 /** Pass 3 — enumerate open questions (model-assisted; deterministic pass also runs). */
 export const QUESTION_INSTRUCTIONS = `List WorkflowQuestion items for unresolved ambiguity.

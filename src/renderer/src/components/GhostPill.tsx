@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
 import { useWorkflow } from '../state/WorkflowContext'
+import { useWindowDrag } from '../hooks/useWindowDrag'
 import StatusPill from './shared/StatusPill'
 import { PlayPauseControl } from './shared/Marks'
 
@@ -13,10 +13,8 @@ export default function GhostPill() {
     savedConfirm,
     openSavedInLibrary,
     dismissSavedConfirm,
-    openHover,
     closeHover,
-    beginDrag,
-    endDrag,
+    toggleHover,
     elapsedLabel,
     recordPaused,
     toggleRecordPause,
@@ -31,65 +29,17 @@ export default function GhostPill() {
     permissionPaused,
     permissionHold
   } = useWorkflow()
-  const dragging = useRef(false)
-
-  const pressStart = useRef<{ x: number; y: number } | null>(null)
-
-  function handleMouseDown(e: React.MouseEvent) {
-    if (e.button !== 0) return
-    e.preventDefault()
-    pressStart.current = { x: e.clientX, y: e.clientY }
-  }
-
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!pressStart.current || dragging.current) return
-      const dx = e.clientX - pressStart.current.x
-      const dy = e.clientY - pressStart.current.y
-      if (dx * dx + dy * dy < 16) return
-      dragging.current = true
-      const { collapseToPill } = beginDrag()
-      window.ghostBridge?.dragStart?.(e.clientX, e.clientY, { collapseToPill })
-    }
-    function onUp() {
-      const wasPress = !!pressStart.current
-      pressStart.current = null
-      if (dragging.current) {
-        dragging.current = false
-        endDrag()
-        window.ghostBridge?.dragEnd?.()
-        return
-      }
-      if (!wasPress) return
+  // One shared gesture owner (drag vs tap, post-drag click suppression, cancel on blur).
+  const { onMouseDown: handleMouseDown } = useWindowDrag({
+    preventDefault: true,
+    onTap: () => {
       if (savedConfirm && state === 'idle') {
         dismissSavedConfirm()
         return
       }
-      if (state === 'idle') openHover()
-      else if (state === 'hover') closeHover()
+      if (state === 'idle' || state === 'hover') toggleHover()
     }
-    function onNativeDragStart(e: DragEvent) {
-      e.preventDefault()
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    window.addEventListener('dragend', onUp)
-    window.addEventListener('dragstart', onNativeDragStart, true)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      window.removeEventListener('dragend', onUp)
-      window.removeEventListener('dragstart', onNativeDragStart, true)
-    }
-  }, [
-    beginDrag,
-    endDrag,
-    openHover,
-    closeHover,
-    state,
-    savedConfirm,
-    dismissSavedConfirm
-  ])
+  })
 
   function handleContextMenu(e: React.MouseEvent) {
     e.preventDefault()
@@ -120,7 +70,7 @@ export default function GhostPill() {
     return (
       <StatusPill
         kind="thinking"
-        label={<span className="pill-blink">Thinking…</span>}
+        label={<span className="pill-blink">Saving…</span>}
         {...sharedProps}
       />
     )
@@ -175,13 +125,8 @@ export default function GhostPill() {
     )
   }
 
-  return (
-    <StatusPill
-      kind="idle"
-      className={state === 'hover' ? 'pill-ready' : ''}
-      {...sharedProps}
-    />
-  )
+  // Open is not hover: the capsule looks the same while its dropdown is open (M1-HF3).
+  return <StatusPill kind="idle" {...sharedProps} />
 }
 
 export function PauseButton({

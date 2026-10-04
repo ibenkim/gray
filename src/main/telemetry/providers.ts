@@ -7,7 +7,13 @@ import type { TelemetryEvent, TelemetryEventType, TelemetryTarget } from '../../
 export interface InteractionProvider {
   readonly enabled: boolean
   start(onEvent: (partial: InteractionPartial) => void): void
-  stop(): void
+  /**
+   * May resolve later: a child-backed provider settles once its process has exited, and
+   * rejects if exit could not be confirmed (teardown failure, never a silent success).
+   */
+  stop(): void | Promise<void>
+  /** True while a stopped source has not confirmed shutdown; no replacement may start. */
+  readonly teardownPending?: boolean
   /** Force an immediate sample (e.g. after app/window or clipboard change). */
   poke?(): void
   /**

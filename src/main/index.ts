@@ -18,7 +18,7 @@ import {
   setSession,
   setTeam
 } from './store'
-import { createTray, destroyTray, setTrayMode } from './tray'
+import { createTray, destroyTray, setTrayMode, setTrayRecording } from './tray'
 import {
   getPermissions,
   registerPermissionIpc,
@@ -38,27 +38,35 @@ import {
   teamFromInvite
 } from './team'
 import { newId } from '../shared/id'
-import type { DeepLink, PermissionsState } from '../shared/types'
+import type { DeepLink, PermissionsState, WorkspaceFocus } from '../shared/types'
+import {
+  createRecordDropdownWiring,
+  createWindowTransitions,
+  PILL_H,
+  PILL_W,
+  PILL_WINDOW_OPTIONS,
+  RECORD_DROPDOWN_HASH,
+  registerTransitionIpc
+} from './windowTransitions'
 import {
   flushTelemetryOnQuit,
+  getTelemetryRecorder,
+  hasActiveRecording,
   initTelemetry,
-  registerTelemetryIpc
+  onCaptureStatus,
+  registerTelemetryIpc,
+  stopActiveRecording
 } from './telemetry'
 import { registerAutomationIpc, stopActiveAutomationRun } from './automation'
 
 let pillWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
-// Native-blur backdrops. Vibrancy always fills a whole window, so one window
-// behind the pill and one behind the panel give real background blur on each
-// glass shape while the gap between them stays fully transparent.
-let pillBackdrop: BrowserWindow | null = null
-let panelBackdrop: BrowserWindow | null = null
 /** Fullscreen ink-20 dim behind the expanded editor. */
 let editorScrim: BrowserWindow | null = null
 /** Fullscreen onboarding overlay — the hard gate before pill/workspace. */
 let onboardingWindow: BrowserWindow | null = null
 /** Pending Library deep-link until the workspace window finishes loading. */
-let pendingWorkspaceFocus: { workflowId?: string; runId?: string } | null = null
+let pendingWorkspaceFocus: WorkspaceFocus | null = null
 /** Deep-link held until the onboarding window finishes loading. */
 let pendingDeepLink: DeepLink | null = null
 /** True once the app is actually quitting (lets the gated window close). */
@@ -70,13 +78,7 @@ let pillAppState: string = 'idle'
 /** True while the onboarding overlay is hidden so System Settings can be used. */
 let overlayDemotedForSettings = false
 
-const PILL_W = 94
-const PILL_H = 24
 const MARGIN = 24
-/** CSS gap between the panel slot and the pill in glass mode. */
-const GLASS_GAP = 8
-/** Backdrops sit 1px inside the CSS tint so corner radii never poke out. */
-const BACKDROP_INSET = 1
 
 /** Content size of the Library card (matches `.workspace-window`). */
 const WORKSPACE_CONTENT_W = 807
@@ -109,8 +111,33 @@ app.on('open-url', (event, url) => {
   event.preventDefault()
   handleDeepLink(url)
 })
-app.on('before-quit', () => {
+/**
+ * Bound on the quit barrier: the owner's audio account (≤7 s, covering the renderer's 1.5 s
+ * stop + 5 s drain) plus the local save. A miss leaves the session for relaunch recovery as
+ * incomplete — never a fabricated successful save.
+ */
+const QUIT_BARRIER_MS = 10_000
+let quitBarrier: 'idle' | 'running' | 'done' = 'idle'
+app.on('before-quit', (event) => {
   isQuitting = true
+  // M2-R2: every quit while the barrier runs is held, so no repeated quit can bypass it.
+  if (quitBarrier === 'running') {
+    event.preventDefault()
+    return
+  }
+  // Join any capture lifecycle work, including a pending Start or an unfinished save.
+  if (quitBarrier === 'done' || !hasActiveRecording()) return
+  event.preventDefault()
+  quitBarrier = 'running'
+  let deadline: ReturnType<typeof setTimeout> | null = null
+  void Promise.race([
+    stopActiveRecording('quit').catch(() => undefined),
+    new Promise((resolve) => (deadline = setTimeout(resolve, QUIT_BARRIER_MS)))
+  ]).finally(() => {
+    if (deadline) clearTimeout(deadline)
+    quitBarrier = 'done'
+    app.quit()
+  })
 })
 
 function getBottomRightBounds(width: number, height: number) {
@@ -138,18 +165,11 @@ function initialPillBounds() {
 
 function createPillWindow() {
   const bounds = initialPillBounds()
-  pillAnchor = { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
+  transitions.setAnchor({ x: bounds.x + bounds.width, y: bounds.y + bounds.height })
 
   pillWindow = new BrowserWindow({
     ...bounds,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    hasShadow: false,
-    roundedCorners: true,
-    acceptFirstMouse: true,
+    ...PILL_WINDOW_OPTIONS,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -177,124 +197,15 @@ function createPillWindow() {
     pillWindow = null
   })
 
-  pillWindow.on('blur', () => {
-    if (chromeLock) return
-    onPillFocusChange(false)
-  })
-  pillWindow.on('focus', () => onPillFocusChange(true))
-
-  // Backdrops shadow the pill window's visibility exactly.
-  pillWindow.on('hide', () => {
-    if (chromeLock) return
-    hideBackdrops()
-    editorScrim?.setOpacity(0)
-  })
-  pillWindow.on('show', () => {
-    if (chromeLock) return
-    if (pillWindow) layoutBackdrops(pillWindow.getBounds())
-    applyEditorScrim()
+  // The transition controller owns park/restore locking and teardown; main keeps scrim/summary.
+  transitions.attachPill(pillWindow, {
+    onFocusChange: (focused) => onPillFocusChange(focused),
+    onHide: () => editorScrim?.setOpacity(0),
+    onShow: () => applyEditorScrim()
   })
 }
 
-/**
- * A vibrancy-only window that paints frosted blur behind one glass shape.
- * It never takes focus or mouse events; z-order is fixed once at startup
- * (below the pill window) and visibility is driven via opacity so showing
- * and hiding never re-stacks windows mid-animation.
- */
-function createBackdrop(): BrowserWindow {
-  const win = new BrowserWindow({
-    width: PILL_W,
-    height: PILL_H,
-    show: false,
-    frame: false,
-    resizable: false,
-    movable: false,
-    focusable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    hasShadow: false,
-    roundedCorners: true,
-    backgroundColor: '#00000000',
-    vibrancy: 'hud',
-    // Keep the frost when unfocused — 'followWindow' goes opaque on blur.
-    visualEffectState: 'active'
-  })
-  win.setIgnoreMouseEvents(true)
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false })
-  win.setAlwaysOnTop(true, 'floating')
-  win.setOpacity(0)
-  win.loadURL('about:blank')
-  return win
-}
-
-function createBackdrops() {
-  pillBackdrop = createBackdrop()
-  panelBackdrop = createBackdrop()
-  pillBackdrop.showInactive()
-  panelBackdrop.showInactive()
-  // Fix stacking once: material windows sit just below the content window.
-  pillWindow?.moveTop()
-}
-
-function hideBackdrops() {
-  pillBackdrop?.setOpacity(0)
-  panelBackdrop?.setOpacity(0)
-}
-
-/**
- * Position the blur shapes under the pill strip and the panel slot for the
- * given pill-window bounds. Called on every window move/resize tick so the
- * material tracks the CSS silhouettes through morphs and drags.
- */
-function layoutBackdrops(b: Rect) {
-  if (!pillBackdrop || !panelBackdrop) return
-  if (!pillWindow || !pillWindow.isVisible() || currentMode === 'panel') {
-    hideBackdrops()
-    return
-  }
-  const inset = BACKDROP_INSET
-  const tall = b.height > PILL_HEIGHT + 4
-  const below = currentPlacement === 'below' && tall
-  // Always a compact capsule at the trailing edge — never stretch to the
-  // glass frame (including idle after close, when the window stays tall).
-  const pillW = Math.min(PILL_W, b.width)
-  const pillH = Math.min(PILL_HEIGHT, b.height)
-  const pillX = b.x + b.width - pillW
-  const pillTop = below ? b.y : b.y + b.height - pillH
-  pillBackdrop.setBounds(
-    {
-      x: pillX + inset,
-      y: pillTop + inset,
-      width: Math.max(1, pillW - inset * 2),
-      height: Math.max(1, pillH - inset * 2)
-    },
-    false
-  )
-  pillBackdrop.setOpacity(1)
-
-  const panelH = currentMode === 'glass' ? b.height - PILL_HEIGHT - GLASS_GAP : 0
-  if (panelH < 6) {
-    panelBackdrop.setOpacity(0)
-    pillWindow.moveTop()
-    return
-  }
-  panelBackdrop.setBounds(
-    {
-      x: b.x + inset,
-      y: (below ? b.y + PILL_HEIGHT + GLASS_GAP : b.y) + inset,
-      width: Math.max(1, b.width - inset * 2),
-      height: Math.max(1, panelH - inset * 2)
-    },
-    false
-  )
-  panelBackdrop.setOpacity(1)
-  // Paper content must sit above vibrancy so native window radius/shadow
-  // cannot paint around the 20px CSS silhouette.
-  pillWindow.moveTop()
-}
-
-function sendWorkspaceFocus(focus: { workflowId?: string; runId?: string } | null) {
+function sendWorkspaceFocus(focus: WorkspaceFocus | null) {
   if (!workspaceWindow || !focus) return
   workspaceWindow.webContents.send('workspace:focus', focus)
   // Back-compat for older listeners.
@@ -303,16 +214,14 @@ function sendWorkspaceFocus(focus: { workflowId?: string; runId?: string } | nul
   }
 }
 
-function normalizeWorkspaceFocus(
-  focus?: string | { workflowId?: string; runId?: string }
-): { workflowId?: string; runId?: string } | null {
+function normalizeWorkspaceFocus(focus?: string | WorkspaceFocus): WorkspaceFocus | null {
   if (!focus) return null
   if (typeof focus === 'string') return { workflowId: focus }
-  if (focus.workflowId || focus.runId) return focus
+  if (focus.workflowId || focus.runId || focus.sessionId) return focus
   return null
 }
 
-function openWorkspaceWindow(focus?: string | { workflowId?: string; runId?: string }) {
+function openWorkspaceWindow(focus?: string | WorkspaceFocus) {
   // Hard gate — Library is unavailable until onboarding completes.
   if (!getSnapshot().onboardingComplete) return
 
@@ -370,7 +279,14 @@ function showPill() {
   pillWindow?.focus()
 }
 
-function hidePill() {
+/**
+ * The pill is the recording indicator: an active session stops and saves before it hides.
+ * If a source did not confirm shutdown the indicator stays visible (capture unavailable).
+ */
+async function hidePill() {
+  if (hasActiveRecording()) await stopActiveRecording('hide')
+  if (getTelemetryRecorder()?.getRecordingStatus().teardownFailed) return
+  transitions.closeDropdown()
   pillWindow?.hide()
 }
 
@@ -428,8 +344,7 @@ function applyEditorScrim() {
 
 /**
  * Summary can sit behind other apps when the user focuses them; other pill
- * states stay always-on-top. Vibrancy backdrops hide on blur so they don't
- * paint a gray box over the desktop / other windows.
+ * states stay always-on-top.
  */
 function onPillFocusChange(focused: boolean) {
   applyEditorScrim()
@@ -439,383 +354,40 @@ function onPillFocusChange(focused: boolean) {
       pillWindow.setAlwaysOnTop(true, 'floating')
       pillWindow.moveTop()
     }
-    layoutBackdrops(pillWindow.getBounds())
   } else {
-    hideBackdrops()
     if (pillAppState === 'summary') {
       pillWindow.setAlwaysOnTop(false)
     }
   }
 }
 
-// ── IPC: pill window sizing ──
-// The pill's bottom-right corner is tracked as a persistent screen anchor:
-// resizes never derive it from live bounds (which drift mid-drag), resizes
-// are instant (animation moved the window under a stationary cursor, causing
-// the hover flicker loop), and resizes are deferred while a drag is active.
-// Modes: 'pill' and 'glass' windows hug their content; all modes are plain
-// transparent windows — the pill and panel each paint their own CSS glass,
-// so the gap between them stays fully see-through.
-type BoundsRequest = {
-  w: number
-  h: number
-  mode: 'pill' | 'glass' | 'panel'
-  /** Ease window bounds over this many ms. */
-  durationMs?: number
-  /**
-   * Pill-driven morph: the pill BR is the only anchor. Open jumps to the full
-   * glass frame and returns placement immediately (so above/below CSS matches
-   * geometry). Close fades the panel then snaps to pill size.
-   */
-  pillDrive?: boolean
-  /** Center in the display work area instead of anchoring to the pill BR. */
-  center?: boolean
-}
-type Placement = 'above' | 'below'
-type Rect = { x: number; y: number; width: number; height: number }
-
-const PANEL_PADDING = 36
-const PILL_HEIGHT = 24
-/** Screen position of the pill's bottom-right corner. */
-let pillAnchor: { x: number; y: number } | null = null
-/** Content inset of the current window mode (0 = pill fills the window). */
-let currentInsets = 0
-let pendingBounds: BoundsRequest | null = null
-/** Last applied panel placement — needed so drag syncs the pill BR correctly. */
-let currentPlacement: Placement = 'above'
-let currentMode: BoundsRequest['mode'] = 'pill'
-let boundsAnimTimer: ReturnType<typeof setInterval> | null = null
-/** True for the whole pill-drive open/close (both phases). */
-let pillDriveLock = false
-/** Hide/show while restoring the saved pill rect must not drop vibrancy. */
-let chromeLock = false
-/** Pill screen rect captured before open/close so restore does not lerp through glass origin. */
-let savedPillRect: Rect | null = null
-
-function cancelBoundsAnim() {
-  if (boundsAnimTimer) {
-    clearInterval(boundsAnimTimer)
-    boundsAnimTimer = null
-  }
-}
-
-/** Approximate CSS cubic-bezier(0.32, 0.72, 0, 1) — open ease-out. */
-function easeOpen(t: number) {
-  return 1 - Math.pow(1 - t, 3)
-}
-/** Approximate CSS cubic-bezier(0.4, 0, 1, 1) — close ease-in. */
-function easeClose(t: number) {
-  return t * t * t
-}
-
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t
-}
-
-function lerpRect(from: Rect, to: Rect, t: number): Rect {
-  return {
-    x: Math.round(lerp(from.x, to.x, t)),
-    y: Math.round(lerp(from.y, to.y, t)),
-    width: Math.round(lerp(from.width, to.width, t)),
-    height: Math.round(lerp(from.height, to.height, t))
-  }
-}
-
-/** Window rect whose bottom-right (or pill strip) stays on the pill anchor. */
-function rectFromPillAnchor(
-  anchor: { x: number; y: number },
-  width: number,
-  height: number,
-  placement: Placement,
-  insets: number
-): Rect {
-  const x = anchor.x + insets - width
-  if (placement === 'below' && height > PILL_HEIGHT) {
-    return {
-      x,
-      y: anchor.y - PILL_HEIGHT - insets,
-      width,
-      height
-    }
-  }
-  return {
-    x,
-    y: anchor.y + insets - height,
-    width,
-    height
-  }
-}
-
-/** All pill-window bounds go through here so the blur backdrops track them. */
-function setPillBounds(win: BrowserWindow, rect: Rect) {
-  win.setBounds(rect, false)
-  layoutBackdrops(rect)
-}
-
-function runBoundsEase(
-  win: BrowserWindow,
-  from: Rect,
-  to: Rect,
-  durationMs: number,
-  ease: (t: number) => number,
-  onDone?: () => void
-) {
-  if (durationMs <= 0) {
-    setPillBounds(win, to)
-    onDone?.()
-    return
-  }
-  const t0 = Date.now()
-  boundsAnimTimer = setInterval(() => {
-    const u = Math.min(1, (Date.now() - t0) / durationMs)
-    const e = ease(u)
-    setPillBounds(win, lerpRect(from, to, e))
-    if (u >= 1) {
-      cancelBoundsAnim()
-      setPillBounds(win, to)
-      onDone?.()
-    }
-  }, 16)
-}
-
-function ensurePillAnchor(win: BrowserWindow): { x: number; y: number } {
-  if (!pillAnchor) {
-    pillAnchor = pillAnchorFromBounds(win.getBounds())
-  }
-  return pillAnchor
-}
-
-/** Screen rect of the visible pill capsule inside the current window. */
-function visualPillRect(b: Rect): Rect {
-  const tall = b.height > PILL_HEIGHT + 4
-  const below = currentPlacement === 'below' && tall
-  const pw = Math.min(PILL_W, b.width)
-  const ph = Math.min(PILL_HEIGHT, b.height)
-  return {
-    x: b.x + b.width - pw,
-    y: below ? b.y : b.y + b.height - ph,
-    width: PILL_W,
-    height: PILL_HEIGHT
-  }
-}
-
-/** Pill bottom-right derived from live window bounds + placement. */
-function pillAnchorFromBounds(b: Rect): { x: number; y: number } {
-  const r = visualPillRect(b)
-  return { x: r.x + r.width, y: r.y + r.height }
-}
-
-const PARK_ORIGIN = { x: -20000, y: -20000 }
-
-/**
- * Hide + park the glass frame off-screen before idle CSS commits. Idle in a
- * still-visible 266×344 window is the corner glitch (pill at glass origin).
- */
-function hideForPillRestore(win: BrowserWindow) {
-  chromeLock = true
-  hideBackdrops()
-  win.hide()
-  // Origin-only move: do not change size while the compositor may still
-  // sample the last on-screen frame.
-  win.setPosition(PARK_ORIGIN.x, PARK_ORIGIN.y, false)
-}
-
-/**
- * Size the parked window to the saved pill, then move origin. Never change
- * size and origin in one setBounds on-screen (macOS paints size first).
- */
-function restoreToSavedPill(win: BrowserWindow): Rect {
-  const saved = savedPillRect ?? visualPillRect(win.getBounds())
-  chromeLock = true
-  hideBackdrops()
-  if (win.isVisible()) win.hide()
-  currentMode = 'pill'
-  currentInsets = 0
-  currentPlacement = 'above'
-  win.setPosition(PARK_ORIGIN.x, PARK_ORIGIN.y, false)
-  win.setSize(saved.width, saved.height, false)
-  win.setPosition(saved.x, saved.y, false)
-  win.showInactive()
-  layoutBackdrops(saved)
-  win.moveTop()
-  chromeLock = false
-  pillAnchor = { x: saved.x + saved.width, y: saved.y + saved.height }
-  return saved
-}
-
-function pillAnchorFromWindow(win: BrowserWindow): { x: number; y: number } {
-  return pillAnchorFromBounds(win.getBounds())
-}
-
-function applyBounds(win: BrowserWindow, req: BoundsRequest): Placement | Promise<Placement> {
-  const width = Math.round(req.w)
-  const height = Math.round(req.h)
-  const durationMs = Math.max(0, req.durationMs ?? 0)
-
-  // Never let a trivial glass height "correction" cancel an in-flight
-  // pill-drive morph — that was killing the vertical expansion mid-way.
-  if (pillDriveLock && durationMs <= 0 && req.mode === 'glass' && !req.pillDrive) {
-    pendingBounds = req
-    return currentPlacement
-  }
-
-  cancelBoundsAnim()
-  if (req.pillDrive && durationMs > 0) pillDriveLock = true
-  else pillDriveLock = false
-  const prevBounds = win.getBounds()
-  const vis = visualPillRect(prevBounds)
-  if (!req.center) {
-    pillAnchor = { x: vis.x + vis.width, y: vis.y + vis.height }
-  }
-  if (req.pillDrive) {
-    savedPillRect = vis
-  }
-  const anchorBefore = { ...ensurePillAnchor(win) }
-  const wa = screen.getDisplayNearestPoint(anchorBefore).workArea
-  const insets = req.mode === 'panel' ? PANEL_PADDING : 0
-  const pillDrive = !!req.pillDrive && durationMs > 0
-
-  let placement: Placement = 'above'
-  let trial: Rect
-
-  if (req.center) {
-    // Center in the work area; leave pillAnchor untouched so the pill returns
-    // to its spot when this panel closes (drag still re-syncs the anchor).
-    trial = {
-      x: Math.round(wa.x + (wa.width - width) / 2),
-      y: Math.round(wa.y + (wa.height - height) / 2),
-      width,
-      height
-    }
-    placement = 'above'
-  } else {
-    trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
-    if (req.mode !== 'pill') {
-      const pillTop = anchorBefore.y - PILL_HEIGHT
-      const mid = wa.y + wa.height / 2
-      const preferBelow = pillTop < mid || trial.y < wa.y
-      if (preferBelow) {
-        placement = 'below'
-        trial = rectFromPillAnchor(anchorBefore, width, height, 'below', insets)
-        if (trial.y + height > wa.y + wa.height) {
-          placement = 'above'
-          trial = rectFromPillAnchor(anchorBefore, width, height, 'above', insets)
-          trial.y = Math.max(wa.y, trial.y)
-        }
-      }
-    }
-    trial.x = Math.min(Math.max(trial.x, wa.x), wa.x + wa.width - width)
-  }
-
-  currentInsets = insets
-  const target: Rect = trial
-  const from: Rect = {
-    x: prevBounds.x,
-    y: prevBounds.y,
-    width: prevBounds.width,
-    height: prevBounds.height
-  }
-  const closing = pillDrive && req.mode === 'pill'
-  if (!closing) {
-    if (req.mode !== 'pill') currentPlacement = placement
-    else if (from.height <= PILL_HEIGHT + 4) currentPlacement = 'above'
-    currentMode = req.mode
-  } else {
-    // Keep glass placement so the pill blur stays on the capsule while the
-    // paper panel fades; drop the panel material immediately so it does not
-    // linger as an empty gray frame.
-    panelBackdrop?.setOpacity(0)
-  }
-
-  const alreadyThere =
-    from.x === target.x &&
-    from.y === target.y &&
-    from.width === target.width &&
-    from.height === target.height
-
-  if (durationMs <= 0 || alreadyThere) {
-    setPillBounds(win, target)
-    return placement
-  }
-
-  if (pillDrive) {
-    const opening = req.mode !== 'pill'
-
-    return new Promise((resolve) => {
-      const releaseLock = () => {
-        pillDriveLock = false
-        if (opening && pendingBounds && pillWindow) {
-          const pending = pendingBounds
-          pendingBounds = null
-          if (pending.h >= PILL_HEIGHT + 40) {
-            applyBounds(pillWindow, { ...pending, durationMs: 0, pillDrive: false })
-          }
-        }
-      }
-
-      if (opening) {
-        // Instant full glass frame pinned to the pill BR.
-        setPillBounds(win, target)
-        // Resolve placement immediately so renderer applies above/below CSS
-        // before the fade — delayed resolve caused below opens to paint as
-        // above then teleport.
-        resolve(placement)
-        setTimeout(releaseLock, durationMs)
-      } else {
-        // Close: fade the paper panel, then drop glass mode WITHOUT
-        // shrinking. macOS setBounds size-before-origin is what flashed
-        // a 94×24 window at the old glass top-left.
-        const fadeMs = Math.min(200, Math.max(120, durationMs))
-        setTimeout(() => {
-          currentMode = 'pill'
-          layoutBackdrops(win.getBounds())
-          releaseLock()
-          resolve(placement)
-        }, fadeMs)
-      }
-    })
-  }
-
-  const ease = req.mode === 'pill' ? easeClose : easeOpen
-  return new Promise((resolve) => {
-    runBoundsEase(win, from, target, durationMs, ease, () => resolve(placement))
-  })
-}
-
-ipcMain.handle(
-  'window:setBounds',
-  async (event, req: BoundsRequest): Promise<Placement> => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win || win !== pillWindow) return 'above'
-  if (dragTimer) {
-    // Collapse-to-pill during drag is applied immediately so we never drag
-    // a glass shell with the Hello pill still painted under the panel.
-    if (req.mode === 'pill') {
-      pendingBounds = null
-      return await Promise.resolve(applyBounds(win, req))
-    }
-    pendingBounds = req
-    return currentPlacement
-  }
-  return await Promise.resolve(applyBounds(win, req))
+// ── IPC: pill window sizing / drag and the anchored Record dropdown → windowTransitions.ts ──
+// The pill stays stationary; the Record dropdown is one separate, reusable window (M1-HF3).
+const recordDropdown = createRecordDropdownWiring({
+  ipc: ipcMain,
+  BrowserWindow,
+  preload: join(__dirname, '../preload/index.js'),
+  load: (win) =>
+    is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${RECORD_DROPDOWN_HASH}`)
+      : win.loadFile(join(__dirname, '../renderer/index.html'), { hash: RECORD_DROPDOWN_HASH }),
+  pill: () => pillWindow,
+  ctl: () => transitions
 })
-ipcMain.handle('window:hideForRestore', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win || win !== pillWindow) return false
-  hideForPillRestore(win)
-  return true
+const transitions = createWindowTransitions({
+  pill: () => pillWindow,
+  workAreaNear: (point) => screen.getDisplayNearestPoint(point).workArea,
+  cursor: () => screen.getCursorScreenPoint(),
+  persistAnchor: (point) => setPillPosition(point),
+  createDropdown: recordDropdown.create,
+  onDropdownClosed: recordDropdown.notifyClosed
 })
-ipcMain.handle('window:restorePill', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win || win !== pillWindow) return null
-  return restoreToSavedPill(win)
-})
+registerTransitionIpc(ipcMain, (wc) => BrowserWindow.fromWebContents(wc), transitions, () => pillWindow)
 
 // ── IPC: workspace window lifecycle ──
 ipcMain.handle(
   'workspace:open',
-  (_event, focus?: string | { workflowId?: string; runId?: string }) =>
-    openWorkspaceWindow(focus)
+  (_event, focus?: string | WorkspaceFocus) => openWorkspaceWindow(focus)
 )
 ipcMain.handle('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
@@ -871,75 +443,6 @@ ipcMain.handle('pill:revealRunning', () => {
   pillWindow?.webContents.send('pill:revealRunning')
 })
 
-// ── IPC: pill drag (follows cursor 1:1) ──
-// A CSS drag-region would swallow the pill's click events, so the renderer
-// signals drag start/end and main polls the cursor to move the window.
-let dragTimer: ReturnType<typeof setInterval> | null = null
-ipcMain.handle(
-  'pill:dragStart',
-  (event, payload: { x: number; y: number; collapseToPill?: boolean }) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win) return
-
-  // Same IPC path moves the Library window; skip pill-only collapse/anchor.
-  const isPill = win === pillWindow
-
-  if (isPill) {
-    cancelBoundsAnim()
-    const collapseToPill = payload?.collapseToPill !== false
-    const b = win.getBounds()
-    const oversized = b.width > PILL_W + 4 || b.height > PILL_H + 4
-    if (collapseToPill && (currentMode !== 'pill' || oversized)) {
-      pillAnchor = pillAnchorFromWindow(win)
-      applyBounds(win, { w: PILL_W, h: PILL_H, mode: 'pill' })
-    }
-  }
-
-  // Recompute grab offset from the (possibly just-shrunk) window.
-  const cursor0 = screen.getCursorScreenPoint()
-  const b0 = win.getBounds()
-  const grab = { x: cursor0.x - b0.x, y: cursor0.y - b0.y }
-
-  if (dragTimer) clearInterval(dragTimer)
-  // Panel-mode chrome hides the pill. Updating the anchor from the window BR
-  // while dragging a large panel (esp. clamped under the menu bar) parks the
-  // pill mid-screen. Keep the pre-panel pill spot — same as summary.
-  const freezeAnchor = isPill && currentMode === 'panel'
-  dragTimer = setInterval(() => {
-    const cursor = screen.getCursorScreenPoint()
-    const nx = Math.round(cursor.x - grab.x)
-    const ny = Math.round(cursor.y - grab.y)
-    win.setPosition(nx, ny)
-    if (isPill) {
-      const bounds = win.getBounds()
-      if (!freezeAnchor) {
-        pillAnchor = pillAnchorFromBounds(bounds)
-      }
-      layoutBackdrops(bounds)
-    }
-  }, 16)
-  }
-)
-ipcMain.handle('pill:dragEnd', (event) => {
-  if (dragTimer) {
-    clearInterval(dragTimer)
-    dragTimer = null
-  }
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (win && win === pillWindow) {
-    // Panel overlays: keep the pre-panel pill spot (see freezeAnchor above).
-    if (currentMode !== 'panel') {
-      pillAnchor = pillAnchorFromWindow(win)
-      setPillPosition({ x: pillAnchor.x, y: pillAnchor.y })
-    }
-    if (pendingBounds) {
-      const req = pendingBounds
-      pendingBounds = null
-      applyBounds(win, req)
-    }
-  }
-})
-
 // ── IPC: pill context menu ──
 // Idle: Open Library ⌘L · Record a workflow ⌥R · Settings… ⌘, · Hide pill ⌥H
 // Recording: omits Record; appends "Recording continues" under Hide pill.
@@ -972,17 +475,11 @@ ipcMain.handle('pill:contextMenu', (event) => {
       enabled: false
     },
     {
-      label: 'Hide pill',
+      label: recording ? 'Stop recording and hide pill' : 'Hide pill',
       accelerator: 'Alt+H',
-      click: () => hidePill()
+      click: () => void hidePill()
     }
   )
-  if (recording) {
-    template.push({
-      label: 'Recording continues',
-      enabled: false
-    })
-  }
   Menu.buildFromTemplate(template).popup({ window: win })
 })
 
@@ -1117,7 +614,7 @@ function registerGlobalShortcuts() {
   // ⌥H — Hide / show pill (tray also recovers).
   globalShortcut.register('Alt+H', () => {
     if (!pillWindow) return
-    if (pillWindow.isVisible()) hidePill()
+    if (pillWindow.isVisible()) void hidePill()
     else showPill()
   })
   // ⌘L — Open Library
@@ -1129,8 +626,6 @@ function enterNormalMode(opts?: { openRecordPanel?: boolean }) {
   setTrayMode('normal')
   if (!pillWindow) {
     createPillWindow()
-    createBackdrops()
-    if (pillWindow) layoutBackdrops((pillWindow as BrowserWindow).getBounds())
   } else {
     showPill()
   }
@@ -1160,16 +655,11 @@ function enterOnboardingMode(): void {
     workspaceWindow.destroy()
     workspaceWindow = null
   }
-  hidePill()
-  hideBackdrops()
+  void hidePill()
   if (pillWindow) {
     pillWindow.destroy()
     pillWindow = null
   }
-  pillBackdrop?.destroy()
-  panelBackdrop?.destroy()
-  pillBackdrop = null
-  panelBackdrop = null
 
   createOnboardingWindow()
 }
@@ -1194,6 +684,14 @@ function promoteOnboardingOverlay(): void {
 
 /** Record a granted→denied flip so the pill can arm the paused-permission UX. */
 function handlePermissionChange(prev: PermissionsState | null, next: PermissionsState) {
+  // M2: losing a permission the active session uses stops and saves it (no silent gap).
+  if (prev && hasActiveRecording()) {
+    const lost = (k: keyof PermissionsState) => prev[k] === 'granted' && next[k] !== 'granted'
+    const narrating = getTelemetryRecorder()?.isNarrating() ?? false
+    if (lost('screen') || lost('accessibility') || (narrating && lost('microphone'))) {
+      void stopActiveRecording('permission_revoked')
+    }
+  }
   if (!prev || !getSnapshot().onboardingComplete) return
   // Only Screen Recording is required today (Accessibility is a future provider).
   const revoked = prev.screen === 'granted' && next.screen !== 'granted'
@@ -1238,7 +736,14 @@ function registerOnboardingIpc() {
     )
   })
 
-  ipcMain.handle('auth:logout', () => {
+  ipcMain.handle('auth:logout', async () => {
+    // Logout removes the owner and the indicator: stop and save first.
+    await stopActiveRecording('logout')
+    if (getTelemetryRecorder()?.getRecordingStatus().teardownFailed) {
+      // Keep the signed-in surface and its failure indicator until capture has stopped.
+      showPill()
+      return
+    }
     enterOnboardingMode()
   })
 
@@ -1324,6 +829,18 @@ app.whenReady().then(async () => {
   registerOnboardingIpc()
   await initTelemetry()
   registerTelemetryIpc()
+  // Tray mirrors main-owned capture state from pending Start until the durable save outcome.
+  onCaptureStatus((s) =>
+    setTrayRecording(
+      s.teardownFailed
+        ? 'teardown_failed'
+        : s.starting
+          ? 'starting'
+          : s.phase === 'idle' && s.saving
+            ? 'stopping'
+            : s.phase
+    )
+  )
   registerAutomationIpc()
   startPermissionWatch(handlePermissionChange)
 

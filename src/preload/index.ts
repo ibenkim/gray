@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
   DeepLink,
+  DropdownAck,
+  DropdownClosed,
+  RecordDropdownCommand,
+  RecordDropdownSnapshot,
   InvitePreview,
   JoinResult,
   OnboardingStep,
@@ -14,10 +18,30 @@ import type {
   StoreSnapshot,
   Suggestion,
   Team,
+  RecordingSummary,
+  ReviewPreview,
+  TransitionAck,
   Workflow,
   WorkspaceFocus
 } from '../shared/types'
 import type { ExtractedWorkflow, TelemetryEvent } from '../shared/telemetry/schema'
+
+/** Renderer's account of the final narration chunks it sent before Stop. */
+type AudioReport = {
+  chunksAcknowledged: number
+  chunksFailed: number
+  timedOut: boolean
+  /** Recorder error or stop exception after capture started (sticky). */
+  recorderFailed?: boolean
+}
+
+type RecordingResult = {
+  ok: boolean
+  sessionId?: string | null
+  error?: string
+  errorCode?: string
+  recording?: RecordingSummary
+}
 
 type TelemetryRecordingStatus = {
   recording: boolean
@@ -26,6 +50,15 @@ type TelemetryRecordingStatus = {
   sequence: number
   startedAt: string | null
   processing: boolean
+  /** Main-owned lifecycle phase (M2). */
+  phase?: 'idle' | 'starting' | 'recording' | 'pausing' | 'paused' | 'resuming' | 'stopping'
+  generation?: number
+  /** Narration ends at the first pause; resume continues without it. */
+  narration?: 'off' | 'active' | 'ended'
+  /** Main lifecycle (M2-R2): Start pending / durable save not yet written / source teardown unconfirmed. */
+  starting?: boolean
+  saving?: boolean
+  teardownFailed?: boolean
 }
 
 type TelemetryStartOpts = {
@@ -96,13 +129,13 @@ export type AutomationRunEvent =
     }
 
 const ghostBridge = {
-  /** Resize the pill window; returns the panel placement ('above' | 'below'). */
+  /** Resize the pill window; resolves a generation-stamped acknowledgement. */
   setBounds: (
     w: number,
     h: number,
     mode: 'pill' | 'glass' | 'panel',
     opts?: { durationMs?: number; pillDrive?: boolean; center?: boolean }
-  ) =>
+  ): Promise<TransitionAck> =>
     ipcRenderer.invoke('window:setBounds', {
       w,
       h,
@@ -111,10 +144,9 @@ const ghostBridge = {
       pillDrive: opts?.pillDrive,
       center: opts?.center
     }),
-  /** Hide + park off-screen before idle CSS so the 266 frame cannot paint. */
-  hideForRestore: () => ipcRenderer.invoke('window:hideForRestore'),
-  /** Restore the window to the pill rect saved before the last close. */
-  restorePill: () => ipcRenderer.invoke('window:restorePill'),
+  /** Hide + park off-screen before idle CSS — only for the given (current) close. */
+  /** Restore the window to the saved pill rect — only for the given (current) close. */
+  restorePill: (generation: number) => ipcRenderer.invoke('window:restorePill', generation),
   /** Open (or focus) the workspace window; optional deep-link to a workflow / run. */
   openWorkspace: (focus?: string | WorkspaceFocus) =>
     ipcRenderer.invoke('workspace:open', focus),
@@ -131,14 +163,31 @@ const ghostBridge = {
   setPillAppState: (state: string) => ipcRenderer.invoke('pill:setAppState', state),
   /** Ink-20 fullscreen dim behind the expanded editor. */
   setEditorScrim: (visible: boolean) => ipcRenderer.invoke('editor:setScrim', visible),
-  /** Begin dragging; collapseToPill=false keeps the glass panel open while dragging. */
-  dragStart: (x: number, y: number, opts?: { collapseToPill?: boolean }) =>
+  /** Begin dragging; resolves the gesture token. collapseToPill=false keeps glass open. */
+  dragStart: (x: number, y: number, opts?: { collapseToPill?: boolean }): Promise<number | null> =>
     ipcRenderer.invoke('pill:dragStart', { x, y, collapseToPill: opts?.collapseToPill }),
-  dragEnd: () => ipcRenderer.invoke('pill:dragEnd'),
+  /** End the gesture with its token (only the owning window's gesture ends). */
+  dragEnd: (token?: number | null): Promise<boolean> => ipcRenderer.invoke('pill:dragEnd', token),
   /** Workspace → pill: run a workflow now (looked up by id in the shared store). */
   runWorkflow: (workflowId: string) => ipcRenderer.invoke('pill:runWorkflow', workflowId),
   /** Workspace → pill: open the record panel. */
   openRecordPanel: () => ipcRenderer.invoke('pill:openRecordPanel'),
+  /** Pill: show the anchored Record dropdown (M1-HF3); settles once visible or failed. */
+  openDropdown: (): Promise<DropdownAck> => ipcRenderer.invoke('dropdown:open'),
+  closeDropdown: (): Promise<DropdownAck | null> => ipcRenderer.invoke('dropdown:close'),
+  /** Pill → dropdown: the current form view (the pill stays the owner). */
+  sendDropdownSnapshot: (snapshot: RecordDropdownSnapshot) =>
+    ipcRenderer.send('dropdown:snapshot', snapshot),
+  onDropdownCommand: (cb: (cmd: RecordDropdownCommand) => void) => {
+    const listener = (_e: unknown, cmd: RecordDropdownCommand) => cb(cmd)
+    ipcRenderer.on('dropdown:command', listener)
+    return () => ipcRenderer.removeListener('dropdown:command', listener)
+  },
+  onDropdownClosed: (cb: (event: DropdownClosed) => void) => {
+    const listener = (_e: unknown, event: DropdownClosed) => cb(event)
+    ipcRenderer.on('dropdown:closed', listener)
+    return () => ipcRenderer.removeListener('dropdown:closed', listener)
+  },
   /** Workspace → pill: open the editor pre-filled (Suggested "Set it up for me"). */
   openEditor: () => ipcRenderer.invoke('pill:openEditor'),
   /** Activity Answer / paused hold — show pill + expand running panel. */
@@ -272,22 +321,34 @@ const ghostBridge = {
     opts?: TelemetryStartOpts
   ): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
     ipcRenderer.invoke('telemetry:sessionStart', opts ?? {}),
-  telemetryPause: (): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
-    ipcRenderer.invoke('telemetry:sessionPause'),
-  telemetryResume: (): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
-    ipcRenderer.invoke('telemetry:sessionResume'),
+  telemetryPause: (payload?: {
+    sessionId?: string
+    audio?: AudioReport
+  }): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
+    ipcRenderer.invoke('telemetry:sessionPause', payload),
+  telemetryResume: (payload?: {
+    sessionId?: string
+  }): Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }> =>
+    ipcRenderer.invoke('telemetry:sessionResume', payload),
+  /** Main's stop barrier (hide/logout/revoke/quit) asks the owner to release its mic and Stop. */
+  onTelemetryStopRequested: (cb: (req: { sessionId: string; reason: string }) => void) => {
+    const listener = (_e: unknown, req: { sessionId: string; reason: string }) => cb(req)
+    ipcRenderer.on('telemetry:stopRequested', listener)
+    return () => ipcRenderer.removeListener('telemetry:stopRequested', listener)
+  },
   telemetryStop: (
-    sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean }
+    sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean; audio?: AudioReport }
   ): Promise<{
     ok: boolean
     sessionId?: string | null
     error?: string
     errorCode?: string
-    workflow?: Workflow
-    extracted?: ExtractedWorkflow
+    /** Finish saved locally; no interpretation ran (M1 hold). */
+    localOnly?: boolean
+    recording?: RecordingSummary
     discarded?: boolean
   }> => ipcRenderer.invoke('telemetry:sessionStop', sessionIdOrOpts),
-  /** Retry polish + OpenAI summarization without recording again. */
+  /** Retry interpretation. Returns UPLOAD_REVIEW_REQUIRED while the M1 hold is active. */
   telemetryProcessWorkflow: (
     sessionId: string
   ): Promise<{
@@ -298,6 +359,37 @@ const ghostBridge = {
     workflow?: Workflow
     extracted?: ExtractedWorkflow
   }> => ipcRenderer.invoke('telemetry:processWorkflow', sessionId),
+  /** Same-session local save retry (never re-records, never sends). */
+  telemetryRetrySave: (sessionId: string): Promise<RecordingResult> =>
+    ipcRenderer.invoke('telemetry:retrySave', sessionId),
+  telemetryListRecordings: (opts?: { limit?: number }): Promise<RecordingSummary[]> =>
+    ipcRenderer.invoke('telemetry:listRecordings', opts),
+  telemetryGetRecording: (sessionId: string): Promise<RecordingResult> =>
+    ipcRenderer.invoke('telemetry:getRecording', sessionId),
+  /** Local only: main prepares the exact sanitized payload; nothing is sent. */
+  telemetryPrepareReview: (
+    sessionId: string
+  ): Promise<RecordingResult & { preview?: ReviewPreview }> =>
+    ipcRenderer.invoke('telemetry:prepareReview', sessionId),
+  telemetryCancelReview: (sessionId: string): Promise<RecordingResult> =>
+    ipcRenderer.invoke('telemetry:cancelReview', sessionId),
+  /** Approves one prepared revision/digest; main validates and owns the request. */
+  telemetryApproveInterpretation: (payload: {
+    sessionId: string
+    revision: number
+    digest: string
+    acknowledgeUnknownOutcome?: boolean
+  }): Promise<RecordingResult & { alreadyRunning?: boolean }> =>
+    ipcRenderer.invoke('telemetry:approveInterpretation', payload),
+  telemetryOpenResult: (
+    sessionId: string
+  ): Promise<{ ok: boolean; workflow?: Workflow; partial?: boolean; error?: string }> =>
+    ipcRenderer.invoke('telemetry:openResult', sessionId),
+  onRecordingChanged: (cb: (summary: RecordingSummary) => void) => {
+    const listener = (_e: unknown, summary: RecordingSummary) => cb(summary)
+    ipcRenderer.on('telemetry:recordingChanged', listener)
+    return () => ipcRenderer.removeListener('telemetry:recordingChanged', listener)
+  },
   getTelemetryStatus: (): Promise<TelemetryRecordingStatus> =>
     ipcRenderer.invoke('telemetry:getStatus'),
   getTelemetryWorkflow: (
@@ -339,13 +431,15 @@ const ghostBridge = {
     chunk: ArrayBuffer
   ): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('narration:append', sessionId, chunk),
-  narrationStop: (): Promise<{
+  narrationStop: (
+    sessionId: string
+  ): Promise<{
     ok: boolean
     sessionId?: string | null
     audioPath?: string | null
     hadChunks?: boolean
     error?: string
-  }> => ipcRenderer.invoke('narration:stop'),
+  }> => ipcRenderer.invoke('narration:stop', sessionId),
 
   // ── Automation compile + run ──
   automationCompile: (
@@ -417,7 +511,29 @@ const ghostBridge = {
   }
 }
 
-if (process.contextIsolated) {
+/**
+ * The Record dropdown window (main passes this surface argument) gets only its own narrow UI
+ * messages: no capture, store, automation or window-control bridge.
+ */
+const grayDropdown = {
+  hello: () => ipcRenderer.send('dropdown:hello'),
+  ready: () => ipcRenderer.send('dropdown:ready'),
+  measured: (height: number) => ipcRenderer.send('dropdown:measured', height),
+  command: (cmd: RecordDropdownCommand) => ipcRenderer.send('dropdown:command', cmd),
+  dismiss: () => ipcRenderer.send('dropdown:dismiss'),
+  dragStart: (): Promise<number | null> => ipcRenderer.invoke('dropdown:dragStart'),
+  dragEnd: (token: number | null): Promise<boolean> => ipcRenderer.invoke('dropdown:dragEnd', token),
+  onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => {
+    const listener = (_e: unknown, snapshot: RecordDropdownSnapshot) => cb(snapshot)
+    ipcRenderer.on('dropdown:snapshot', listener)
+    return () => ipcRenderer.removeListener('dropdown:snapshot', listener)
+  }
+}
+const isRecordDropdown = process.argv.includes('--gray-surface=record-dropdown')
+
+if (isRecordDropdown) {
+  contextBridge.exposeInMainWorld('grayDropdown', grayDropdown)
+} else if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
     contextBridge.exposeInMainWorld('ghostBridge', ghostBridge)

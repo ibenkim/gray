@@ -26,68 +26,183 @@ import type {
   Workflow
 } from './types'
 import { formatWatchEntry } from '../../../shared/telemetry/formatWatchEntry'
-import type { ExtractedWorkflow, TelemetryEvent } from '../../../shared/telemetry/schema'
-import { createMockDraft, makeRunSteps } from './mockData'
+import type { TelemetryEvent } from '../../../shared/telemetry/schema'
+import { noticeForStopResult, type RecordingNotice } from '../workspace/UploadReview'
+import { createMockDraft, makeRunSteps, MOCK_APPS } from './mockData'
 
 /**
- * Ensure review fields from ExtractedWorkflow stay on the editor Workflow
- * even if an older main process omitted them from toEditorWorkflow.
+ * Renderer's account of the narration chunks it sent; main verifies it against the sink.
+ * `recorderFailed` is sticky and separate from the counts: a recorder error or stop
+ * exception after capture started (M2-R1 correction).
  */
-function applyExtractedReview(
-  workflow: Workflow,
-  extracted: ExtractedWorkflow | undefined,
-  sessionId?: string | null
-): Workflow {
-  const base: Workflow = {
-    ...workflow,
-    sessionId: workflow.sessionId ?? sessionId ?? undefined,
-    hoursReturned: workflow.hoursReturned ?? '≈ 0 h returned total',
-    automationStale: false,
-    contractAccepted: workflow.contractAccepted ?? false
+type NarrationReport = {
+  chunksAcknowledged: number
+  chunksFailed: number
+  timedOut: boolean
+  recorderFailed: boolean
+}
+
+/** One narration attempt: its own recorder, tracks and chunk account (never a global). */
+type NarrationAttempt = {
+  sessionId: string
+  cancelled: boolean
+  recorder: MediaRecorder | null
+  stream: MediaStream | null
+  chunks: { pending: Set<Promise<void>>; acknowledged: number; failed: number }
+  /** Sticky: set by a runtime recorder error or a stop exception, never cleared. */
+  recorderFailed: boolean
+  /** The receipt was built; later callbacks cannot change it. */
+  settled: boolean
+  end: Promise<NarrationReport> | null
+}
+
+/** End exactly this attempt (idempotent, joinable); never touches a newer attempt. */
+function endNarrationAttempt(attempt: NarrationAttempt): Promise<NarrationReport> {
+  if (!attempt.end) {
+    attempt.cancelled = true
+    attempt.end = finishNarrationAttempt(attempt)
   }
-  if (!extracted) return base
+  return attempt.end
+}
 
-  const destinations = [
-    ...new Set([
-      ...(extracted.authorizationScope?.destinations ?? []),
-      ...(extracted.addresses ?? []).map((a) => a.id)
-    ])
-  ]
-  const hasContract =
-    (extracted.inputs?.length ?? 0) > 0 ||
-    (extracted.writes?.length ?? 0) > 0 ||
-    (extracted.commits?.length ?? 0) > 0 ||
-    destinations.length > 0 ||
-    !!extracted.authorizationScope
+const NARRATION_STOP_MS = 1500
+const NARRATION_DRAIN_MS = 5000
 
+/** Stop each track exactly once. */
+function releaseTracks(attempt: NarrationAttempt): void {
+  const stream = attempt.stream
+  attempt.stream = null
+  stream?.getTracks().forEach((t) => t.stop())
+}
+
+/** True when `p` settles first; the timer is always cleared. */
+function settlesWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms)
+    void p.then(
+      () => {
+        clearTimeout(timer)
+        resolve(true)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(true)
+      }
+    )
+  })
+}
+
+/** Stop recorder (bounded), always release tracks, drain final chunk acks (bounded). */
+async function finishNarrationAttempt(attempt: NarrationAttempt): Promise<NarrationReport> {
+  let timedOut = false
+  try {
+    const recorder = attempt.recorder
+    if (recorder && recorder.state !== 'inactive') {
+      let onStop: (() => void) | null = null
+      const stopped = new Promise<void>((resolve) => {
+        onStop = () => resolve()
+        recorder.addEventListener('stop', onStop)
+        try {
+          recorder.stop()
+        } catch {
+          // A stop exception is a recorder failure, not a timeout and not success.
+          attempt.recorderFailed = true
+          resolve()
+        }
+      })
+      try {
+        if (!(await settlesWithin(stopped, NARRATION_STOP_MS))) timedOut = true
+      } finally {
+        // The owned listener never outlives this teardown (success, exception or timeout).
+        if (onStop) recorder.removeEventListener('stop', onStop)
+      }
+    }
+  } finally {
+    releaseTracks(attempt)
+  }
+  const { chunks } = attempt
+  if (chunks.pending.size > 0) {
+    if (!(await settlesWithin(Promise.allSettled([...chunks.pending]), NARRATION_DRAIN_MS))) {
+      timedOut = true
+    }
+  }
+  attempt.settled = true
   return {
-    ...base,
-    summary: base.summary ?? extracted.summary,
-    goal: base.goal ?? extracted.goal ?? undefined,
-    questions:
-      base.questions ??
-      (extracted.questions?.length
-        ? extracted.questions.map((q) => ({
-            id: q.id,
-            prompt: q.prompt,
-            relatedStepId: q.relatedStepId,
-            kind: q.kind
-          }))
-        : undefined),
-    runContract:
-      base.runContract ??
-      (hasContract
-        ? {
-            inputs: extracted.inputs ?? [],
-            writes: extracted.writes ?? [],
-            commits: extracted.commits ?? [],
-            destinations,
-            authorizationLevel: extracted.authorizationScope?.level,
-            authorizationExpires: extracted.authorizationScope?.expires ?? null
-          }
-        : undefined)
+    chunksAcknowledged: chunks.acknowledged,
+    chunksFailed: chunks.failed + chunks.pending.size,
+    timedOut,
+    recorderFailed: attempt.recorderFailed
   }
 }
+
+/** The Record dropdown could not open (load failure, timeout, no room): neutral and retryable. */
+function dropdownFailureNotice(): RecordingNotice {
+  return {
+    tone: 'error',
+    title: 'Couldn’t open the record panel',
+    body: 'Nothing was recorded. Click the pill to try again.',
+    sessionId: null,
+    action: null
+  }
+}
+
+/**
+ * Coalesces hover open/close requests (M1-HF2): the latest request wins, one native
+ * transition runs at a time, and a superseded transition (ack.current=false) stops without
+ * touching UI. Requests made while a drag owns the window wait for `kick()` at drag end.
+ */
+export class HoverDriver {
+  private desired: 'open' | 'closed' = 'closed'
+  private running = false
+  private disposed = false
+
+  constructor(
+    private readonly ops: {
+      isOpen: () => boolean
+      canRun: () => boolean
+      open: () => Promise<boolean>
+      close: () => Promise<boolean>
+    }
+  ) {}
+
+  request(next: 'open' | 'closed'): void {
+    this.desired = next
+    void this.pump()
+  }
+
+  /** Pill click: flip the latest intent (including an open/close still in flight). */
+  toggle(): void {
+    const effective = this.running ? this.desired : this.ops.isOpen() ? 'open' : 'closed'
+    this.request(effective === 'open' ? 'closed' : 'open')
+  }
+
+  kick(): void {
+    void this.pump()
+  }
+
+  dispose(): void {
+    this.disposed = true
+  }
+
+  private async pump(): Promise<void> {
+    if (this.running || this.disposed) return
+    this.running = true
+    try {
+      // Bounded: at most a few alternations for one burst of requests.
+      for (let step = 0; step < 4 && !this.disposed && this.ops.canRun(); step++) {
+        const open = this.ops.isOpen()
+        if (this.desired === 'open' && !open) {
+          if (!(await this.ops.open())) break
+        } else if (this.desired === 'closed' && open) {
+          if (!(await this.ops.close())) break
+        } else break
+      }
+    } finally {
+      this.running = false
+    }
+  }
+}
+
 
 export type WatchEntry = {
   time: string
@@ -101,10 +216,6 @@ const RUN_TICK_MS = 1800
 const ERROR_HOLD_MS = 10 * 60 * 1000
 /** Teal saved pill reverts to Hello after ~6s. */
 const SAVED_PILL_MS = 6000
-/** Stable record-panel height. Matches `.record-panel` measured height (not min-height). */
-const HOVER_PANEL_H = 312
-/** Reject clipped measures from close/morph — 81px poisoned the next open to h=113. */
-const HOVER_PANEL_MEASURE_MIN = 200
 
 type ActiveRun = {
   id: string
@@ -134,12 +245,10 @@ type WorkflowContextValue = {
   watchLog: WatchEntry[]
   watchExpanded: boolean
   setWatchExpanded: (v: boolean) => void
-  /** Set when organize/extract fails after Finish. */
-  organizeError: string | null
-  /** Session id preserved so summarization can be retried without re-recording. */
-  lastTelemetrySessionId: string | null
-  dismissOrganizeError: () => void
-  retryOrganize: () => Promise<void>
+  /** Saved / incomplete / error notice after Finish; keeps the session id for review. */
+  recordingNotice: RecordingNotice | null
+  dismissRecordingNotice: () => void
+  runRecordingNoticeAction: () => void
   // editor
   workflow: Workflow
   setWorkflow: Dispatch<SetStateAction<Workflow>>
@@ -150,13 +259,6 @@ type WorkflowContextValue = {
   openSavedInLibrary: () => void
   dismissSavedConfirm: () => void
   // window layout
-  panelPlacement: 'above' | 'below'
-  /** True while the hover panel is morphing/fading out. */
-  hoverFading: boolean
-  /** How the hover panel is dismissing — morph back into the pill, or quick drag. */
-  hoverDismissMode: 'morph' | 'drag' | null
-  /** Measured hover-panel height so the glass window hugs its content. */
-  reportHoverPanelHeight: (h: number) => void
   // drag ↔ hover mutual exclusion
   /** Returns whether the drag should collapse glass → pill. */
   beginDrag: () => { collapseToPill: boolean }
@@ -200,6 +302,8 @@ type WorkflowContextValue = {
   // transitions
   openHover: () => void
   closeHover: () => void
+  /** Pill click: open or close, honoring an open/close still in flight. */
+  toggleHover: () => void
   startRecording: () => void
   cancelRecording: () => void
   finishRecording: () => void
@@ -280,12 +384,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [watchExpanded, setWatchExpanded] = useState(false)
   const watchExpandedRef = useRef(watchExpanded)
   watchExpandedRef.current = watchExpanded
-  const [organizeError, setOrganizeError] = useState<string | null>(null)
-  const [lastTelemetrySessionId, setLastTelemetrySessionId] = useState<string | null>(null)
+  const [recordingNotice, setRecordingNotice] = useState<RecordingNotice | null>(null)
   const telemetrySessionRef = useRef<string | null>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const mediaStreamRef = useRef<MediaStream | null>(null)
-  const narrationSessionRef = useRef<string | null>(null)
+  /** The session's one narration attempt (M2-R1); owned before acquisition is awaited. */
+  const narrationRef = useRef<NarrationAttempt | null>(null)
+  const pauseBusyRef = useRef(false)
+  /** The teardown-failure notice was shown for this session. */
+  const teardownNoticeRef = useRef<string | null>(null)
 
   const [workflow, setWorkflow] = useState<Workflow>(() => createMockDraft(newId('draft')))
   const [editorCollapsed, setEditorCollapsed] = useState(false)
@@ -293,25 +398,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   editorCollapsedRef.current = editorCollapsed
   const [savedConfirm, setSavedConfirm] = useState<SavedConfirm | null>(null)
 
-  const [panelPlacement, setPanelPlacement] = useState<'above' | 'below'>('above')
-  const [hoverFading, setHoverFading] = useState(false)
-  const [hoverDismissMode, setHoverDismissMode] = useState<'morph' | 'drag' | null>(null)
-  /** Last known full record-panel height (never a clipped close-frame measure). */
-  const [hoverPanelH, setHoverPanelH] = useState(HOVER_PANEL_H)
-  const hoverPanelHRef = useRef(HOVER_PANEL_H)
-  hoverPanelHRef.current = hoverPanelH
   /** While true, hover must not open — dragging and hovering are exclusive. */
   const draggingRef = useRef(false)
-  /** Prevents double-triggering morph-out / drag dismiss. */
-  const hoverClosingRef = useRef(false)
-  /** True while glass bounds are applied and the panel has not mounted yet. */
-  const hoverOpeningRef = useRef(false)
-  const hoverOpenSeqRef = useRef(0)
   const prevStateRef = useRef<AppState>(state)
-  /** True while the glass open ease is running — ignore height churn mid-anim. */
-  const hoverOpenAnimRef = useRef(false)
-  const pendingHoverHRef = useRef<number | null>(null)
-  const openAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Last bounds request sent for the pill (the dropdown never resizes it). */
+  const lastBoundsKeyRef = useRef<string | null>(null)
+  /** Generation of the latest dropdown open acknowledged as current (M1-HF3). */
+  const dropdownGenRef = useRef(-1)
+  /** One Start from the dropdown at a time. */
+  const dropdownStartRef = useRef(false)
 
   const [runSteps, setRunSteps] = useState<RunStep[]>([])
   const runStepsRef = useRef<RunStep[]>([])
@@ -506,17 +601,19 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       mode: 'pill' | 'glass' | 'panel'
       center?: boolean
     }
-    const glassPanelH = Math.max(hoverPanelH, HOVER_PANEL_H)
     const idleSize: Size = savedConfirm
       ? { w: 210, h: 24, mode: 'pill' }
-      : permToastVisible || !!organizeError
+      : permToastVisible || !!recordingNotice
         ? { w: 410, h: 232, mode: 'panel' }
         : permissionPaused
           ? { w: 224, h: 24, mode: 'pill' }
           : { w: 94, h: 24, mode: 'pill' }
+    // The Record dropdown is its own window (M1-HF3): while it is open the pill keeps its
+    // idle capsule size (toasts hide while it is open).
+    const pillOnly: Size = permissionPaused ? { w: 224, h: 24, mode: 'pill' } : { w: 94, h: 24, mode: 'pill' }
     const sizes: Record<AppState, Size> = {
       idle: idleSize,
-      hover: { w: 266, h: glassPanelH + 8 + 24, mode: 'glass' },
+      hover: pillOnly,
       recording: watchExpanded
         ? // Hug ledger + side/bottom shadow pad; top pad is 0 via .ghost-root-panel.
           { w: 321, h: 336, mode: 'panel' }
@@ -535,45 +632,24 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const { w, h, mode, center } = sizes[state]
     const prev = prevStateRef.current
     prevStateRef.current = state
-    if (hoverClosingRef.current && state === 'hover') return
-    if (prev === 'hover' && state === 'idle') {
-      return
-    }
-    const isOpenTransition = prev === 'idle' && state === 'hover'
-    if (state === 'hover' && !isOpenTransition && hoverOpenAnimRef.current) {
-      return
-    }
-    if (isOpenTransition) {
-      hoverOpenAnimRef.current = true
-      if (openAnimTimerRef.current) clearTimeout(openAnimTimerRef.current)
-      openAnimTimerRef.current = setTimeout(() => {
-        hoverOpenAnimRef.current = false
-        openAnimTimerRef.current = null
-        const pending = pendingHoverHRef.current
-        pendingHoverHRef.current = null
-        if (pending != null) {
-          setHoverPanelH((prevH) => (prevH === pending ? prevH : pending))
-        }
-      }, 440)
-      return
-    }
+    // Opening/closing the dropdown or re-running this effect never re-sends the pill's
+    // current size: no native frame operation on the stationary pill.
+    const key = `${w}x${h}:${mode}:${center ? 1 : 0}`
+    const quiet = (s: AppState) => s === 'idle' || s === 'hover'
+    if (quiet(prev) && quiet(state) && lastBoundsKeyRef.current === key) return
+    lastBoundsKeyRef.current = key
     const durationMs = 0
     const pillDrive = false
-    window.ghostBridge
-      ?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
-      ?.then((placement) => {
-        if (placement) setPanelPlacement(placement)
-      })
+    void window.ghostBridge?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
   }, [
     state,
     watchExpanded,
     editorCollapsed,
     runCollapsed,
     savedConfirm,
-    hoverPanelH,
     permToastVisible,
     permissionPaused,
-    organizeError
+    recordingNotice
   ])
 
   // ── Recording timer ──
@@ -972,47 +1048,39 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Transitions ──
 
-  const stopNarrationCapture = useCallback(async () => {
-    const recorder = mediaRecorderRef.current
-    mediaRecorderRef.current = null
-    const stream = mediaStreamRef.current
-    mediaStreamRef.current = null
-    narrationSessionRef.current = null
-    if (recorder && recorder.state !== 'inactive') {
-      await new Promise<void>((resolve) => {
-        const done = () => resolve()
-        const timer = setTimeout(done, 1500)
-        recorder.addEventListener(
-          'stop',
-          () => {
-            clearTimeout(timer)
-            done()
-          },
-          { once: true }
-        )
-        try {
-          recorder.stop()
-        } catch {
-          clearTimeout(timer)
-          done()
-        }
-      })
-    }
-    stream?.getTracks().forEach((t) => t.stop())
-    try {
-      await window.ghostBridge?.narrationStop?.()
-    } catch {
-      /* ignore */
-    }
+  /**
+   * End the current narration attempt (Pause, Finish, Cancel, owner Stop, unmount). Joinable:
+   * every caller gets the same chunk account. Cancels a pending acquisition synchronously.
+   * Main closes the matching sink when it receives this account with Pause/Stop.
+   */
+  const endNarration = useCallback((): Promise<NarrationReport | undefined> => {
+    const attempt = narrationRef.current
+    return attempt ? endNarrationAttempt(attempt) : Promise.resolve(undefined)
   }, [])
 
   const startNarrationCapture = useCallback(async (sessionId: string) => {
     const bridge = window.ghostBridge
     if (!bridge?.narrationStart || !bridge.narrationAppend) return
+    const attempt: NarrationAttempt = {
+      sessionId,
+      cancelled: false,
+      recorder: null,
+      stream: null,
+      chunks: { pending: new Set(), acknowledged: 0, failed: 0 },
+      recorderFailed: false,
+      settled: false,
+      end: null
+    }
+    // Owned before any await, so Pause/Stop/unmount can cancel a pending acquisition.
+    narrationRef.current = attempt
+    const live = () => !attempt.cancelled && narrationRef.current === attempt
     try {
       const started = await bridge.narrationStart(sessionId)
-      if (!started?.ok) return
+      if (!started?.ok || !live()) return
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      attempt.stream = stream
+      // Granted after Pause/Stop: release now and never construct a recorder.
+      if (!live()) return
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/webm')
@@ -1021,31 +1089,44 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
         : new MediaRecorder(stream)
+      const chunks = attempt.chunks
       recorder.ondataavailable = (ev) => {
         if (!ev.data || ev.data.size === 0) return
-        void ev.data
+        // ponytail: one pending promise per 1s chunk; the owned end drains them (bounded).
+        const p: Promise<void> = ev.data
           .arrayBuffer()
           .then((buf) => bridge.narrationAppend?.(sessionId, buf))
-          .catch(() => {
-            /* drop chunk */
-          })
+          .then(
+            (r) => {
+              if (r?.ok) chunks.acknowledged += 1
+              else chunks.failed += 1
+            },
+            () => {
+              chunks.failed += 1
+            }
+          )
+          .finally(() => chunks.pending.delete(p))
+        chunks.pending.add(p)
       }
       recorder.onerror = () => {
-        /* continue session without narration */
+        // Audio captured so far is no longer verifiable: mark this attempt failed (sticky)
+        // and end only this attempt; the non-audio recording continues.
+        if (attempt.settled) return
+        attempt.recorderFailed = true
+        void endNarrationAttempt(attempt)
       }
-      mediaStreamRef.current = stream
-      mediaRecorderRef.current = recorder
-      narrationSessionRef.current = sessionId
+      attempt.recorder = recorder
       recorder.start(1000)
     } catch {
-      // Mic failure must not abort the telemetry session.
-      try {
-        await bridge.narrationStop?.()
-      } catch {
-        /* ignore */
-      }
+      // Mic, recorder construction or start failure must not abort the telemetry session.
+    } finally {
+      // Cancelled, or no running recorder (construction/start threw): no track may stay live.
+      if (!live() || attempt.recorder?.state !== 'recording') releaseTracks(attempt)
     }
   }, [])
+
+  // Unmount (reload/close) must never leave a pending grant or live track behind.
+  useEffect(() => () => void endNarration(), [endNarration])
 
   const resetRecording = useCallback(() => {
     setElapsed(0)
@@ -1053,85 +1134,87 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setWatchLog([])
     setWatchExpanded(false)
     telemetrySessionRef.current = null
-    setOrganizeError(null)
-    void stopNarrationCapture()
-  }, [stopNarrationCapture])
+    setRecordingNotice(null)
+    void endNarration()
+    narrationRef.current = null
+  }, [endNarration])
 
-  const openHover = useCallback(() => {
-    if (draggingRef.current || hoverClosingRef.current) return
-    if (hoverOpeningRef.current) {
-      hoverOpeningRef.current = false
-      hoverOpenSeqRef.current += 1
-      return
-    }
-    if (stateRef.current !== 'idle') return
+  /**
+   * Open the anchored Record dropdown (M1-HF3): main shows the one reusable child window
+   * beside the stationary pill. True only when this open became current UI. `owned` is false
+   * once the driver lifetime that started it was cleaned up.
+   */
+  const runHoverOpen = useCallback(async (owned: () => boolean): Promise<boolean> => {
+    if (stateRef.current !== 'idle') return false
     setSavedConfirm(null)
-    setHoverFading(false)
-    setHoverDismissMode(null)
-    pendingHoverHRef.current = null
-    if (hoverPanelHRef.current < HOVER_PANEL_MEASURE_MIN) {
-      setHoverPanelH(HOVER_PANEL_H)
+    const ack = await window.ghostBridge?.openDropdown?.()
+    if (!ack?.current) return false
+    if (!owned()) {
+      // This driver lifetime ended (remount/reload) while main was opening: do not leave a
+      // dropdown showing that no current pill state owns.
+      if (ack.open) void window.ghostBridge?.closeDropdown?.()
+      return false
     }
-    const glassPanelH = Math.max(hoverPanelHRef.current, HOVER_PANEL_H)
-    const w = 266
-    const h = glassPanelH + 8 + 24
-    hoverOpeningRef.current = true
-    const seq = ++hoverOpenSeqRef.current
-    const pending = window.ghostBridge?.setBounds?.(w, h, 'glass', {
-      durationMs: 420,
-      pillDrive: true
+    if (!ack.open) {
+      // A neutral, retryable failure — never an endless loading state.
+      if (ack.error && ack.error !== 'closed') setRecordingNotice(dropdownFailureNotice())
+      return false
+    }
+    if (stateRef.current !== 'idle') {
+      void window.ghostBridge?.closeDropdown?.()
+      return false
+    }
+    dropdownGenRef.current = ack.generation
+    // Synchronous so the driver sees the new state before deciding its next step.
+    flushSync(() => setState('hover'))
+    return true
+  }, [])
+
+  const runHoverClose = useCallback(async (owned: () => boolean): Promise<boolean> => {
+    if (stateRef.current !== 'hover') return false
+    await window.ghostBridge?.closeDropdown?.()
+    if (!owned()) return false
+    flushSync(() => setState((s) => (s === 'hover' ? 'idle' : s)))
+    return true
+  }, [])
+
+  const runHoverOpenRef = useRef(runHoverOpen)
+  runHoverOpenRef.current = runHoverOpen
+  const runHoverCloseRef = useRef(runHoverClose)
+  runHoverCloseRef.current = runHoverClose
+  // Effect-owned (M1-HF2-R1): each effect lifetime gets a fresh driver, so a StrictMode or
+  // Fast Refresh cleanup→setup replay never leaves a disposed one in the ref. Its async
+  // work is owned only while the ref still points at it.
+  const hoverDriverRef = useRef<HoverDriver | null>(null)
+  useEffect(() => {
+    const driver: HoverDriver = new HoverDriver({
+      isOpen: () => stateRef.current === 'hover',
+      canRun: () => !draggingRef.current,
+      open: () => runHoverOpenRef.current(() => hoverDriverRef.current === driver),
+      close: () => runHoverCloseRef.current(() => hoverDriverRef.current === driver)
     })
-    if (!pending) {
-      hoverOpeningRef.current = false
-      return
+    hoverDriverRef.current = driver
+    return () => {
+      driver.dispose()
+      if (hoverDriverRef.current === driver) hoverDriverRef.current = null
     }
-    void pending.then((placement) => {
-        if (seq !== hoverOpenSeqRef.current) return
-        hoverOpeningRef.current = false
-        if (stateRef.current !== 'idle') return
-        if (placement) setPanelPlacement(placement)
-        setState('hover')
-      })
   }, [])
 
-  const reportHoverPanelHeight = useCallback((h: number) => {
-    const next = Math.round(h)
-    if (hoverClosingRef.current || stateRef.current !== 'hover') return
-    if (next < HOVER_PANEL_MEASURE_MIN) return
-    if (hoverOpenAnimRef.current) {
-      pendingHoverHRef.current = next
-      return
-    }
-    setHoverPanelH((prev) => (Math.abs(prev - next) <= 2 ? prev : next))
+  // Main closed the dropdown (outside focus, Escape in the child, child failure): follow it.
+  // A close older than the latest acknowledged open is stale and ignored.
+  useEffect(() => {
+    return window.ghostBridge?.onDropdownClosed?.((event) => {
+      if (event.generation <= dropdownGenRef.current) return
+      if (stateRef.current !== 'hover') return
+      flushSync(() => setState('idle'))
+      hoverDriverRef.current?.request('closed')
+      if (event.reason === 'failed') setRecordingNotice(dropdownFailureNotice())
+    })
   }, [])
 
-  const closeHover = useCallback(() => {
-    if (stateRef.current !== 'hover' || hoverClosingRef.current) return
-    hoverClosingRef.current = true
-    pendingHoverHRef.current = null
-    setHoverDismissMode('morph')
-    setHoverFading(true)
-    // Stay in glass CSS until bounds finish — idle + width:100% mid-anim
-    // was stretching the pill to the shrinking window (pillW≠94).
-    void window.ghostBridge
-      ?.setBounds?.(94, 24, 'pill', {
-        durationMs: 400,
-        pillDrive: true
-      })
-      ?.then(async () => {
-        try {
-          await window.ghostBridge?.hideForRestore?.()
-          flushSync(() => {
-            setHoverFading(false)
-            setHoverDismissMode(null)
-            setState((s) => (s === 'hover' ? 'idle' : s))
-          })
-          await window.ghostBridge?.restorePill?.()
-        } finally {
-          hoverClosingRef.current = false
-        }
-      })
-  }, [])
+  const openHover = useCallback(() => hoverDriverRef.current?.request('open'), [])
+  const closeHover = useCallback(() => hoverDriverRef.current?.request('closed'), [])
+  const toggleHover = useCallback(() => hoverDriverRef.current?.toggle(), [])
 
   const beginDrag = useCallback((): { collapseToPill: boolean } => {
     draggingRef.current = true
@@ -1148,6 +1231,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const endDrag = useCallback(() => {
     draggingRef.current = false
+    // Open/close requested during the drag runs now, from the dropped position.
+    hoverDriverRef.current?.kick()
   }, [])
 
   const startRecording = useCallback(async () => {
@@ -1166,7 +1251,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       narrate: wantNarrate
     })
     if (!result?.ok) {
-      setOrganizeError(result?.error ?? 'Could not start recording')
+      setRecordingNotice({
+        tone: 'error',
+        title: 'Couldn’t start recording',
+        body: result?.error ?? 'Could not start recording',
+        sessionId: null,
+        action: null
+      })
       setState('idle')
       return
     }
@@ -1180,7 +1271,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [micGranted, narrate, recordMode, resetRecording, selectedAppId, startNarrationCapture])
 
   const cancelRecording = useCallback(async () => {
-    await stopNarrationCapture()
+    await endNarration()
     const sessionId = telemetrySessionRef.current
     if (sessionId) {
       try {
@@ -1191,67 +1282,222 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }
     resetRecording()
     setState('idle')
-  }, [resetRecording, stopNarrationCapture])
+  }, [endNarration, resetRecording])
 
   const finishRecording = useCallback(async () => {
     if (stateRef.current === 'organizing') return
     setWatchExpanded(false)
     setState('organizing')
-    setOrganizeError(null)
-    await stopNarrationCapture()
-    const sessionId = telemetrySessionRef.current ?? undefined
-    const result = await window.ghostBridge?.telemetryStop?.(
-      sessionId ? { sessionId } : undefined
-    )
-    if (!result?.ok || !result.workflow) {
-      const sid = result?.sessionId ?? sessionId ?? null
-      const errMsg =
-        (result as { discarded?: boolean } | undefined)?.discarded
-          ? 'Recording was discarded before it could be organized.'
-          : result?.error ??
-            'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
-      // Reset ledger/timer but keep organizeError + retry session id (resetRecording clears both).
-      setElapsed(0)
-      setRecordPaused(false)
-      setWatchLog([])
-      setWatchExpanded(false)
-      telemetrySessionRef.current = null
-      void stopNarrationCapture()
-      if (sid) setLastTelemetrySessionId(sid)
-      setOrganizeError(errMsg)
-      setState('idle')
-      return
+    setRecordingNotice(null)
+    const sessionId = telemetrySessionRef.current
+    let result: Awaited<ReturnType<NonNullable<typeof window.ghostBridge>['telemetryStop']>> | undefined
+    try {
+      // Joins a pause-time end: the same account, never a later zeroed one.
+      const audio = await endNarration()
+      const owned = narrationRef.current?.sessionId === sessionId ? audio : undefined
+      result = await window.ghostBridge?.telemetryStop?.({
+        sessionId: sessionId ?? undefined,
+        audio: owned
+      })
+    } catch {
+      result = undefined
     }
-    setLastTelemetrySessionId(null)
-    setWorkflow(applyExtractedReview(result.workflow, result.extracted, result.sessionId))
-    setEditorCollapsed(false)
-    resetRecording()
-    setState('editor')
-  }, [resetRecording, stopNarrationCapture])
+    // Saving finished (or failed): local only, nothing was sent. Keep the id for review.
+    setElapsed(0)
+    setRecordPaused(false)
+    setWatchLog([])
+    setWatchExpanded(false)
+    telemetrySessionRef.current = null
+    setRecordingNotice(noticeForStopResult(result, sessionId))
+    setState('idle')
+  }, [endNarration])
 
-  const dismissOrganizeError = useCallback(() => {
-    setOrganizeError(null)
+  /**
+   * Pause (M2): release the microphone and await its final chunks first, then ask main to
+   * pause; main acknowledges only after every capture source halted. The first pause ends
+   * narration for this recording and says so — resume continues without narration until
+   * audio alignment exists.
+   */
+  const toggleRecordPause = useCallback(async () => {
+    if (pauseBusyRef.current) return
+    pauseBusyRef.current = true
+    try {
+      const sessionId = telemetrySessionRef.current ?? undefined
+      if (recordPaused) {
+        const result = await window.ghostBridge?.telemetryResume?.({ sessionId })
+        if (result?.ok) setRecordPaused(false)
+        return
+      }
+      // Narration was requested for this session, whether or not the mic was granted yet.
+      const attempt = narrationRef.current
+      const narrated = !!attempt && attempt.sessionId === sessionId
+      const firstEnd = narrated && !attempt.end
+      const audio = narrated ? await endNarration() : undefined
+      const result = await window.ghostBridge?.telemetryPause?.({ sessionId, audio })
+      if (!result?.ok) return
+      setRecordPaused(true)
+      if (firstEnd) {
+        setWatchLog((log) => [
+          ...log,
+          {
+            time: formatElapsed(elapsed),
+            text: 'Narration ended at pause. Recording continues without narration after you resume.'
+          }
+        ])
+        setWatchExpanded(true)
+      }
+    } finally {
+      pauseBusyRef.current = false
+    }
+  }, [elapsed, endNarration, recordPaused])
+
+  // ── Record dropdown (M1-HF3): this provider publishes the view and owns every action ──
+  const [dropdownStarting, setDropdownStarting] = useState(false)
+  const dropdownRevRef = useRef(0)
+  const dropdownBusy = dropdownStarting || (state !== 'idle' && state !== 'hover')
+  useEffect(() => {
+    window.ghostBridge?.sendDropdownSnapshot?.({
+      revision: ++dropdownRevRef.current,
+      recordMode,
+      selectedAppId,
+      narrate,
+      apps: MOCK_APPS.map(({ id, name, detail }) => ({ id, name, detail })),
+      screenGranted,
+      micGranted,
+      busy: dropdownBusy
+    })
+  }, [recordMode, selectedAppId, narrate, screenGranted, micGranted, dropdownBusy])
+
+  // Leaving the open state for another surface (a run, an editor) closes the child; the
+  // ordinary close to idle already did.
+  const dropdownPrevStateRef = useRef(state)
+  useEffect(() => {
+    const prev = dropdownPrevStateRef.current
+    dropdownPrevStateRef.current = state
+    if (prev === 'hover' && state !== 'hover' && state !== 'idle') void window.ghostBridge?.closeDropdown?.()
+  }, [state])
+
+  const dropdownActionsRef = useRef({ setRecordMode, setSelectedAppId, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted })
+  dropdownActionsRef.current = { setRecordMode, setSelectedAppId, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted }
+  useEffect(() => {
+    // Commands were validated and de-duplicated in main; check again against current state.
+    async function startFromDropdown() {
+      const a = dropdownActionsRef.current
+      // One Start at a time, only from the open dropdown: a stale/replayed Start never
+      // produces a second recording.
+      if (dropdownStartRef.current || stateRef.current !== 'hover' || !a.screenGranted) return
+      dropdownStartRef.current = true
+      setDropdownStarting(true)
+      try {
+        await window.ghostBridge?.closeDropdown?.()
+        flushSync(() => setState((s) => (s === 'hover' ? 'idle' : s)))
+        hoverDriverRef.current?.request('closed')
+        await a.startRecording()
+      } finally {
+        dropdownStartRef.current = false
+        setDropdownStarting(false)
+      }
+    }
+    return window.ghostBridge?.onDropdownCommand?.((cmd) => {
+      const a = dropdownActionsRef.current
+      switch (cmd.type) {
+        case 'setRecordMode':
+          if (cmd.value === 'one-app' || cmd.value === 'full-screen') a.setRecordMode(cmd.value)
+          return
+        case 'selectApp':
+          if (MOCK_APPS.some((x) => x.id === cmd.value)) a.setSelectedAppId(cmd.value)
+          return
+        case 'setNarrate':
+          if (a.micGranted && typeof cmd.value === 'boolean') a.setNarrate(cmd.value)
+          return
+        case 'openScreenSettings':
+          a.openScreenRecovery()
+          return
+        case 'openMicSettings':
+          window.ghostBridge?.openPermissionSettings?.('microphone')
+          return
+        case 'start':
+          void startFromDropdown()
+          return
+      }
+    })
   }, [])
 
-  const retryOrganize = useCallback(async () => {
-    const sessionId = lastTelemetrySessionId
-    if (!sessionId) return
-    setOrganizeError(null)
-    setState('organizing')
-    const result = await window.ghostBridge?.telemetryProcessWorkflow?.(sessionId)
-    if (!result?.ok || !result.workflow) {
-      setOrganizeError(
-        result?.error ??
-          'Workflow processing is unavailable because the OpenAI API configuration is invalid.'
-      )
-      setState('idle')
+  // Main's stop barrier (hide, logout, permission loss, quit) asks this owner to Stop.
+  useEffect(() => {
+    return window.ghostBridge?.onTelemetryStopRequested?.((req) => {
+      if (stateRef.current === 'recording' && telemetrySessionRef.current === req.sessionId) {
+        void finishRecording()
+      }
+    })
+  }, [finishRecording])
+
+  // Main-owned status is authoritative: mirror pause, and after a reload show the
+  // previous session's save instead of offering a second recording.
+  useEffect(() => {
+    type Status = Awaited<ReturnType<NonNullable<typeof window.ghostBridge>['getTelemetryStatus']>>
+    const apply = (status: Status | undefined) => {
+      if (!status?.phase) return
+      const mine = !!status.sessionId && status.sessionId === telemetrySessionRef.current
+      if (mine) {
+        if (status.teardownFailed) {
+          // A source did not confirm it stopped: never present this as a clean pause.
+          setRecordPaused(false)
+          if (teardownNoticeRef.current !== status.sessionId) {
+            teardownNoticeRef.current = status.sessionId
+            setWatchLog((log) => [
+              ...log,
+              {
+                time: '',
+                text: 'An input monitor did not confirm it stopped. Finish to save — this recording will be marked incomplete.'
+              }
+            ])
+            setWatchExpanded(true)
+          }
+        } else if (status.phase === 'paused') setRecordPaused(true)
+        else if (status.phase === 'recording') setRecordPaused(false)
+        else if (status.phase === 'idle' && !status.saving && stateRef.current === 'recording') {
+          resetRecording()
+          setRecordingNotice({
+            tone: 'info',
+            title: 'Recording stopped',
+            body: 'Gray stopped this recording. It is in your Library.',
+            sessionId: status.sessionId,
+            action: 'library'
+          })
+          setState('idle')
+        }
+        return
+      }
+      if (!telemetrySessionRef.current) {
+        // Main lifecycle is busy (Start pending, capture, or an unfinished save): show Saving.
+        const busy = status.phase !== 'idle' || !!status.saving || !!status.starting
+        if (busy && stateRef.current === 'idle') setState('organizing')
+        else if (!busy && stateRef.current === 'organizing') setState('idle')
+      }
+    }
+    void window.ghostBridge?.getTelemetryStatus?.().then(apply)
+    return window.ghostBridge?.onTelemetryStatus?.(apply)
+  }, [resetRecording])
+
+  const dismissRecordingNotice = useCallback(() => {
+    setRecordingNotice(null)
+  }, [])
+
+  const runRecordingNoticeAction = useCallback(() => {
+    const notice = recordingNotice
+    if (!notice?.sessionId || !notice.action) return
+    const sessionId = notice.sessionId
+    if (notice.action === 'retrySave') {
+      void window.ghostBridge?.telemetryRetrySave?.(sessionId).then((r) => {
+        setRecordingNotice(noticeForStopResult(r, sessionId))
+      })
       return
     }
-    setLastTelemetrySessionId(null)
-    setWorkflow(applyExtractedReview(result.workflow, result.extracted, sessionId))
-    setEditorCollapsed(false)
-    setState('editor')
-  }, [lastTelemetrySessionId])
+    // Review Upload / Library both open the saved recording in the workspace.
+    setRecordingNotice(null)
+    void window.ghostBridge?.openWorkspace?.({ sessionId })
+  }, [recordingNotice])
 
   const cancelEditor = useCallback(() => {
     runInFlightRef.current = false
@@ -1457,21 +1703,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setRunCollapsed(false)
       }
     })
-    const offWorkflowReady = window.ghostBridge?.onTelemetryWorkflowReady?.(
-      (payload) => {
-        setLastTelemetrySessionId(null)
-        setOrganizeError(null)
-        setWorkflow(applyExtractedReview(payload.workflow, payload.extracted, payload.sessionId))
-        setEditorCollapsed(false)
-        setState('editor')
-      }
-    )
     return () => {
       offRecord?.()
       offRun?.()
       offEditor?.()
       offReveal?.()
-      offWorkflowReady?.()
     }
   }, [beginRun, computeStake, openHover])
 
@@ -1485,24 +1721,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setNarrate,
     elapsedLabel: formatElapsed(elapsed),
     recordPaused,
-    toggleRecordPause: () => {
-      void (async () => {
-        if (recordPaused) {
-          const result = await window.ghostBridge?.telemetryResume?.()
-          if (result?.ok) setRecordPaused(false)
-        } else {
-          const result = await window.ghostBridge?.telemetryPause?.()
-          if (result?.ok) setRecordPaused(true)
-        }
-      })()
-    },
+    toggleRecordPause: () => void toggleRecordPause(),
     watchLog,
     watchExpanded,
     setWatchExpanded,
-    organizeError,
-    lastTelemetrySessionId,
-    dismissOrganizeError,
-    retryOrganize,
+    recordingNotice,
+    dismissRecordingNotice,
+    runRecordingNoticeAction,
     workflow,
     setWorkflow,
     editorCollapsed,
@@ -1510,10 +1735,6 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     savedConfirm,
     openSavedInLibrary,
     dismissSavedConfirm,
-    panelPlacement,
-    hoverFading,
-    hoverDismissMode,
-    reportHoverPanelHeight,
     beginDrag,
     endDrag,
     runSteps,
@@ -1543,6 +1764,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     openScreenRecovery,
     openHover,
     closeHover,
+    toggleHover,
     startRecording,
     cancelRecording,
     finishRecording,

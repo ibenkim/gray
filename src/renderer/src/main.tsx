@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import WorkspaceApp from './workspace/WorkspaceApp'
 import OnboardingApp from './onboarding/OnboardingApp'
+import RecordDropdown from './components/RecordDropdown'
 import '@fontsource/inter/400.css'
 import '@fontsource/inter/500.css'
 import '@fontsource/inter/600.css'
@@ -16,6 +17,8 @@ const hash = window.location.hash
 function Root() {
   if (hash === '#workspace') return <WorkspaceApp />
   if (hash === '#onboarding') return <OnboardingApp />
+  // The anchored Record dropdown window (M1-HF3): a view only, no WorkflowProvider.
+  if (hash === '#record-dropdown') return <RecordDropdown />
   return <App />
 }
 

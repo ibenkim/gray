@@ -8,5 +8,8 @@ release/
 .DS_Store
 .planning/
 .cursor/
+AGENTS.md
+CLAUDE.md
+docs/
 development-data/
 *.tsbuildinfo

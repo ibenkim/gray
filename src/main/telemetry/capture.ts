@@ -15,9 +15,19 @@ import {
   type KeyframeReason,
   type ScreenshotProvider
 } from './providers'
-import { TelemetryQueue } from './queue'
+import { TelemetryQueue, type DrainResult } from './queue'
 import { ScreenStateTracker } from './screenState'
 import type { TelemetryStore } from './store/TelemetryStore'
+
+/** Main-owned lifecycle phase (M2). Only `recording` admits new source reads. */
+export type RecordingPhase =
+  | 'idle'
+  | 'starting'
+  | 'recording'
+  | 'pausing'
+  | 'paused'
+  | 'resuming'
+  | 'stopping'
 
 export type RecordingStatus = {
   recording: boolean
@@ -26,6 +36,40 @@ export type RecordingStatus = {
   sequence: number
   startedAt: string | null
   processing: boolean
+  phase: RecordingPhase
+  /** Bumped at every source boundary; callbacks from an older generation are rejected. */
+  generation: number
+  /** A source did not confirm shutdown (e.g. sensor child never exited); capture is unavailable. */
+  teardownFailed: boolean
+}
+
+/** Ingress accounting across boundaries (counts only, never content). */
+export type IngressStats = {
+  accepted: number
+  /** Callback from an older generation (after pause/resume/stop) — rejected before use. */
+  rejectedStale: number
+  /** Arrived while ingress was closed (paused/stopping) — rejected before use. */
+  rejectedClosed: number
+  /** Events recorded by already-admitted work after its boundary (allowed final drain). */
+  drainedAfterBoundary: number
+}
+
+/** A start that failed after its session was created; the caller marks it incomplete. */
+export class StartFailedError extends Error {
+  constructor(readonly sessionId: string | null) {
+    super('[telemetry] start failed')
+  }
+}
+
+/** Outcome of the owned Stop barrier — what was actually persisted vs pending/lost. */
+export type StopResult = {
+  sessionId: string | null
+  /** Sequence of the terminal session_stopped event. */
+  finalSequence?: number
+  events?: DrainResult
+  artifacts?: { saved: number; skipped: number; failed: number; paths: string[] }
+  /** A source did not confirm shutdown; the save must not be reported complete. */
+  teardownFailed?: boolean
 }
 
 export type CaptureOptions = {
@@ -34,6 +78,16 @@ export type CaptureOptions = {
   ownerEmail?: string
   /** Capture voice narration for this session. */
   narrate?: boolean
+  /**
+   * Runs after the session is created and before any source starts (e.g. open the
+   * narration sink). A rejection rolls the whole start back.
+   */
+  beforeSources?: (sessionId: string) => Promise<void>
+  /**
+   * Checked after every Start await and before sources start (M2-R2). False (owner lost,
+   * Stop/hide/quit/revoke requested) cancels the start: no source ever starts.
+   */
+  shouldContinue?: () => boolean
   /** App names to ignore (our own pill/workspace). */
   ignoreAppNames?: string[]
 }
@@ -75,6 +129,8 @@ type ActiveWinResult = {
 }
 
 const POLL_MS = 800
+/** Admitted async source work (window polls, screenshots) owned until Stop drains it. */
+const MAX_ADMITTED_JOBS = 16
 
 /**
  * Fallback shortcut chords, used only when the interaction provider cannot
@@ -109,6 +165,14 @@ export class TelemetryRecorder {
   private recording = false
   private paused = false
   private processing = false
+  private phase: RecordingPhase = 'idle'
+  private generation = 0
+  private sourcesActive = false
+  private sourceStop: Promise<void> = Promise.resolve()
+  private teardownFailed = false
+  /** Serializes start/pause/resume/stop; stop still halts sources synchronously first. */
+  private transitions: Promise<unknown> = Promise.resolve()
+  private ingress: IngressStats = { accepted: 0, rejectedStale: 0, rejectedClosed: 0, drainedAfterBoundary: 0 }
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private registeredShortcuts: string[] = []
   private lastAppKey: string | null = null
@@ -138,6 +202,11 @@ export class TelemetryRecorder {
   private activeWin: ActiveWinModule | null = null
   private lastFieldLength: number | null = null
   private settleTimer: ReturnType<typeof setTimeout> | null = null
+  /** Set once Stop owns the recorder: no new source reads, admitted work still lands. */
+  private finalizing = false
+  private stopPromise: Promise<StopResult> | null = null
+  private admittedJobs = new Set<Promise<unknown>>()
+  private artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] as string[] }
 
   constructor(
     private readonly store: TelemetryStore | null,
@@ -160,38 +229,129 @@ export class TelemetryRecorder {
       sessionId: this.sessionId,
       sequence: this.sequence,
       startedAt: this.startedAtIso,
-      processing: this.processing
+      processing: this.processing,
+      phase: this.phase,
+      generation: this.generation,
+      teardownFailed: this.teardownFailed
     }
   }
 
-  /** True pause — halts the capture pipeline, not just the UI timer. */
-  pauseRecording(): RecordingStatus {
-    if (!this.recording || this.paused) return this.getRecordingStatus()
-    this.paused = true
-    this.stopPolling()
-    this.unregisterShortcuts()
-    this.interaction.flush?.()
-    this.interaction.stop()
-    this.clipboard.stop()
+  getIngressStats(): IngressStats {
+    return { ...this.ingress }
+  }
+
+  /**
+   * True pause. Buffered text is flushed while ingress is still open, then sources stop,
+   * the generation is invalidated and admitted work drains. Acknowledged only after the
+   * interaction child has exited (bounded) and no source can read.
+   */
+  pauseRecording(): Promise<RecordingStatus> {
+    return this.serial(async () => {
+      if (this.phase !== 'recording') return this.getRecordingStatus()
+      this.phase = 'pausing'
+      this.emitStatus()
+      this.haltSources()
+      await this.drainSources()
+      // A Stop that arrived meanwhile owns the recorder now.
+      if (this.phase === 'pausing') {
+        this.paused = true
+        this.phase = 'paused'
+      }
+      this.emitStatus()
+      return this.getRecordingStatus()
+    })
+  }
+
+  resumeRecording(): Promise<RecordingStatus> {
+    return this.serial(async () => {
+      // Never resume across a requested Stop or an unconfirmed source teardown.
+      if (this.phase !== 'paused' || this.stopPromise || this.teardownFailed) {
+        return this.getRecordingStatus()
+      }
+      this.phase = 'resuming'
+      this.paused = false
+      this.finalizing = false
+      this.startSources()
+      this.phase = 'recording'
+      this.emitStatus()
+      return this.getRecordingStatus()
+    })
+  }
+
+  /**
+   * Immediately stop every source and close ingress (idempotent, synchronous). Used by
+   * Stop and by main's owner-loss/hide/quit barrier before any I/O can fail.
+   */
+  haltSources(): void {
+    if (this.sourcesActive) {
+      this.stopPolling()
+      this.unregisterShortcuts()
+      // Flush while ingress is still open so a half-typed entry lands in the session.
+      try {
+        this.interaction.flush?.()
+      } catch {
+        /* never block the halt */
+      }
+      this.sourcesActive = false
+      this.generation += 1
+      // A stop failure is kept (not swallowed); every other source still halts.
+      this.sourceStop = Promise.resolve().then(() => this.interaction.stop())
+      try {
+        this.clipboard.stop()
+      } catch {
+        /* never block the halt */
+      }
+    }
+    this.finalizing = true
     if (this.settleTimer) {
       clearTimeout(this.settleTimer)
       this.settleTimer = null
     }
-    this.emitStatus()
-    return this.getRecordingStatus()
   }
 
-  resumeRecording(): RecordingStatus {
-    if (!this.recording || !this.paused) return this.getRecordingStatus()
-    this.paused = false
-    this.startPolling()
-    this.startClipboard()
+  private startSources(): void {
+    this.generation += 1
+    const gen = this.generation
+    this.sourcesActive = true
+    this.startPolling(gen)
+    this.startClipboard(gen)
     if (this.interaction.enabled) {
-      this.interaction.start((partial) => this.ingestInteraction(partial))
+      this.interaction.start((partial) => this.ingestInteraction(partial, gen))
     }
-    this.registerShortcuts()
-    this.emitStatus()
-    return this.getRecordingStatus()
+    this.registerShortcuts(gen)
+  }
+
+  /** Await the interaction child's exit and every admitted job (their events still land). */
+  private async drainSources(): Promise<void> {
+    try {
+      await this.sourceStop
+    } catch {
+      // Unconfirmed source shutdown: reported, keeps capture unavailable, never "stopped".
+      this.teardownFailed = true
+    }
+    while (this.admittedJobs.size > 0) {
+      await Promise.allSettled([...this.admittedJobs])
+    }
+  }
+
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.transitions.then(fn, fn)
+    this.transitions = run.catch(() => undefined)
+    return run
+  }
+
+  /** Gate for every source callback: current generation and open ingress only. */
+  private admits(gen: number): boolean {
+    if (gen !== this.generation) {
+      this.ingress.rejectedStale += 1
+      return false
+    }
+    if (!this.recording || this.paused || this.finalizing) {
+      this.ingress.rejectedClosed += 1
+      return false
+    }
+    this.ingress.accepted += 1
+    return true
   }
 
   isNarrating(): boolean {
@@ -218,22 +378,31 @@ export class TelemetryRecorder {
     return this.clipboard.snapshotSessionValues()
   }
 
-  async startRecording(opts: CaptureOptions = {}): Promise<RecordingStatus> {
-    if (this.recording) {
-      return this.getRecordingStatus()
-    }
+  startRecording(opts: CaptureOptions = {}): Promise<RecordingStatus> {
+    if (this.phase !== 'idle') return Promise.resolve(this.getRecordingStatus())
+    return this.serial(() => this.doStart(opts))
+  }
+
+  /** Nothing reads until storage and the optional pre-source hook succeed; failure rolls back. */
+  private async doStart(opts: CaptureOptions): Promise<RecordingStatus> {
+    if (this.phase !== 'idle') return this.getRecordingStatus()
     if (!this.store) {
       throw new Error('[telemetry] no TelemetryStore configured')
     }
+    // A previous source has not confirmed shutdown: no session, no overlapping source.
+    if (this.interaction.teardownPending) throw new StartFailedError(null)
 
     this.opts = opts
+    this.teardownFailed = false
     this.sessionId = newId('tsess')
     this.sequence = 0
     this.startedAtMs = Date.now()
     this.startedAtIso = new Date(this.startedAtMs).toISOString()
-    this.recording = true
+    this.phase = 'starting'
+    this.recording = false
     this.paused = false
     this.processing = false
+    this.ingress = { accepted: 0, rejectedStale: 0, rejectedClosed: 0, drainedAfterBoundary: 0 }
     this.lastAppKey = null
     this.lastWindowKey = null
     this.lastBounds = null
@@ -241,72 +410,156 @@ export class TelemetryRecorder {
     this.lastFocusTarget = null
     this.pendingClipboardPairId = null
     this.lastFieldLength = null
+    this.finalizing = false
+    this.artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] }
     this.screenStates.reset()
 
-    await this.store.ensureReady()
-    await this.store.createSession({
-      sessionId: this.sessionId,
-      ownerEmail: opts.ownerEmail,
-      recordMode: opts.recordMode,
-      selectedAppId: opts.selectedAppId
-    })
-
-    this.queue = new TelemetryQueue(this.store)
-    this.queue.start()
-
-    this.recordEvent('session_started', {
-      data: {
-        appName: 'ghost',
-        message: 'Recording started'
-      }
-    })
-
-    await this.ensureActiveWin()
-    this.startPolling()
-    this.startClipboard()
-
-    if (this.interaction.enabled) {
-      this.interaction.start((partial) => this.ingestInteraction(partial))
-      this.interaction.onCapabilityChange?.(({ capturesKeys }) => {
-        // The provider only learns whether the OS will deliver key events after
-        // its child reports in; register the fallback if it will not.
-        if (this.recording && !capturesKeys) this.registerShortcuts()
-      })
+    const sessionId = this.sessionId
+    let created = false
+    const proceed = () => {
+      if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('[telemetry] start cancelled')
     }
-    this.registerShortcuts()
+    try {
+      await this.store.ensureReady()
+      proceed()
+      await this.store.createSession({
+        sessionId,
+        ownerEmail: opts.ownerEmail,
+        recordMode: opts.recordMode,
+        selectedAppId: opts.selectedAppId
+      })
+      created = true
+      proceed()
+      await opts.beforeSources?.(sessionId)
+      proceed()
+
+      this.queue = new TelemetryQueue(this.store)
+      this.queue.start()
+      this.recording = true
+      this.finalizing = false
+
+      this.recordEvent('session_started', {
+        data: {
+          appName: 'ghost',
+          message: 'Recording started'
+        }
+      })
+
+      await this.ensureActiveWin()
+      proceed()
+      this.startSources()
+      if (this.interaction.enabled) {
+        this.interaction.onCapabilityChange?.(({ capturesKeys }) => {
+          // The provider only learns whether the OS will deliver key events after
+          // its child reports in; register the fallback if it will not.
+          if (this.phase === 'recording' && !capturesKeys) this.registerShortcuts(this.generation)
+        })
+      }
+      this.phase = 'recording'
+    } catch {
+      // Roll back: no source may keep reading for a session that never started.
+      this.haltSources()
+      await this.drainSources()
+      this.queue?.stop()
+      this.queue = null
+      this.recording = false
+      this.finalizing = false
+      this.sessionId = null
+      this.phase = 'idle'
+      this.emitStatus()
+      throw new StartFailedError(created ? sessionId : null)
+    }
 
     this.emitStatus()
     return this.getRecordingStatus()
   }
 
-  async stopRecording(): Promise<{ sessionId: string | null }> {
-    if (!this.recording || !this.sessionId) {
-      return { sessionId: this.sessionId }
+  /**
+   * Owned Stop barrier. Duplicate calls join the same promise. Order: flush buffered
+   * text, close source ingress, await admitted window/screenshot jobs, emit the terminal
+   * event, then drain the queue and report persisted vs pending/lost counts.
+   */
+  stopRecording(): Promise<StopResult> {
+    if (this.stopPromise) return this.stopPromise
+    if (this.phase === 'idle' || !this.sessionId) {
+      return Promise.resolve({ sessionId: this.sessionId })
     }
+    // Halt before queueing behind any transition, and before any status I/O can fail.
+    this.haltSources()
+    this.stopPromise = this.serial(() => this.finalize()).finally(() => {
+      this.stopPromise = null
+    })
+    return this.stopPromise
+  }
 
-    this.stopPolling()
-    this.unregisterShortcuts()
-    // Flush before stop so a half-typed entry still lands in the session.
-    this.interaction.flush?.()
-    this.interaction.stop()
-    this.clipboard.stop()
-    if (this.settleTimer) {
-      clearTimeout(this.settleTimer)
-      this.settleTimer = null
+  /** Same-session local retry: drain retained events again (after relaunch, from the outbox). */
+  async retrySessionDrain(sessionId: string): Promise<DrainResult | null> {
+    if (!this.store) return null
+    if (this.recording && this.sessionId === sessionId) return null
+    if (!this.queue) {
+      this.queue = new TelemetryQueue(this.store)
+      this.queue.restoreOutbox()
     }
+    return this.queue.drain(sessionId)
+  }
 
-    this.recordEvent('session_stopped', {
+  /** Called by the keyframe store wrapper when a frame write fails for this session. */
+  noteArtifactWriteFailure(sessionId: string): void {
+    if (sessionId === this.sessionId) this.artifactStats.writeFailures += 1
+  }
+
+  private async finalize(): Promise<StopResult> {
+    const sessionId = this.sessionId
+    // A start that rolled back while this Stop was queued leaves nothing to finalize.
+    if (!sessionId || this.phase === 'idle') return { sessionId }
+    this.phase = 'stopping'
+    this.emitStatus()
+    this.haltSources()
+    // Admitted jobs may still record their events; no new reads are accepted.
+    await this.drainSources()
+
+    const stopped = this.recordEvent('session_stopped', {
       data: { message: 'Recording stopped' }
     })
 
     this.recording = false
-    await this.flush()
-    if (this.store && this.sessionId) {
-      await this.store.stopSession(this.sessionId)
+    this.paused = false
+    let events: DrainResult | undefined
+    try {
+      events = this.queue ? await this.queue.drain(sessionId) : undefined
+      if (this.store && events && events.pending === 0) {
+        await this.store.stopSession(sessionId)
+      }
+    } finally {
+      this.queue?.stop()
+      this.finalizing = false
+      this.phase = 'idle'
+      this.emitStatus()
     }
-    this.queue?.stop()
-    this.emitStatus()
-    return { sessionId: this.sessionId }
+    const a = this.artifactStats
+    return {
+      sessionId,
+      finalSequence: stopped?.sequence,
+      events,
+      artifacts: {
+        saved: a.saved,
+        failed: a.failed + a.writeFailures,
+        skipped: Math.max(0, a.nulls - a.writeFailures),
+        paths: [...a.paths]
+      },
+      ...(this.teardownFailed ? { teardownFailed: true } : {})
+    }
+  }
+
+  /** Own async source work so Stop can await it; bounded, over-limit work is skipped. */
+  private admit(job: () => Promise<unknown>): void {
+    if (this.admittedJobs.size >= MAX_ADMITTED_JOBS) {
+      this.artifactStats.nulls += 1
+      return
+    }
+    const p = job().catch(() => undefined)
+    this.admittedJobs.add(p)
+    void p.finally(() => this.admittedJobs.delete(p))
   }
 
   recordEvent(
@@ -318,6 +571,7 @@ export class TelemetryRecorder {
     if (!this.sessionId) return null
     if (!this.recording && type !== 'session_stopped') return null
     if (this.paused && type !== 'session_stopped') return null
+    if (this.finalizing && type !== 'session_stopped') this.ingress.drainedAfterBoundary += 1
 
     const display = this.displayInfo()
     const windowBounds = this.windowBounds()
@@ -417,12 +671,12 @@ export class TelemetryRecorder {
     }
   }
 
-  private startPolling(): void {
+  private startPolling(gen: number): void {
     if (this.pollTimer) return
     this.pollTimer = setInterval(() => {
-      void this.pollActiveWindow()
+      if (this.admits(gen)) this.admit(() => this.pollActiveWindow(gen))
     }, POLL_MS)
-    void this.pollActiveWindow()
+    if (this.admits(gen)) this.admit(() => this.pollActiveWindow(gen))
   }
 
   private stopPolling(): void {
@@ -432,9 +686,9 @@ export class TelemetryRecorder {
     }
   }
 
-  private startClipboard(): void {
+  private startClipboard(gen: number): void {
     this.clipboard.start((change) => {
-      if (!this.recording || this.paused) return
+      if (!this.admits(gen)) return
       const pairId = newId('clip')
       this.pendingClipboardPairId = pairId
       const clipboard = { ...change.clipboard, pairId }
@@ -456,12 +710,15 @@ export class TelemetryRecorder {
         }
       })
       this.interaction.poke?.()
-      void this.captureKeyframe('clipboard')
+      this.admit(() => this.captureKeyframe('clipboard'))
     })
   }
 
-  private async pollActiveWindow(): Promise<void> {
-    if (!this.recording || this.paused || !this.activeWin) return
+  private async pollActiveWindow(gen: number): Promise<void> {
+    // Re-checked at the read: a boundary may have passed since this job was admitted.
+    if (gen !== this.generation || !this.recording || this.paused || this.finalizing || !this.activeWin) {
+      return
+    }
     try {
       const fn = this.activeWin.default ?? this.activeWin
       const win = await fn()
@@ -528,7 +785,7 @@ export class TelemetryRecorder {
           data: commonData
         })
         this.interaction.poke?.()
-        void this.captureKeyframe('app_changed')
+        this.admit(() => this.captureKeyframe('app_changed'))
       } else if (windowChanged) {
         this.recordEvent('window_switch', {
           page: snapshot.page,
@@ -677,9 +934,11 @@ export class TelemetryRecorder {
 
   private scheduleSettleKeyframe(): void {
     if (this.settleTimer) clearTimeout(this.settleTimer)
+    this.settleTimer = null
+    if (this.finalizing || this.paused) return
     this.settleTimer = setTimeout(() => {
-      if (!this.recording) return
-      void this.captureKeyframe('settle')
+      if (!this.recording || this.finalizing) return
+      this.admit(() => this.captureKeyframe('settle'))
     }, 1500)
   }
 
@@ -687,9 +946,16 @@ export class TelemetryRecorder {
     reason: KeyframeReason,
     boundsOverride?: { x: number; y: number; width: number; height: number }
   ): Promise<string | null> {
-    if (!this.screenshot.enabled || !this.sessionId || !this.recording || this.paused) {
+    if (
+      !this.screenshot.enabled ||
+      !this.sessionId ||
+      !this.recording ||
+      this.paused ||
+      this.finalizing
+    ) {
       return null
     }
+    const sessionId = this.sessionId
     const eventId = newId('tevt')
     try {
       const bounds =
@@ -705,10 +971,15 @@ export class TelemetryRecorder {
       const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
         reason,
         bounds,
-        sessionId: this.sessionId,
+        sessionId,
         eventId
       })
+      // A late completion can never attach to a later session.
+      if (this.sessionId !== sessionId) return null
+      if (!result?.relativePath) this.artifactStats.nulls += 1
       if (result?.relativePath) {
+        this.artifactStats.saved += 1
+        this.artifactStats.paths.push(result.relativePath)
         if (reason !== 'pre_action' && reason !== 'post_action' && reason !== 'target_crop') {
           this.recordEvent('keyframe_captured', {
             data: {
@@ -720,20 +991,21 @@ export class TelemetryRecorder {
         return result.relativePath
       }
     } catch {
-      /* never block recording on keyframe failure */
+      /* never block recording on keyframe failure; counted for the save manifest */
+      if (this.sessionId === sessionId) this.artifactStats.failed += 1
     }
     return null
   }
 
-  private registerShortcuts(): void {
+  private registerShortcuts(gen: number): void {
     // Passive observation is strictly better: it sees every chord (including
     // Cmd+C/V/X) without intercepting it from the app being recorded.
     if (this.interaction.capturesKeys) return
-    if (this.registeredShortcuts.length > 0) return
+    if (this.registeredShortcuts.length > 0 || gen !== this.generation || !this.sourcesActive) return
     for (const { accelerator, label } of SHORTCUTS) {
       try {
         const ok = globalShortcut.register(accelerator, () => {
-          if (!this.recording) return
+          if (!this.admits(gen)) return
           this.recordEvent('keyboard_shortcut', {
             data: { shortcut: label }
           })
@@ -756,8 +1028,8 @@ export class TelemetryRecorder {
     this.registeredShortcuts = []
   }
 
-  private ingestInteraction(partial: InteractionPartial): void {
-    if (!this.recording || this.paused) return
+  private ingestInteraction(partial: InteractionPartial, gen: number): void {
+    if (!this.admits(gen)) return
     if (this.shouldIgnoreApp(partial.data?.appName ?? partial.target?.appName)) return
 
     if (partial.type === 'focus_changed') {
@@ -862,7 +1134,7 @@ export class TelemetryRecorder {
 
     if (partial.type === 'element_activated' || partial.type === 'click') {
       this.interaction.poke?.()
-      void this.captureActionShots(data)
+      this.admit(() => this.captureActionShots(data))
     }
   }
 

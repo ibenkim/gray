@@ -1,5 +1,21 @@
 /* ══ Desktop pill panels ══ */
 
+/* ── Record dropdown window (M1-HF3): the panel is the whole, tightly sized surface ── */
+.record-dropdown {
+  position: fixed;
+  inset: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: var(--gray-radius-window);
+}
+.record-dropdown::-webkit-scrollbar { width: 0; }
+/* Contained 1px border inside the rounded surface; no external shadow to clip at the edges. */
+.record-dropdown .record-panel {
+  width: 100%;
+  box-sizing: border-box;
+  box-shadow: none;
+}
+
 /* ── Record panel — paper window ── */
 .glass-card {
   background: var(--gray-color-surface);
@@ -925,9 +941,6 @@
   display: flex;
   justify-content: flex-end;
   animation: toastIn 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-.ghost-root-below .toast-slot {
-  align-items: flex-start;
 }
 @keyframes toastIn {
   from {

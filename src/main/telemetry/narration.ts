@@ -11,6 +11,7 @@ import OpenAI, { toFile } from 'openai'
 import { newId } from '../../shared/id'
 import {
   SCHEMA_VERSION,
+  SessionIdSchema,
   type NarrationMarker,
   type PolishedAction,
   type PolishedSession,
@@ -254,6 +255,17 @@ function splitBySentence(text: string, durationMs: number): NarrationSpan[] {
  * this class writes `{rootDir}/narration/{sessionId}.webm`.
  * Supports injectTranscript for tests without real audio.
  */
+export type NarrationEndResult = {
+  sessionId: string | null
+  audioPath: string | null
+  hadChunks: boolean
+  /** False when any write or the final stream close failed. */
+  ok: boolean
+  /** Chunks whose write was acknowledged by the stream. */
+  chunks: number
+  bytes: number
+}
+
 export class NarrationRecorder {
   private sessionId: string | null = null
   private lastSessionId: string | null = null
@@ -261,7 +273,10 @@ export class NarrationRecorder {
   private stream: WriteStream | null = null
   private injectedSpans: NarrationSpan[] | null = null
   private chunkCount = 0
+  private bytes = 0
+  private writeFailed = false
   private closed = false
+  private lastEnd: NarrationEndResult | null = null
 
   constructor(private readonly rootDir: string) {}
 
@@ -269,27 +284,52 @@ export class NarrationRecorder {
     if (this.sessionId === sessionId && this.stream && !this.closed) {
       return { audioPath: this.audioPath! }
     }
+    // Validate before the id becomes part of a filesystem path.
+    const id = SessionIdSchema.parse(sessionId)
     this.endSync()
-    this.sessionId = sessionId
-    this.lastSessionId = sessionId
+    this.sessionId = id
+    this.lastSessionId = id
     this.injectedSpans = null
     this.chunkCount = 0
+    this.bytes = 0
+    this.writeFailed = false
+    this.lastEnd = null
     this.closed = false
     const dir = this.narrationDir()
     mkdirSync(dir, { recursive: true })
-    this.audioPath = resolve(dir, `${sessionId}.webm`)
+    this.audioPath = resolve(dir, `${id}.webm`)
     this.stream = createWriteStream(this.audioPath)
     this.stream.on('error', (err) => {
+      this.writeFailed = true
       console.error('[telemetry] narration write failed', err instanceof Error ? err.name : 'error')
     })
     return { audioPath: this.audioPath }
   }
 
-  appendChunk(sessionId: string, chunk: Buffer): void {
-    if (!this.sessionId || this.sessionId !== sessionId || !this.stream || this.closed) return
-    if (!chunk || chunk.length === 0) return
-    this.stream.write(chunk)
-    this.chunkCount += 1
+  /** Resolves true once the chunk is handed to the OS; false when refused or failed. */
+  appendChunk(sessionId: string, chunk: Buffer): Promise<boolean> {
+    if (!this.sessionId || this.sessionId !== sessionId || !this.stream || this.closed) {
+      return Promise.resolve(false)
+    }
+    if (!chunk || chunk.length === 0) return Promise.resolve(false)
+    const stream = this.stream
+    return new Promise((resolvePromise) => {
+      stream.write(chunk, (err) => {
+        if (err) {
+          this.writeFailed = true
+          resolvePromise(false)
+          return
+        }
+        this.chunkCount += 1
+        this.bytes += chunk.length
+        resolvePromise(true)
+      })
+    })
+  }
+
+  /** Result of the most recent end() for this session, if it has ended. */
+  getEndResult(sessionId: string): NarrationEndResult | null {
+    return this.lastEnd?.sessionId === sessionId ? this.lastEnd : null
   }
 
   /** Test helper — skip Whisper and use these spans on finalize. */
@@ -313,16 +353,20 @@ export class NarrationRecorder {
     return this.audioPath
   }
 
-  async end(): Promise<{
-    sessionId: string | null
-    audioPath: string | null
-    hadChunks: boolean
-  }> {
+  async end(): Promise<NarrationEndResult> {
+    if (this.closed && this.lastEnd) return this.lastEnd
     const sessionId = this.sessionId ?? this.lastSessionId
     const audioPath = this.audioPath
-    const hadChunks = this.chunkCount > 0
-    await this.endAsync()
-    return { sessionId, audioPath, hadChunks }
+    const closedOk = await this.endAsync()
+    this.lastEnd = {
+      sessionId,
+      audioPath,
+      hadChunks: this.chunkCount > 0,
+      ok: closedOk && !this.writeFailed,
+      chunks: this.chunkCount,
+      bytes: this.bytes
+    }
+    return this.lastEnd
   }
 
   /**
@@ -374,19 +418,24 @@ export class NarrationRecorder {
     this.closed = true
   }
 
-  private endAsync(): Promise<void> {
+  /** Ends the stream after accepted writes drain; resolves false on a close/write error. */
+  private endAsync(): Promise<boolean> {
     return new Promise((resolvePromise) => {
       if (this.sessionId) this.lastSessionId = this.sessionId
       this.sessionId = null
       this.closed = true
       if (!this.stream) {
-        resolvePromise()
+        resolvePromise(true)
         return
       }
       const s = this.stream
       this.stream = null
-      s.end(() => resolvePromise())
-      s.on('error', () => resolvePromise())
+      if (s.destroyed || s.errored) {
+        resolvePromise(false)
+        return
+      }
+      s.on('error', () => resolvePromise(false))
+      s.end(() => resolvePromise(true))
     })
   }
 }

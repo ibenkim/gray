@@ -801,3 +801,27 @@
   color: var(--text-30);
   opacity: 0.75;
 }
+
+/* Saved recordings + Review Upload (M1-HF) */
+.saved-recordings { margin-bottom: 16px; }
+.recording-action { font-size: 12px; color: var(--text-40); margin-right: 8px; }
+.upload-review .review-block { margin-bottom: 16px; }
+.upload-review .review-status { font-size: 13px; color: var(--text); margin: 0 0 8px; }
+.upload-review .review-warning { font-size: 13px; color: var(--gray-color-error); margin: 0 0 10px; }
+.upload-review .review-note { font-size: 12px; color: var(--text-40); margin: 10px 0; }
+.upload-review .review-facts { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; font-size: 13px; margin: 0 0 12px; }
+.upload-review .review-facts dt { color: var(--text-40); }
+.upload-review .review-facts dd { margin: 0; color: var(--text); }
+.upload-review .review-list { font-size: 13px; color: var(--text-70); margin: 4px 0 12px; padding-left: 18px; }
+.upload-review .review-payload summary { font-size: 12px; color: var(--text-70); cursor: pointer; }
+.upload-review .review-payload pre {
+  max-height: 260px;
+  overflow: auto;
+  font-size: 11px;
+  background: var(--gray-color-paper-2);
+  border-radius: var(--gray-radius-control);
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.upload-review .review-actions { display: flex; justify-content: flex-end; gap: var(--gray-spacing-action-gap); margin-top: 12px; }

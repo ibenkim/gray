@@ -1,9 +1,14 @@
+import { z } from 'zod'
 import { newId } from '../../shared/id'
-import type {
-  PolishedSession,
-  StoredAutomationScript,
-  StoredWorkflowResult,
-  TelemetrySessionMeta
+import {
+  ExtractedWorkflowSchema,
+  StageReceiptSchema,
+  type ExtractedWorkflow,
+  type PolishedSession,
+  type StageReceipt,
+  type StoredAutomationScript,
+  type StoredWorkflowResult,
+  type TelemetrySessionMeta
 } from '../../shared/telemetry/schema'
 import { compileAutomationScript, type CompileAutomationDeps } from './automation/compile'
 import type { TelemetryConfig } from './config'
@@ -14,7 +19,16 @@ import {
 } from './errors'
 import { polishSession } from './polish'
 import type { TelemetryStore } from './store/TelemetryStore'
-import { extractWorkflow, toEditorWorkflow, type ExtractWorkflowDeps } from './workflow'
+import { toPreparedInput, type PreparedReview } from './uploadReview'
+import {
+  assertEvidenceIds,
+  defaultClient,
+  extractWorkflow,
+  runStagedInterpretation,
+  toEditorWorkflow,
+  type ExtractWorkflowDeps,
+  type OpenAIResponsesClient
+} from './workflow'
 
 const inFlight = new Set<string>()
 
@@ -202,4 +216,143 @@ export async function processSessionWorkflow(
 
 export function __resetProcessingLocksForTests(): void {
   inFlight.clear()
+}
+
+/**
+ * Acknowledged, evidence-validated classify output for one approved revision; lets an
+ * explicit retry skip it. v2: only validated classifications are ever written, and every
+ * load is revalidated against the approved evidence map (v1 checkpoints are never reused).
+ */
+const CHECKPOINT_VERSION = 2
+const CheckpointSchema = z
+  .object({
+    version: z.literal(CHECKPOINT_VERSION),
+    revision: z.number().int().positive(),
+    digest: z.string(),
+    attemptId: z.string(),
+    classified: ExtractedWorkflowSchema,
+    receipts: z.array(StageReceiptSchema).max(6)
+  })
+  .strict()
+
+/** Reuse a checkpoint only if it matches this approval and every citation is approved evidence. */
+async function loadValidCheckpoint(
+  store: TelemetryStore,
+  review: PreparedReview,
+  approvedIds: Set<string>
+): Promise<z.infer<typeof CheckpointSchema> | null> {
+  const raw = await store.readDeliveryArtifact(review.sessionId, 'checkpoint')
+  if (raw == null) return null
+  const parsed = CheckpointSchema.safeParse(raw)
+  const valid =
+    parsed.success &&
+    parsed.data.digest === review.digest &&
+    parsed.data.revision === review.revision &&
+    parsed.data.classified.steps.every(
+      (s) => s.evidenceEventIds.length > 0 && s.evidenceEventIds.every((id) => approvedIds.has(id))
+    )
+  if (!valid) {
+    console.info('[telemetry] checkpoint rejected for reuse')
+    return null
+  }
+  console.info('[telemetry] checkpoint reused stage=classify')
+  return parsed.data
+}
+
+export class ResultSaveError extends TelemetryProcessingError {
+  constructor(readonly pending: { workflow: ExtractedWorkflow; save: () => Promise<StoredWorkflowResult> }) {
+    super('RESULT_SAVE_FAILED')
+  }
+}
+
+/**
+ * The single approved interpretation operation (M1-HF). Builds every request only from
+ * the validated prepared review; never re-reads capture data and never compiles.
+ * Stage start/acknowledgement is persisted so progress and checkpoints survive a restart.
+ */
+export async function processApprovedSession(
+  store: TelemetryStore,
+  config: TelemetryConfig,
+  review: PreparedReview,
+  attempt: { attemptId: string; workflowId: string },
+  deps: { createClient?: (apiKey: string) => OpenAIResponsesClient; onProgress?: () => void } = {}
+): Promise<{ stored: StoredWorkflowResult; partial: boolean; receipts: StageReceipt[] }> {
+  if (!config.openaiApiKey) throw new TelemetryProcessingError('OPENAI_API_KEY_MISSING')
+  const sessionId = review.sessionId
+  const prepared = toPreparedInput(review)
+  const approvedIds = new Set(prepared.evidenceMap.values())
+  // Each alias must map to exactly one approved event (and vice versa).
+  if (approvedIds.size !== prepared.evidenceMap.size) {
+    throw new TelemetryProcessingError('OPENAI_UNKNOWN_EVIDENCE')
+  }
+  const checkpoint = await loadValidCheckpoint(store, review, approvedIds)
+  const receipts: StageReceipt[] = checkpoint ? [...checkpoint.receipts] : []
+
+  const client = (deps.createClient ?? defaultClient)(config.openaiApiKey)
+  const { workflow, usage, partial } = await runStagedInterpretation(
+    client,
+    review.model,
+    prepared,
+    // Deterministic local enrichment is skipped: nothing beyond the approved dataset.
+    [],
+    [],
+    {
+      classifyCheckpoint: checkpoint ? { classified: checkpoint.classified } : undefined,
+      onStageStart: async (stage) => {
+        await store.updateDelivery(sessionId, (d) => ({
+          ...d!,
+          interpretation: { ...d!.interpretation, stage }
+        }))
+        deps.onProgress?.()
+      },
+      onStageAcknowledged: async (stage, receipt, classified) => {
+        const r: StageReceipt = {
+          stage,
+          attemptId: attempt.attemptId,
+          ...receipt,
+          at: new Date().toISOString()
+        }
+        receipts.push(r)
+        // Only an evidence-valid classification becomes reusable; receipts persist regardless.
+        if (stage === 'classify' && classified) {
+          await store.saveDeliveryArtifact(sessionId, 'checkpoint', {
+            version: CHECKPOINT_VERSION,
+            revision: review.revision,
+            digest: review.digest,
+            attemptId: attempt.attemptId,
+            classified,
+            receipts: [r]
+          })
+        }
+        await store.updateDelivery(sessionId, (d) => ({
+          ...d!,
+          interpretation: { ...d!.interpretation, receipts: receipts.slice(-6) }
+        }))
+        deps.onProgress?.()
+      }
+    }
+  )
+  // Defense in depth: stages already validated; the persisted result must still match.
+  assertEvidenceIds(workflow, approvedIds)
+
+  const save = () =>
+    store.saveWorkflow(sessionId, workflow, review.model, {
+      usage,
+      provenance: {
+        workflowId: attempt.workflowId,
+        reviewRevision: review.revision,
+        reviewDigest: review.digest,
+        attemptId: attempt.attemptId,
+        partial,
+        receipts: receipts.slice(-6)
+      }
+    })
+  let stored: StoredWorkflowResult
+  try {
+    stored = await save()
+  } catch {
+    // A received result is not success until it is durable; keep it for a local retry.
+    throw new ResultSaveError({ workflow, save })
+  }
+  return { stored, partial, receipts }
 }

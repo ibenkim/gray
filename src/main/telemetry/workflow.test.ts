@@ -127,7 +127,8 @@ describe('extractWorkflow', () => {
             action: 'Opened a Terminal window associated with the gray development environment',
             category: 'navigation',
             appName: 'Terminal',
-            evidenceEventIds: ['tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'],
+            // Model-facing alias; persisted result is checked for the canonical id below.
+            evidenceEventIds: ['e0'],
             confidence: 0.91
           })
         ],
@@ -301,7 +302,7 @@ describe('usageFromResponse / v2 workflow fields', () => {
             action: 'Opened a Terminal window',
             category: 'navigation',
             appName: 'Terminal',
-            evidenceEventIds: ['0'],
+            evidenceEventIds: ['e0'],
             confidence: 0.55,
             objective: 'Open Terminal',
             actionType: 'navigate',
@@ -549,7 +550,7 @@ describe('usageFromResponse / v2 workflow fields', () => {
               action: isAssemble ? 'Finish in Messages' : 'Interact in chunk',
               category: 'interaction',
               appName: 'Messages',
-              evidenceEventIds: ['0'],
+              evidenceEventIds: ['e0'],
               confidence: 0.7
             })
           ],
@@ -676,7 +677,7 @@ describe('processSessionWorkflow', () => {
             action: 'Opened a Terminal window',
             category: 'navigation',
             appName: 'Terminal',
-            evidenceEventIds: ['tevt_501ade3e-d8f9-4f7f-88cc-0783cbc54640'],
+            evidenceEventIds: ['e0'],
             confidence: 0.9
           }
         ],

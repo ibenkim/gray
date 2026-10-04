@@ -27,6 +27,7 @@ import type {
 import { extractAddresses } from './addresses'
 import type { TelemetryConfig } from './config'
 import { TelemetryProcessingError, mapToProcessingError } from './errors'
+import { sanitizeModelString } from './modelSanitize'
 import {
   MODEL_INPUT_CHAR_BUDGET,
   prepareWorkflowModelInput,
@@ -42,36 +43,46 @@ import {
 import type { TelemetryStore } from './store/TelemetryStore'
 import { extractWorkflowVariables } from './variables'
 
+type ParsedResponse = {
+  output_parsed: unknown
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+  }
+  /** Provider response id, when returned. */
+  id?: string
+  /** Provider request id header, when the SDK exposes it. */
+  _request_id?: string | null
+}
+
 export type OpenAIResponsesClient = {
   responses: {
-    parse: (body: unknown) => Promise<{
-      output_parsed: unknown
-      usage?: {
-        input_tokens?: number
-        output_tokens?: number
-        total_tokens?: number
-      }
-    }>
+    parse: (body: unknown) => Promise<ParsedResponse>
   }
 }
+
+/** Observed acknowledgement ids for one stage request (never invented). */
+export type ResponseReceipt = { responseId?: string; requestId?: string }
+
+export type InterpretationStage = 'classify' | 'extract' | 'single'
 
 export type ExtractWorkflowDeps = {
   createClient?: (apiKey: string) => OpenAIResponsesClient
 }
 
-function defaultClient(apiKey: string): OpenAIResponsesClient {
-  const client = new OpenAI({ apiKey })
+/**
+ * SDK default is 2 hidden retries; an ambiguous timeout could then cause extra remote
+ * work the user never saw. Every stage request is attempted exactly once by the client.
+ */
+export function defaultClient(apiKey: string): OpenAIResponsesClient {
+  const client = new OpenAI({ apiKey, maxRetries: 0 })
   return {
     responses: {
       parse: (body: unknown) =>
-        client.responses.parse(body as Parameters<typeof client.responses.parse>[0]) as Promise<{
-          output_parsed: unknown
-          usage?: {
-            input_tokens?: number
-            output_tokens?: number
-            total_tokens?: number
-          }
-        }>
+        client.responses.parse(
+          body as Parameters<typeof client.responses.parse>[0]
+        ) as unknown as Promise<ParsedResponse>
     }
   }
 }
@@ -160,8 +171,8 @@ async function parseWorkflowResponse(
   system: string,
   userPayload: unknown,
   formatName: string
-): Promise<{ parsed: unknown; usage?: TokenUsage }> {
-  let response: { output_parsed: unknown; usage?: { input_tokens?: number; output_tokens?: number } }
+): Promise<{ parsed: unknown; usage?: TokenUsage; receipt: ResponseReceipt }> {
+  let response: ParsedResponse
   try {
     response = await client.responses.parse({
       model,
@@ -178,7 +189,205 @@ async function parseWorkflowResponse(
   } catch (err) {
     throw mapToProcessingError(err)
   }
-  return { parsed: response.output_parsed, usage: usageFromResponse(response) }
+  const receipt: ResponseReceipt = {}
+  if (typeof response.id === 'string' && response.id) receipt.responseId = response.id.slice(0, 120)
+  if (typeof response._request_id === 'string' && response._request_id) {
+    receipt.requestId = response._request_id.slice(0, 120)
+  }
+  return { parsed: response.output_parsed, usage: usageFromResponse(response), receipt }
+}
+
+export type StagedInterpretationHooks = {
+  /** Acknowledged, already-validated classify checkpoint to reuse instead of re-requesting. */
+  classifyCheckpoint?: { classified: ExtractedWorkflow }
+  /** Called before each stage request is dispatched. */
+  onStageStart?: (stage: InterpretationStage) => Promise<void>
+  /**
+   * Called after a stage response was received and locally validated. `classified` is the
+   * evidence-valid classification, or null when the response was unusable (never reusable).
+   */
+  onStageAcknowledged?: (
+    stage: InterpretationStage,
+    receipt: ResponseReceipt,
+    classified?: ExtractedWorkflow | null
+  ) => Promise<void>
+}
+
+const PARTIAL_EXTRACT_WARNING =
+  'The detailed extraction stage returned an invalid result; this shows the first-stage interpretation only.'
+
+export type PartialReason = 'extract_invalid_output' | 'extract_invalid_evidence'
+
+/**
+ * Declared bounded stages: classify → extract (or one single-pass fallback when classify
+ * output is unusable). Every stage's citations are validated against the approved alias map
+ * before anything is reused or the next request is sent. Later stages carry only the given
+ * body plus sanitized model output in the same alias namespace.
+ */
+export async function runStagedInterpretation(
+  client: OpenAIResponsesClient,
+  model: string,
+  prepared: PreparedWorkflowModelInput,
+  variables: WorkflowVariable[],
+  addresses: Address[],
+  hooks: StagedInterpretationHooks = {}
+): Promise<{
+  workflow: ExtractedWorkflow
+  usage?: TokenUsage
+  partial: boolean
+  partialReason?: PartialReason
+}> {
+  let totalUsage: TokenUsage | undefined
+  let classified: ExtractedWorkflow | null
+  if (hooks.classifyCheckpoint) {
+    classified = hooks.classifyCheckpoint.classified
+  } else {
+    await hooks.onStageStart?.('classify')
+    const classify = await parseWorkflowResponse(
+      client,
+      model,
+      CLASSIFY_INSTRUCTIONS,
+      prepared.body,
+      'workflow_classify'
+    )
+    logTokenUsage('workflow_classify', classify.usage)
+    totalUsage = classify.usage
+    try {
+      classified = finalizeParsedWorkflow(classify.parsed, prepared, variables, addresses, {
+        skipQuestions: true
+      })
+    } catch (err) {
+      logStageRejection('classify', err)
+      classified = null
+    }
+    await hooks.onStageAcknowledged?.('classify', classify.receipt, classified)
+  }
+
+  if (!classified) {
+    await hooks.onStageStart?.('single')
+    const single = await parseWorkflowResponse(
+      client,
+      model,
+      WORKFLOW_INSTRUCTIONS,
+      prepared.body,
+      'workflow_summary'
+    )
+    logTokenUsage('workflow', single.usage)
+    totalUsage = addUsage(totalUsage, single.usage)
+    await hooks.onStageAcknowledged?.('single', single.receipt)
+    try {
+      const workflow = finalizeParsedWorkflow(single.parsed, prepared, variables, addresses)
+      return { workflow, usage: totalUsage, partial: false }
+    } catch (err) {
+      logStageRejection('single', err)
+      throw err
+    }
+  }
+
+  await hooks.onStageStart?.('extract')
+  const extract = await parseWorkflowResponse(
+    client,
+    model,
+    EXTRACT_INSTRUCTIONS,
+    {
+      telemetry: prepared.body,
+      addrs: prepared.body.addrs ?? [],
+      classified: compactClassified(classified, prepared)
+    },
+    'workflow_extract'
+  )
+  logTokenUsage('workflow_extract', extract.usage)
+  totalUsage = addUsage(totalUsage, extract.usage)
+  await hooks.onStageAcknowledged?.('extract', extract.receipt)
+
+  try {
+    const workflow = finalizeParsedWorkflow(extract.parsed, prepared, variables, addresses)
+    return { workflow, usage: totalUsage, partial: false }
+  } catch (err) {
+    // Extract invalid (shape or evidence): fall back to the verified classification only,
+    // revalidated, explicitly labelled partial. Unknown evidence is never accepted.
+    logStageRejection('extract', err)
+    assertEvidenceIds(classified, new Set(prepared.evidenceMap.values()))
+    const workflow = withQuestions(classified)
+    const invalidEvidence =
+      err instanceof TelemetryProcessingError && err.code === 'OPENAI_UNKNOWN_EVIDENCE'
+    return {
+      workflow: {
+        ...workflow,
+        warnings: [...workflow.warnings, PARTIAL_EXTRACT_WARNING].slice(-20)
+      },
+      usage: totalUsage,
+      partial: true,
+      partialReason: invalidEvidence ? 'extract_invalid_evidence' : 'extract_invalid_output'
+    }
+  }
+}
+
+/** Counts-only diagnostic for a rejected stage response — never ids, text or bodies. */
+export type EvidenceDiagnostics = {
+  reason: 'empty' | 'unknown' | 'namespace'
+  steps: number
+  citations: number
+  known: number
+  unknown: number
+}
+
+export class EvidenceValidationError extends TelemetryProcessingError {
+  constructor(readonly diagnostics: EvidenceDiagnostics) {
+    super('OPENAI_UNKNOWN_EVIDENCE')
+  }
+}
+
+function logStageRejection(stage: InterpretationStage, err: unknown): void {
+  if (err instanceof EvidenceValidationError) {
+    const d = err.diagnostics
+    console.info(
+      `[telemetry] evidence rejected stage=${stage} reason=${d.reason} steps=${d.steps} citations=${d.citations} known=${d.known} unknown=${d.unknown}`
+    )
+    return
+  }
+  const code = err instanceof TelemetryProcessingError ? err.code : 'OPENAI_INVALID_OUTPUT'
+  console.info(`[telemetry] stage output rejected stage=${stage} code=${code}`)
+}
+
+/** Values that belong to another namespace (order numbers, step/screen/address/event ids). */
+const OTHER_NAMESPACE_RE = /^(?:\d+|step_\w+|s\d+|addr\w*|tevt_.+)$/
+
+/**
+ * Strict alias validation for one stage response: every step cites a nonempty array of
+ * exact approved aliases. No placeholder, coercion or silent dropping.
+ */
+function validateAliasEvidence(
+  rawSteps: Array<Record<string, unknown>>,
+  aliases: Map<string, string>
+): void {
+  let citations = 0
+  let known = 0
+  let unknown = 0
+  let empty = false
+  let namespace = false
+  for (const step of rawSteps) {
+    const ids = Array.isArray(step.evidenceEventIds) ? step.evidenceEventIds : []
+    if (ids.length === 0) empty = true
+    for (const id of ids) {
+      citations += 1
+      if (typeof id === 'string' && aliases.has(id)) {
+        known += 1
+      } else {
+        unknown += 1
+        if (typeof id === 'string' && OTHER_NAMESPACE_RE.test(id)) namespace = true
+      }
+    }
+  }
+  if (empty || unknown > 0) {
+    throw new EvidenceValidationError({
+      reason: unknown > 0 ? (namespace ? 'namespace' : 'unknown') : 'empty',
+      steps: rawSteps.length,
+      citations,
+      known,
+      unknown
+    })
+  }
 }
 
 /**
@@ -192,88 +401,67 @@ async function extractWorkflowStaged(
   variables: WorkflowVariable[],
   addresses: Address[]
 ): Promise<{ workflow: ExtractedWorkflow; usage?: TokenUsage }> {
-  const classify = await parseWorkflowResponse(
+  const { workflow, usage } = await runStagedInterpretation(
     client,
     model,
-    CLASSIFY_INSTRUCTIONS,
-    prepared.body,
-    'workflow_classify'
+    prepared,
+    variables,
+    addresses
   )
-  logTokenUsage('workflow_classify', classify.usage)
-  let totalUsage = classify.usage
-
-  let classified: ExtractedWorkflow | null = null
-  try {
-    classified = finalizeParsedWorkflow(classify.parsed, prepared, variables, addresses, {
-      skipQuestions: true
-    })
-  } catch {
-    classified = null
-  }
-
-  if (!classified) {
-    const single = await parseWorkflowResponse(
-      client,
-      model,
-      WORKFLOW_INSTRUCTIONS,
-      prepared.body,
-      'workflow_summary'
-    )
-    logTokenUsage('workflow', single.usage)
-    totalUsage = addUsage(totalUsage, single.usage)
-    const workflow = finalizeParsedWorkflow(single.parsed, prepared, variables, addresses)
-    return { workflow, usage: totalUsage }
-  }
-
-  const extract = await parseWorkflowResponse(
-    client,
-    model,
-    EXTRACT_INSTRUCTIONS,
-    {
-      telemetry: prepared.body,
-      addrs: prepared.body.addrs ?? [],
-      classified: compactClassified(classified)
-    },
-    'workflow_extract'
-  )
-  logTokenUsage('workflow_extract', extract.usage)
-  totalUsage = addUsage(totalUsage, extract.usage)
-
-  let workflow: ExtractedWorkflow
-  try {
-    workflow = finalizeParsedWorkflow(extract.parsed, prepared, variables, addresses)
-  } catch {
-    // Extract failed validation — keep classified + deterministic questions.
-    workflow = finalizeParsedWorkflow(classified, prepared, variables, addresses)
-  }
-
-  return { workflow, usage: totalUsage }
+  return { workflow, usage }
 }
 
-function compactClassified(w: ExtractedWorkflow): unknown {
+/**
+ * Validated first-stage output re-sent to extract. Canonical citations are mapped back to the
+ * approved aliases (one model-facing namespace); prose is re-sanitized, identity fields are not.
+ */
+function compactClassified(w: ExtractedWorkflow, prepared: PreparedWorkflowModelInput): unknown {
+  const toAlias = new Map<string, string>()
+  for (const [alias, full] of prepared.evidenceMap) toAlias.set(full, alias)
   return {
-    title: w.title,
-    goal: w.goal,
-    summary: w.summary,
+    title: sanitizeProse(w.title),
+    goal: sanitizeProse(w.goal),
+    summary: sanitizeProse(w.summary),
     outcome: w.outcome,
-    warnings: w.warnings,
-    variables: w.variables,
+    warnings: sanitizeDerived(w.warnings),
+    variables: sanitizeDerived(w.variables),
     steps: w.steps.map((s) => ({
       order: s.order,
       id: s.id,
       intent: s.intent,
-      summary: s.summary,
-      action: s.action,
+      summary: sanitizeProse(s.summary),
+      action: sanitizeProse(s.action),
       category: s.category,
-      appName: s.appName,
-      evidenceEventIds: s.evidenceEventIds,
+      appName: sanitizeProse(s.appName),
+      evidenceEventIds: s.evidenceEventIds.map((full) => {
+        const alias = toAlias.get(full)
+        // Callers validated membership; an unmapped id here is a contract violation.
+        if (!alias) throw new TelemetryProcessingError('OPENAI_UNKNOWN_EVIDENCE')
+        return alias
+      }),
       confidence: s.confidence,
       needsClarification: s.needsClarification,
-      alternatives: s.alternatives,
-      objective: s.objective,
+      alternatives: sanitizeDerived(s.alternatives),
+      objective: sanitizeProse(s.objective),
       actionType: s.actionType
     }))
   }
+}
+
+function sanitizeProse(value: string | null | undefined): string | null {
+  return value == null ? null : sanitizeModelString(value, 800)
+}
+
+/** Deep prose sanitization for free-text containers (warnings, alternatives, variables). */
+function sanitizeDerived(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizeModelString(value, 800)
+  if (Array.isArray(value)) return value.map(sanitizeDerived)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, sanitizeDerived(v)])
+    )
+  }
+  return value
 }
 
 /**
@@ -361,7 +549,6 @@ async function extractWorkflowChunked(
         action: st.action,
         category: st.category,
         appName: st.appName,
-        evidenceEventIds: st.evidenceEventIds,
         confidence: st.confidence,
         objective: st.objective,
         actionType: st.actionType,
@@ -383,13 +570,9 @@ async function extractWorkflowChunked(
   logTokenUsage('workflow_assemble', usage)
   totalUsage = addUsage(totalUsage, usage)
 
-  const preparedForResolve: PreparedWorkflowModelInput = {
-    body: finalPrepared.body,
-    evidenceMap: fullPrepared.evidenceMap,
-    resolveEvidence: fullPrepared.resolveEvidence,
-    estimatedChars: fullPrepared.estimatedChars
-  }
-  const workflow = finalizeParsedWorkflow(parsed, preparedForResolve, variables, addresses)
+  // The assemble request's only alias namespace is the final chunk's acts[].ids.
+  const workflow = finalizeParsedWorkflow(parsed, finalPrepared, variables, addresses)
+  void fullPrepared
   return { workflow, usage: totalUsage }
 }
 
@@ -409,9 +592,15 @@ function finalizeParsedWorkflow(
   }
 
   const raw = parsed as Record<string, unknown>
-  const rawSteps = Array.isArray(raw.steps) ? raw.steps : []
+  const rawSteps = (Array.isArray(raw.steps) ? raw.steps : []).filter(
+    (s): s is Record<string, unknown> => !!s && typeof s === 'object'
+  )
+  if (!rawSteps.length) {
+    throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
+  }
+  // Membership before anything else: no placeholder, no coercion, no dropped citations.
+  validateAliasEvidence(rawSteps, prepared.evidenceMap)
   const sanitizedSteps = rawSteps
-    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
     .map((s, idx) => {
       const defaults = withWorkflowStepDefaults({
         ...s,
@@ -430,21 +619,11 @@ function finalizeParsedWorkflow(
               ? s.summary
               : `Step ${idx + 1}`,
         category: typeof s.category === 'string' ? s.category : 'other',
-        evidenceEventIds: Array.isArray(s.evidenceEventIds)
-          ? s.evidenceEventIds.filter((id): id is string => typeof id === 'string')
-          : [],
+        evidenceEventIds: s.evidenceEventIds as string[],
         confidence: typeof s.confidence === 'number' ? s.confidence : 0.5
       })
-      // Evidence must be non-empty for schema; placeholder until resolveEvidence.
-      if (!defaults.evidenceEventIds.length) {
-        defaults.evidenceEventIds = ['tevt_unknown']
-      }
       return defaults
     })
-
-  if (!sanitizedSteps.length) {
-    throw new TelemetryProcessingError('OPENAI_INVALID_OUTPUT')
-  }
 
   const withDefaults = {
     title:
@@ -518,11 +697,12 @@ function finalizeParsedWorkflow(
     }
   }
 
+  // Validated aliases → canonical persisted event ids.
   const expandedSteps = validated.data.steps.map((step, idx) =>
     withWorkflowStepDefaults({
       ...step,
       id: step.id ?? `step_${idx + 1}`,
-      evidenceEventIds: prepared.resolveEvidence(step.evidenceEventIds)
+      evidenceEventIds: step.evidenceEventIds.map((alias) => prepared.evidenceMap.get(alias)!)
     })
   )
 
@@ -539,7 +719,11 @@ function finalizeParsedWorkflow(
   }
 
   if (opts.skipQuestions) return base
+  return withQuestions(base)
+}
 
+/** Merge model questions with the deterministic question pass. */
+function withQuestions(base: ExtractedWorkflow): ExtractedWorkflow {
   const enumerated = enumerateWorkflowQuestions(base)
   const mergedQuestions = mergeQuestions(base.questions, enumerated)
   return { ...base, questions: mergedQuestions.length ? mergedQuestions : null }
@@ -632,7 +816,11 @@ function mergeQuestions(
 }
 
 export function assertEvidence(workflow: ExtractedWorkflow, polished: PolishedSession): void {
-  const known = new Set(polished.actions.flatMap((a) => a.sourceEventIds))
+  assertEvidenceIds(workflow, new Set(polished.actions.flatMap((a) => a.sourceEventIds)))
+}
+
+/** Every step must cite at least one known evidence id. */
+export function assertEvidenceIds(workflow: ExtractedWorkflow, known: Set<string>): void {
   for (const step of workflow.steps) {
     if (!step.evidenceEventIds.length) {
       throw new TelemetryProcessingError('OPENAI_UNKNOWN_EVIDENCE')

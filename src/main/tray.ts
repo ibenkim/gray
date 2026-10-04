@@ -39,18 +39,51 @@ export type TrayMode = 'onboarding' | 'normal'
 let trayHandlers: TrayHandlers | null = null
 let trayMode: TrayMode = 'normal'
 
+/** Main-owned capture phase (M2); idle shows nothing extra. */
+type RecordingPhase =
+  | 'idle'
+  | 'starting'
+  | 'recording'
+  | 'pausing'
+  | 'paused'
+  | 'resuming'
+  | 'stopping'
+  | 'teardown_failed'
+let recordingPhase: RecordingPhase = 'idle'
+const PHASE_LABEL: Partial<Record<RecordingPhase, string>> = {
+  starting: 'Recording is starting…',
+  recording: 'Recording',
+  resuming: 'Recording',
+  pausing: 'Recording paused',
+  paused: 'Recording paused',
+  stopping: 'Saving recording…',
+  teardown_failed: 'Input monitor did not stop — recording unavailable'
+}
+
 function rebuildMenu(): void {
   if (!tray) return
+  const label = PHASE_LABEL[recordingPhase]
+  const status: Electron.MenuItemConstructorOptions[] = label
+    ? [{ label, enabled: false }, { type: 'separator' }]
+    : []
   const template: Electron.MenuItemConstructorOptions[] =
     trayMode === 'onboarding'
-      ? [{ label: 'Quit Ghost', click: () => app.quit() }]
+      ? [...status, { label: 'Quit Ghost', click: () => app.quit() }]
       : [
+          ...status,
           { label: 'Show pill', click: () => trayHandlers?.showPill() },
           { label: 'Open Library', click: () => trayHandlers?.openLibrary() },
           { type: 'separator' },
           { label: 'Quit Ghost', click: () => app.quit() }
         ]
   tray.setContextMenu(Menu.buildFromTemplate(template))
+  tray.setToolTip(label ? `Ghost — ${label}` : 'Ghost')
+}
+
+export function setTrayRecording(phase: RecordingPhase): void {
+  if (phase === recordingPhase) return
+  recordingPhase = phase
+  rebuildMenu()
 }
 
 /**

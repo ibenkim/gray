@@ -16,10 +16,30 @@
  * host can recover typing when NSEvent monitors are silent. Secure fields never
  * include a tail. The host aggregates and redacts before storage.
  */
+/**
+ * Parent lifetime (M2). The sensor must stop reading once the host is gone: after the
+ * parent exits the child is re-parented (getppid changes, usually to launchd = 1), and
+ * writes to the closed stdout pipe throw. Either condition exits before another read.
+ * Exported so a no-capture fixture can exercise it without starting any monitor.
+ */
+export const JXA_PARENT_LIFETIME = `
+ObjC.import('stdlib');
+ObjC.import('unistd');
+var PARENT_PID = 0;
+try { PARENT_PID = parseInt($.getenv('GRAY_JXA_PARENT_PID'), 10) || 0; } catch (eEnv) {}
+function parentAlive() {
+  var p = $.getppid();
+  return p !== 1 && (PARENT_PID === 0 || p === PARENT_PID);
+}
+function exitIfOrphaned() {
+  if (!parentAlive()) $.exit(0);
+}
+`
+
 export const JXA_SENSOR_SCRIPT = `
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
-
+${JXA_PARENT_LIFETIME}
 var STDOUT = $.NSFileHandle.fileHandleWithStandardOutput;
 
 function writeLine(text) {
@@ -27,7 +47,8 @@ function writeLine(text) {
     var str = $.NSString.alloc.initWithUTF8String(text + "\\n");
     STDOUT.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
   } catch (e) {
-    /* host will notice the silence */
+    /* stdout closed: the host is gone, so stop sampling entirely */
+    $.exit(0);
   }
 }
 
@@ -654,13 +675,15 @@ function onScroll(evt) {
 
 function installMonitors() {
   try {
-    var keyHandler = function (evt) { onKey(evt); };
+    /* Each callback reads AX/input: never once the host is gone. */
+    var keyHandler = function (evt) { exitIfOrphaned(); onKey(evt); };
     var mouseHandler = function (evt) {
+      exitIfOrphaned();
       var button = 'left';
       try { if (evt.type === $.NSEventTypeRightMouseDown) button = 'right'; } catch (e) {}
       onMouse(evt, button);
     };
-    var scrollHandler = function (evt) { onScroll(evt); };
+    var scrollHandler = function (evt) { exitIfOrphaned(); onScroll(evt); };
     monitorHandlers.push(keyHandler);
     monitorHandlers.push(mouseHandler);
     monitorHandlers.push(scrollHandler);
@@ -799,6 +822,7 @@ function pollMouseButtons() {
 }
 
 while (true) {
+  exitIfOrphaned();
   if (monitorsOk) {
     /*
      * Pump the run loop so monitor callbacks fire. runUntilDate can return early
@@ -817,6 +841,7 @@ while (true) {
     sleepSeconds(PUMP_SECONDS);
   }
 
+  exitIfOrphaned();
   pollMouseButtons();
 
   var now = Date.now();

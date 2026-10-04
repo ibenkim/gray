@@ -1,5 +1,7 @@
 import {
   SCHEMA_VERSION,
+  initialDelivery,
+  type SessionDelivery,
   type AutomationScript,
   type ExtractedWorkflow,
   type PolishedSession,
@@ -13,9 +15,11 @@ import {
 import type {
   AppendEventsResult,
   CreateSessionInput,
+  DeliveryArtifactName,
   SessionMetaPatch,
   StoredNarration,
-  TelemetryStore
+  TelemetryStore,
+  WorkflowProvenance
 } from './TelemetryStore'
 
 /** Test-only store — never used in production. */
@@ -29,6 +33,7 @@ export class InMemoryTelemetryStore implements TelemetryStore {
   keyframes = new Map<string, Buffer>()
   narration = new Map<string, StoredNarration>()
   groundTruth = new Map<string, string>()
+  deliveryArtifacts = new Map<string, unknown>()
 
   async ensureReady(): Promise<void> {
     /* no-op */
@@ -45,7 +50,8 @@ export class InMemoryTelemetryStore implements TelemetryStore {
       processingStatus: 'not_started',
       schemaVersion: SCHEMA_VERSION,
       recordMode: input.recordMode,
-      selectedAppId: input.selectedAppId
+      selectedAppId: input.selectedAppId,
+      delivery: initialDelivery()
     }
     this.sessions.set(input.sessionId, meta)
     this.events.set(input.sessionId, [])
@@ -81,6 +87,12 @@ export class InMemoryTelemetryStore implements TelemetryStore {
     return [...(this.events.get(sessionId) ?? [])]
   }
 
+  async readSessionEventsChecked(
+    sessionId: string
+  ): Promise<{ events: TelemetryEvent[]; invalidLines: number }> {
+    return { events: await this.readSessionEvents(sessionId), invalidLines: 0 }
+  }
+
   async readPolishedSession(sessionId: string): Promise<PolishedSession | null> {
     return this.polished.get(sessionId) ?? null
   }
@@ -93,7 +105,10 @@ export class InMemoryTelemetryStore implements TelemetryStore {
     sessionId: string,
     workflow: ExtractedWorkflow,
     model: string,
-    opts?: { usage?: import('../../../shared/telemetry/schema').TokenUsage }
+    opts?: {
+      usage?: import('../../../shared/telemetry/schema').TokenUsage
+      provenance?: WorkflowProvenance
+    }
   ): Promise<StoredWorkflowResult> {
     const stored: StoredWorkflowResult = {
       sessionId,
@@ -101,7 +116,8 @@ export class InMemoryTelemetryStore implements TelemetryStore {
       extractedAt: new Date().toISOString(),
       model,
       workflow,
-      usage: opts?.usage
+      usage: opts?.usage,
+      ...(opts?.provenance ? { provenance: opts.provenance } : {})
     }
     this.workflows.set(sessionId, stored)
     return stored
@@ -211,5 +227,42 @@ export class InMemoryTelemetryStore implements TelemetryStore {
     }
     this.sessions.set(sessionId, next)
     return next
+  }
+
+  async updateDelivery(
+    sessionId: string,
+    mutate: (current: SessionDelivery | null, meta: TelemetrySessionMeta) => SessionDelivery,
+    patch: SessionMetaPatch = {}
+  ): Promise<TelemetrySessionMeta> {
+    const meta = await this.updateSessionMeta(sessionId, patch)
+    const next = { ...meta, delivery: mutate(meta.delivery ?? null, meta) }
+    this.sessions.set(sessionId, next)
+    return next
+  }
+
+  async listSessions(opts: { limit?: number } = {}): Promise<TelemetrySessionMeta[]> {
+    return [...this.sessions.values()]
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, opts.limit ?? 50)
+  }
+
+  async saveDeliveryArtifact(
+    sessionId: string,
+    name: DeliveryArtifactName,
+    data: unknown
+  ): Promise<void> {
+    this.deliveryArtifacts.set(`${sessionId}:${name}`, JSON.parse(JSON.stringify(data)))
+  }
+
+  async readDeliveryArtifact(sessionId: string, name: DeliveryArtifactName): Promise<unknown | null> {
+    return this.deliveryArtifacts.get(`${sessionId}:${name}`) ?? null
+  }
+
+  async artifactSize(relativePath: string): Promise<number | null> {
+    return this.keyframes.get(relativePath)?.length ?? null
+  }
+
+  async syncEvents(): Promise<void> {
+    /* in-memory */
   }
 }

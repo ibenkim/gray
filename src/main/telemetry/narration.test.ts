@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { describe, expect, it, vi } from 'vitest'
@@ -179,5 +179,31 @@ describe('NarrationRecorder + persist', () => {
     const events = await store.readSessionEvents('tsess_narr')
     expect(events.some((e) => e.type === 'narration_span')).toBe(true)
     expect(events.some((e) => e.type === 'marker' && e.data?.marker === 'skip_this')).toBe(true)
+  })
+})
+
+describe('NarrationRecorder local sink (M1-HF)', () => {
+  it('acknowledges accepted chunks and reports exact chunk/byte totals at end', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gray-hf-narr-'))
+    const recorder = new NarrationRecorder(dir)
+    const { audioPath } = recorder.begin('tsess_sink')
+    expect(await recorder.appendChunk('tsess_sink', Buffer.alloc(100, 1))).toBe(true)
+    expect(await recorder.appendChunk('tsess_sink', Buffer.alloc(50, 2))).toBe(true)
+    // Wrong session and empty chunks are refused, not silently counted.
+    expect(await recorder.appendChunk('tsess_other', Buffer.alloc(10))).toBe(false)
+    expect(await recorder.appendChunk('tsess_sink', Buffer.alloc(0))).toBe(false)
+    const end = await recorder.end()
+    expect(end).toMatchObject({ ok: true, chunks: 2, bytes: 150, sessionId: 'tsess_sink' })
+    expect(statSync(audioPath).size).toBe(150)
+    // A second end (e.g. Stop after narration:stop) returns the same result.
+    expect(await recorder.end()).toEqual(end)
+    expect(recorder.getEndResult('tsess_sink')).toEqual(end)
+    expect(await recorder.appendChunk('tsess_sink', Buffer.alloc(5))).toBe(false)
+  })
+
+  it('rejects a malformed session id before it reaches a file path', () => {
+    const recorder = new NarrationRecorder(mkdtempSync(join(tmpdir(), 'gray-hf-narr-')))
+    expect(() => recorder.begin('../escape')).toThrow()
+    expect(() => recorder.begin('a/b')).toThrow()
   })
 })

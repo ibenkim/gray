@@ -73,7 +73,11 @@ export async function syncEditorStepsToStoredWorkflow(
 
   const workflow: ExtractedWorkflow = { ...stored.workflow, steps }
   if (changed) {
-    await store.saveWorkflow(sessionId, workflow, stored.model)
+    // Keep result identity (approval/attempt receipts) when titles are edited.
+    await store.saveWorkflow(sessionId, workflow, stored.model, {
+      usage: stored.usage,
+      provenance: stored.provenance
+    })
   }
   return { changed, workflow }
 }

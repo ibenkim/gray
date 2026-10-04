@@ -13,9 +13,9 @@ import {
   recoverInferredActions,
   rewriteCreateSheetClicks
 } from '../telemetry/automation/compile'
-import { compileSessionAutomation } from '../telemetry/automation/compileSession'
 import { syncEditorStepsToStoredWorkflow } from '../telemetry/automation/syncEditorSteps'
-import { getTelemetryConfig, getTelemetryRecorder, getTelemetryStore } from '../telemetry'
+import { getTelemetryStore } from '../telemetry'
+import { uploadReviewRequired } from '../telemetry/errors'
 import { JxaActuator } from './JxaActuator'
 import { AutomationRunner } from './runner'
 import type { RunEvent, RunnerControl } from './types'
@@ -77,26 +77,12 @@ export function registerAutomationIpc(): void {
       let script = await store.getAutomationScript(sessionId)
       const needsCompile =
         !script || !!script.stale || !!payload.recompileIfNeeded || synced.changed
-      let storedWorkflow: ExtractedWorkflow | null =
+      // M1 hold: compiling sends capture-derived data off-device; blocked until upload review (M15).
+      if (needsCompile) return uploadReviewRequired(sessionId, 'compile')
+      const storedWorkflow: ExtractedWorkflow | null =
         synced.workflow ?? (await store.getWorkflow(sessionId))?.workflow ?? null
 
-      if (needsCompile) {
-        const config = getTelemetryConfig()
-        const clipboardByHash = getTelemetryRecorder()?.getClipboardSessionValues()
-        const compiled = await compileSessionAutomation(store, config, sessionId, {
-          clipboardByHash
-        })
-        if (!compiled.ok) {
-          return {
-            ok: false,
-            error: compiled.error,
-            errorCode: compiled.errorCode || 'AUTOMATION_COMPILE_FAILED'
-          }
-        }
-        script = compiled.automation
-        storedWorkflow =
-          (await store.getWorkflow(sessionId))?.workflow ?? storedWorkflow
-      } else if (script && storedWorkflow && store.saveAutomationScript) {
+      if (script && storedWorkflow && store.saveAutomationScript) {
         // Deterministic recovery: replace leftover manuals with inferred open_url / Cmd+L
         // without paying for another LLM compile.
         const polished = await store.readPolishedSession(sessionId)

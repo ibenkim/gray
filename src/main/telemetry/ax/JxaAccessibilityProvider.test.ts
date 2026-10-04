@@ -1,10 +1,26 @@
-import { describe, expect, it, vi } from 'vitest'
+import { spawn as spawnChild } from 'child_process'
+import { EventEmitter } from 'events'
+import { PassThrough } from 'stream'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   appendFromValueTail,
+  CHILD_STOP_GRACE_MS,
   JxaAccessibilityProvider,
   type JxaKeyEvent
 } from './JxaAccessibilityProvider'
+import { JXA_PARENT_LIFETIME } from './jxaScript'
 import type { InteractionPartial } from '../providers'
+
+// Child-ownership tests (M2) swap in fake children; everything else uses the real module.
+const fake = vi.hoisted(() => ({ spawn: null as null | ((...args: unknown[]) => unknown) }))
+vi.mock('child_process', async (orig) => {
+  const real = await orig<typeof import('child_process')>()
+  return {
+    ...real,
+    spawn: (...args: Parameters<typeof real.spawn>) =>
+      fake.spawn ? fake.spawn(...args) : real.spawn(...args)
+  }
+})
 
 describe('appendFromValueTail', () => {
   it('returns the appended suffix by length delta', () => {
@@ -459,4 +475,219 @@ describe('capability reporting', () => {
     )
     expect(provider.capturesKeys).toBe(true)
   })
+})
+
+/** Stand-in for the osascript child: pipes, signals and exit are scripted by the test. */
+class FakeChild extends EventEmitter {
+  stdout = new PassThrough()
+  stderr = new PassThrough()
+  stdin = { end: vi.fn() }
+  exitCode: number | null = null
+  signalCode: NodeJS.Signals | null = null
+  signals: string[] = []
+  /** When false the child ignores SIGTERM (a stuck sensor). */
+  honorsTerm = true
+  kill(sig: NodeJS.Signals) {
+    this.signals.push(sig)
+    if (sig === 'SIGKILL' || this.honorsTerm) setTimeout(() => this.exit(null, sig), 0)
+    return true
+  }
+  exit(code: number | null, sig: NodeJS.Signals | null = null) {
+    if (this.exitCode !== null || this.signalCode !== null) return
+    this.exitCode = code
+    this.signalCode = sig
+    this.emit('exit', code, sig)
+  }
+  line(obj: unknown) {
+    this.stdout.write(JSON.stringify(obj) + '\n')
+  }
+}
+
+describe('child ownership (M2)', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const children: FakeChild[] = []
+
+  function useFakeChildren() {
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    fake.spawn = () => {
+      const c = new FakeChild()
+      children.push(c)
+      return c
+    }
+  }
+
+  afterEach(() => {
+    fake.spawn = null
+    children.length = 0
+    Object.defineProperty(process, 'platform', platform)
+    vi.useRealTimers()
+  })
+
+  const sample = (label: string) => ({ appName: 'FixtureApp', role: 'AXButton', title: label })
+
+  it('a stopped child is owned until it exits: no replacement, no late output, no false disable', async () => {
+    useFakeChildren()
+    const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
+    const first: InteractionPartial[] = []
+    const second: InteractionPartial[] = []
+    provider.start((p) => first.push(p))
+    const old = children[0]
+    old.honorsTerm = false
+    const stopping = provider.stop() // old child is still alive (ignoring SIGTERM)
+    expect(provider.teardownPending).toBe(true)
+    // A replacement cannot overlap the unexited child.
+    provider.start((p) => second.push(p))
+    expect(children).toHaveLength(1)
+    expect(provider.enabled).toBe(false)
+
+    old.line(sample('OldLate'))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(first).toHaveLength(0)
+    expect(second).toHaveLength(0)
+    old.exit(1) // exit during an intentional stop is not a sensor failure
+    await stopping
+    expect(provider.teardownPending).toBe(false)
+
+    provider.start((p) => second.push(p))
+    expect(children).toHaveLength(2)
+    expect(provider.enabled).toBe(true)
+    children[1].line(sample('Current'))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(second.length).toBeGreaterThan(0)
+    expect(second.some((p) => JSON.stringify(p).includes('OldLate'))).toBe(false)
+    await provider.stop()
+  })
+
+  it('stop resolves only after the child exits: SIGTERM, then SIGKILL after the grace period', async () => {
+    vi.useFakeTimers()
+    useFakeChildren()
+    const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
+    provider.start(() => {})
+    const child = children[0]
+    child.honorsTerm = false
+    let stopped = false
+    const stopping = provider.stop().then(() => (stopped = true))
+    expect(child.signals).toEqual(['SIGTERM'])
+    expect(child.stdin.end).toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(CHILD_STOP_GRACE_MS - 1)
+    expect(stopped).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    await vi.advanceTimersByTimeAsync(1)
+    await stopping
+    expect(stopped).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a child that never reports exit is a typed teardown failure, still owned, with no timers left', async () => {
+    vi.useFakeTimers()
+    useFakeChildren()
+    const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
+    provider.start(() => {})
+    const child = children[0]
+    child.kill = (sig: NodeJS.Signals) => {
+      child.signals.push(sig)
+      return true
+    }
+    let outcome: string | null = null
+    const stopping = provider.stop().then(
+      () => (outcome = 'resolved'),
+      (err: Error) => (outcome = err.name === 'Error' && /did not exit/.test(err.message) ? 'timeout' : 'other')
+    )
+    await vi.advanceTimersByTimeAsync(CHILD_STOP_GRACE_MS + 499)
+    expect(outcome).toBe(null)
+    await vi.advanceTimersByTimeAsync(1)
+    await stopping
+    expect(outcome).toBe('timeout')
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    // Never treated as stopped: the child stays owned and blocks a replacement.
+    expect(provider.teardownPending).toBe(true)
+    provider.start(() => {})
+    expect(children).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(0)
+    // A late observed exit finally releases ownership.
+    child.exit(null, 'SIGKILL')
+    expect(provider.teardownPending).toBe(false)
+  })
+
+  it('kill throwing on every signal still settles as a typed failure at the deadline', async () => {
+    vi.useFakeTimers()
+    useFakeChildren()
+    const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
+    provider.start(() => {})
+    const child = children[0]
+    child.kill = () => {
+      throw new Error('EPERM')
+    }
+    child.stdin.end = vi.fn(() => {
+      throw new Error('EPIPE')
+    })
+    let rejected = false
+    const stopping = provider.stop().catch(() => (rejected = true))
+    await vi.advanceTimersByTimeAsync(CHILD_STOP_GRACE_MS + 500)
+    await stopping
+    expect(rejected).toBe(true)
+    expect(provider.teardownPending).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('the sensor is spawned with its parent pid so it can detect parent loss', () => {
+    useFakeChildren()
+    const calls: unknown[][] = []
+    const make = fake.spawn!
+    fake.spawn = (...args: unknown[]) => {
+      calls.push(args)
+      return make(...args)
+    }
+    const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
+    provider.start(() => {})
+    const opts = calls[0][2] as { env: Record<string, string> }
+    expect(opts.env.GRAY_JXA_PARENT_PID).toBe(String(process.pid))
+    void provider.stop()
+  })
+})
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * No-capture lifetime fixture: a real osascript runs ONLY the sensor's parent-lifetime check
+ * in a loop (no Cocoa/AX import, no monitors, nothing read). An intermediate parent spawns
+ * it; killing that parent must make the child exit on its own. Process ids only.
+ */
+describe.runIf(process.platform === 'darwin')('JXA parent lifetime (no-capture fixture)', () => {
+  it('keeps running while its parent lives and exits by itself after the parent is killed', async () => {
+    const loop = `${JXA_PARENT_LIFETIME}\nwhile (true) { exitIfOrphaned(); delay(0.05); }`
+    const parentSrc = [
+      "const { spawn } = require('child_process')",
+      "const c = spawn('osascript', ['-l', 'JavaScript', '-e', process.env.GRAY_FIXTURE_LOOP], {",
+      "  stdio: 'ignore', env: { ...process.env, GRAY_JXA_PARENT_PID: String(process.pid) } })",
+      'process.stdout.write(String(c.pid) + "\\n")',
+      'setInterval(() => {}, 1000)'
+    ].join('\n')
+    const parent = spawnChild(process.execPath, ['-e', parentSrc], {
+      env: { ...process.env, GRAY_FIXTURE_LOOP: loop, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+    const childPid = await new Promise<number>((resolve, reject) => {
+      parent.stdout!.once('data', (d) => resolve(Number(String(d).trim())))
+      parent.once('exit', () => reject(new Error('fixture parent exited early')))
+    })
+    try {
+      expect(childPid).toBeGreaterThan(0)
+      await new Promise((r) => setTimeout(r, 800))
+      expect(alive(childPid)).toBe(true)
+      parent.kill('SIGKILL')
+      await vi.waitFor(() => expect(alive(childPid)).toBe(false), { timeout: 5000, interval: 50 })
+    } finally {
+      if (alive(childPid)) process.kill(childPid, 'SIGKILL')
+      if (parent.exitCode === null) parent.kill('SIGKILL')
+    }
+  }, 15_000)
 })

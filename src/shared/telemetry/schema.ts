@@ -415,9 +415,177 @@ export const ProcessingErrorCodeSchema = z.enum([
   'SESSION_NOT_READY',
   'AUTOMATION_COMPILE_FAILED',
   'AUTOMATION_SCRIPT_MISSING',
-  'AUTOMATION_ACCESSIBILITY_DENIED'
+  'AUTOMATION_ACCESSIBILITY_DENIED',
+  /** A validated interpretation was received but could not be written locally. */
+  'RESULT_SAVE_FAILED'
 ])
 export type ProcessingErrorCode = z.infer<typeof ProcessingErrorCodeSchema>
+
+/**
+ * Delivery state v1 (M1-HF): local save → review/approval → interpretation request.
+ * Optional on meta; its absence means a legacy session whose completeness is unverified.
+ * Holds safe codes/counts only — never captured content, paths or credentials.
+ */
+/** `legacy_unverified`: pre-manifest session reviewed as available evidence; never "complete". */
+export const SaveStateSchema = z.enum([
+  'recording',
+  'saving',
+  'complete',
+  'incomplete',
+  'legacy_unverified'
+])
+export const SaveErrorCodeSchema = z.enum([
+  'EVENTS_NOT_PERSISTED',
+  'EVENTS_REJECTED',
+  'EVENTS_DROPPED',
+  'ARTIFACT_FAILED',
+  'AUDIO_INCOMPLETE',
+  'MANIFEST_WRITE_FAILED',
+  'STOP_FAILED',
+  'INTERRUPTED',
+  'METADATA_INVALID',
+  'START_FAILED',
+  'SOURCE_TEARDOWN_FAILED'
+])
+export type SaveErrorCode = z.infer<typeof SaveErrorCodeSchema>
+
+/** Why capture ended (M2): the user's Stop or a main-owned barrier. Additive, optional. */
+export const StopReasonSchema = z.enum([
+  'user',
+  'hide',
+  'logout',
+  'owner_lost',
+  'permission_revoked',
+  'quit'
+])
+export type StopReason = z.infer<typeof StopReasonSchema>
+
+export const ReviewStateSchema = z.enum([
+  'pending',
+  'prepared',
+  'approved',
+  'cancelled',
+  'unavailable'
+])
+export const ReviewErrorCodeSchema = z.enum([
+  'POLISH_FAILED',
+  'PREPARE_TOO_LARGE',
+  'WORKFLOW_EMPTY_ACTIONS',
+  'NOT_SAVED',
+  'LOCAL_FILES_INVALID',
+  'REVIEW_STALE'
+])
+export type ReviewErrorCode = z.infer<typeof ReviewErrorCodeSchema>
+
+export const InterpretationStateSchema = z.enum([
+  'not_started',
+  'sending',
+  'complete',
+  'failed',
+  'interrupted_unknown'
+])
+export const InterpretationStageSchema = z.enum(['classify', 'extract', 'single'])
+
+/** Observed provider receipt for one acknowledged stage request (ids only if returned). */
+export const StageReceiptSchema = z
+  .object({
+    stage: InterpretationStageSchema,
+    attemptId: z.string().max(80),
+    responseId: z.string().max(120).optional(),
+    requestId: z.string().max(120).optional(),
+    at: z.string().datetime()
+  })
+  .strict()
+export type StageReceipt = z.infer<typeof StageReceiptSchema>
+
+export const ApprovalReceiptSchema = z
+  .object({
+    revision: z.number().int().positive(),
+    digest: z.string().regex(/^[a-f0-9]{64}$/),
+    principal: z.string().min(1).max(200),
+    approvedAt: z.string().datetime(),
+    purpose: z.literal('interpretation_text'),
+    provider: z.literal('openai'),
+    model: z.string().max(80),
+    promptVersion: z.string().max(40),
+    policyVersion: z.string().max(40),
+    /** Approved as available evidence from a legacy save with unverified completeness. */
+    legacyUnverified: z.boolean()
+  })
+  .strict()
+export type ApprovalReceipt = z.infer<typeof ApprovalReceiptSchema>
+
+export const SessionDeliverySchema = z
+  .object({
+    version: z.literal(1),
+    save: z
+      .object({
+        state: SaveStateSchema,
+        errorCode: SaveErrorCodeSchema.optional(),
+        stopReason: StopReasonSchema.optional(),
+        finalSequence: z.number().int().nonnegative().optional(),
+        storedEvents: z.number().int().nonnegative().optional(),
+        pendingEvents: z.number().int().nonnegative().optional(),
+        rejectedEvents: z.number().int().nonnegative().optional(),
+        droppedEvents: z.number().int().nonnegative().optional(),
+        filteredEvents: z.number().int().nonnegative().optional(),
+        artifacts: z
+          .object({
+            saved: z.number().int().nonnegative(),
+            missing: z.number().int().nonnegative(),
+            failed: z.number().int().nonnegative(),
+            skipped: z.number().int().nonnegative()
+          })
+          .strict()
+          .optional(),
+        audio: z
+          .object({
+            state: z.enum(['none', 'complete', 'incomplete']),
+            chunks: z.number().int().nonnegative().optional(),
+            bytes: z.number().int().nonnegative().optional()
+          })
+          .strict()
+          .optional(),
+        completedAt: z.string().datetime().optional()
+      })
+      .strict(),
+    review: z
+      .object({
+        state: ReviewStateSchema,
+        errorCode: ReviewErrorCodeSchema.optional(),
+        revision: z.number().int().positive().optional(),
+        digest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+        approval: ApprovalReceiptSchema.optional()
+      })
+      .strict(),
+    interpretation: z
+      .object({
+        state: InterpretationStateSchema,
+        errorCode: ProcessingErrorCodeSchema.optional(),
+        stage: InterpretationStageSchema.optional(),
+        attempt: z.number().int().nonnegative().optional(),
+        attemptId: z.string().max(80).optional(),
+        revision: z.number().int().positive().optional(),
+        digest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+        /** Stable local draft id for this session's interpretation result. */
+        workflowId: z.string().max(80).optional(),
+        partial: z.boolean().optional(),
+        receipts: z.array(StageReceiptSchema).max(6).optional(),
+        completedAt: z.string().datetime().optional()
+      })
+      .strict()
+  })
+  .strict()
+export type SessionDelivery = z.infer<typeof SessionDeliverySchema>
+
+export function initialDelivery(): SessionDelivery {
+  return {
+    version: 1,
+    save: { state: 'recording' },
+    review: { state: 'pending' },
+    interpretation: { state: 'not_started' }
+  }
+}
 
 export const TelemetrySessionMetaSchema = z
   .object({
@@ -431,6 +599,7 @@ export const TelemetrySessionMetaSchema = z
     schemaVersion: z.literal(SCHEMA_VERSION),
     recordMode: z.enum(['one-app', 'full-screen']).optional(),
     selectedAppId: z.string().max(80).optional(),
+    delivery: SessionDeliverySchema.optional(),
     /**
      * Legacy single status kept optional for older meta files.
      * Prefer captureStatus + processingStatus.
@@ -491,6 +660,19 @@ export function normalizeSessionMeta(raw: unknown): TelemetrySessionMeta | null 
         ? 'OPENAI_REQUEST_FAILED'
         : undefined
 
+  // New-format delivery state must survive normalization. A present-but-invalid object is
+  // never downgraded to "legacy": it becomes an incomplete save that cannot be submitted.
+  let delivery: SessionDelivery | undefined
+  if (data.delivery !== undefined) {
+    const parsedDelivery = SessionDeliverySchema.safeParse(data.delivery)
+    delivery = parsedDelivery.success
+      ? parsedDelivery.data
+      : {
+          ...initialDelivery(),
+          save: { state: 'incomplete', errorCode: 'METADATA_INVALID' }
+        }
+  }
+
   const candidate = {
     sessionId: data.sessionId,
     ownerEmail: data.ownerEmail,
@@ -501,7 +683,8 @@ export function normalizeSessionMeta(raw: unknown): TelemetrySessionMeta | null 
     processingErrorCode,
     schemaVersion: SCHEMA_VERSION,
     recordMode: data.recordMode,
-    selectedAppId: data.selectedAppId
+    selectedAppId: data.selectedAppId,
+    ...(delivery ? { delivery } : {})
     // intentionally omit legacy error / status from persisted shape
   }
 
@@ -1072,7 +1255,19 @@ export const StoredWorkflowResultSchema = z
     extractedAt: z.string().datetime(),
     model: z.string().max(80),
     workflow: ExtractedWorkflowSchema,
-    usage: TokenUsageSchema.optional()
+    usage: TokenUsageSchema.optional(),
+    /** M1-HF: binds a reviewed result to its approval, attempt and observed receipts. */
+    provenance: z
+      .object({
+        workflowId: z.string().max(80),
+        reviewRevision: z.number().int().positive(),
+        reviewDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        attemptId: z.string().max(80),
+        partial: z.boolean(),
+        receipts: z.array(StageReceiptSchema).max(6)
+      })
+      .strict()
+      .optional()
   })
   .strict()
 

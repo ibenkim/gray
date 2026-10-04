@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { formatSchedule } from '../../../shared/schedule'
 import type { Suggestion, Workflow } from '../state/types'
+import type { RecordingSummary } from '../../../shared/types'
 import AppChip from '../components/shared/AppChip'
+import { recordingStatusLabel } from './UploadReview'
 
 /** 1.2–1.4 — Workflows home: metric header, rows with On/Off, Suggested card.
  *  Shared page reuses the same row grammar with a "shared by …" chip. */
 export default function WorkflowsHome({
   workflows,
+  recordings = [],
+  onOpenRecording,
   hoursLine,
   suggestion,
   ownerTeamSize,
@@ -19,6 +23,9 @@ export default function WorkflowsHome({
   onDelete
 }: {
   workflows: Workflow[]
+  /** Saved recordings (personal Library only); shown even when there are no workflows. */
+  recordings?: RecordingSummary[]
+  onOpenRecording?: (recording: RecordingSummary) => void
   hoursLine: string
   suggestion: Suggestion | null
   /** When set, home header uses the owner team metric. */
@@ -91,6 +98,33 @@ export default function WorkflowsHome({
 
   const deleteTarget = deleteId ? workflows.find((w) => w.id === deleteId) : null
 
+  const recordingsSection =
+    !isShared && recordings.length > 0 ? (
+      <div className="saved-recordings">
+        <div className="suggested-label">Saved recordings</div>
+        <div className="ws-rows">
+          {recordings.map((r) => (
+            <div
+              className="ws-row"
+              key={r.sessionId}
+              onClick={() => onOpenRecording?.(r)}
+            >
+              <span className="ws-row-name">
+                {formatRecordingDate(r.startedAt)}
+                <span className="ws-row-schedule">  ·  {recordingStatusLabel(r)}</span>
+              </span>
+              <span className="ws-row-right">
+                <span className="recording-action">
+                  {r.interpretationState === 'complete' ? 'Open interpretation' : 'Review upload'}
+                </span>
+                <ChevronRight />
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    ) : null
+
   // 4.1 first-run — empty Library: ready-state sub-line (no zero metric),
   // centered record CTA that parks the window and opens the record panel.
   // Shared empty state is a quieter mirror (no record CTA).
@@ -103,11 +137,14 @@ export default function WorkflowsHome({
             <div className="ws-header-sub">
               {isShared
                 ? 'Nothing shared with the team yet'
-                : 'Nothing here yet — yuh is ready when you are'}
+                : recordings.length > 0
+                  ? 'No workflows yet — your saved recordings are below'
+                  : 'Nothing here yet — yuh is ready when you are'}
             </div>
           </div>
         </div>
-        {!isShared && (
+        {recordingsSection}
+        {!isShared && recordings.length === 0 && (
           <div className="ws-empty">
             <div className="ws-empty-title">Record your first workflow</div>
             <div className="ws-empty-desc">
@@ -294,6 +331,8 @@ export default function WorkflowsHome({
         })}
         </div>
 
+        {recordingsSection}
+
         {!isShared && suggestion && (
           <div className="suggested-block">
             <div className="suggested-label">Suggested</div>
@@ -365,6 +404,13 @@ export default function WorkflowsHome({
       )}
     </div>
   )
+}
+
+function formatRecordingDate(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? 'Recording'
+    : `Recording · ${d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
 }
 
 export function ChevronRight() {

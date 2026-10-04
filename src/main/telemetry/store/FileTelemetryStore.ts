@@ -1,7 +1,12 @@
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   writeFileSync
@@ -16,7 +21,9 @@ import {
   TelemetryEventSchema,
   PolishedSessionSchema,
   normalizeSessionMeta,
+  initialDelivery,
   type AutomationScript,
+  type SessionDelivery,
   type ExtractedWorkflow,
   type PolishedSession,
   type StoredAutomationScript,
@@ -32,10 +39,26 @@ import { redactEvent, shouldDropEvent } from '../../../shared/telemetry/sanitize
 import type {
   AppendEventsResult,
   CreateSessionInput,
+  DeliveryArtifactName,
   SessionMetaPatch,
   StoredNarration,
-  TelemetryStore
+  TelemetryStore,
+  WorkflowProvenance
 } from './TelemetryStore'
+
+type FileKind =
+  | 'meta'
+  | 'events'
+  | 'polished'
+  | 'workflow'
+  | 'variables'
+  | 'automation'
+  | 'narration'
+  | 'ground_truth'
+  | DeliveryArtifactName
+
+const LIST_DEFAULT = 50
+const LIST_MAX = 200
 
 type Envelope = {
   schemaVersion: typeof SCHEMA_VERSION
@@ -56,6 +79,7 @@ type Layout = 'session' | 'legacy'
 export class FileTelemetryStore implements TelemetryStore {
   private readonly root: string
   private readonly appendLocks = new Map<string, Promise<void>>()
+  private readonly metaLocks = new Map<string, Promise<unknown>>()
   private ready = false
 
   constructor(
@@ -107,10 +131,11 @@ export class FileTelemetryStore implements TelemetryStore {
       processingStatus: 'not_started',
       schemaVersion: SCHEMA_VERSION,
       recordMode: input.recordMode,
-      selectedAppId: input.selectedAppId
+      selectedAppId: input.selectedAppId,
+      delivery: initialDelivery()
     }
     const metaPath = this.pathFor(sessionId, 'meta', 'session')
-    this.writeJson(metaPath, meta)
+    this.writeJson(metaPath, meta, { durable: true })
     const eventsPath = this.pathFor(sessionId, 'events', 'session')
     if (!existsSync(eventsPath)) {
       mkdirSync(dirname(eventsPath), { recursive: true })
@@ -132,6 +157,7 @@ export class FileTelemetryStore implements TelemetryStore {
     let accepted = 0
     let duplicates = 0
     let rejected = 0
+    let filtered = 0
     const lines: string[] = []
     const receivedAt = new Date().toISOString()
 
@@ -147,7 +173,7 @@ export class FileTelemetryStore implements TelemetryStore {
       }
       const event = redactEvent(parsed.data)
       if (shouldDropEvent(event)) {
-        rejected += 1
+        filtered += 1
         continue
       }
       if (seen.has(event.eventId)) {
@@ -169,7 +195,7 @@ export class FileTelemetryStore implements TelemetryStore {
       await this.safeAppend(this.pathFor(id, 'events', layout), lines.join('\n') + '\n')
     }
 
-    return { accepted, duplicates, rejected }
+    return { accepted, duplicates, rejected, filtered }
   }
 
   async stopSession(sessionId: string): Promise<TelemetrySessionMeta> {
@@ -187,23 +213,31 @@ export class FileTelemetryStore implements TelemetryStore {
   }
 
   async readSessionEvents(sessionId: string): Promise<TelemetryEvent[]> {
+    return (await this.readSessionEventsChecked(sessionId)).events
+  }
+
+  async readSessionEventsChecked(
+    sessionId: string
+  ): Promise<{ events: TelemetryEvent[]; invalidLines: number }> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
     const path = this.resolveExisting(id, 'events')
-    if (!path) return []
+    if (!path) return { events: [], invalidLines: 0 }
     const text = readFileSync(path, 'utf8')
     const events: TelemetryEvent[] = []
+    let invalidLines = 0
     for (const line of text.split('\n')) {
       if (!line.trim()) continue
       try {
         const envelope = JSON.parse(line) as Envelope
         const parsed = TelemetryEventSchema.safeParse(envelope.event)
         if (parsed.success) events.push(redactEvent(parsed.data))
+        else invalidLines += 1
       } catch {
-        // skip corrupt lines
+        invalidLines += 1
       }
     }
-    return events
+    return { events, invalidLines }
   }
 
   async readPolishedSession(sessionId: string): Promise<PolishedSession | null> {
@@ -231,7 +265,7 @@ export class FileTelemetryStore implements TelemetryStore {
     sessionId: string,
     workflow: ExtractedWorkflow,
     model: string,
-    opts?: { usage?: TokenUsage }
+    opts?: { usage?: TokenUsage; provenance?: WorkflowProvenance }
   ): Promise<StoredWorkflowResult> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
@@ -241,10 +275,13 @@ export class FileTelemetryStore implements TelemetryStore {
       extractedAt: new Date().toISOString(),
       model,
       workflow,
-      usage: opts?.usage
+      usage: opts?.usage,
+      ...(opts?.provenance ? { provenance: opts.provenance } : {})
     }
     const validated = StoredWorkflowResultSchema.parse(stored)
-    this.writeJson(this.pathFor(id, 'workflow', this.layoutOf(id)), validated)
+    this.writeJson(this.pathFor(id, 'workflow', this.layoutOf(id)), validated, {
+      durable: !!opts?.provenance
+    })
     return validated
   }
 
@@ -434,22 +471,110 @@ export class FileTelemetryStore implements TelemetryStore {
   async updateSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<TelemetrySessionMeta> {
     await this.ensureReady()
     const id = this.assertSessionId(sessionId)
-    const meta = await this.getSessionMeta(id)
-    if (!meta) throw new Error(`[telemetry] unknown session ${id}`)
-    const next: TelemetrySessionMeta = {
-      ...meta,
-      captureStatus: patch.captureStatus ?? meta.captureStatus,
-      processingStatus: patch.processingStatus ?? meta.processingStatus,
-      stoppedAt: patch.stoppedAt ?? meta.stoppedAt,
-      processingErrorCode:
-        patch.processingErrorCode === null
-          ? undefined
-          : (patch.processingErrorCode ?? meta.processingErrorCode)
+    return this.withMetaLock(id, async () => {
+      const meta = await this.getSessionMeta(id)
+      if (!meta) throw new Error(`[telemetry] unknown session ${id}`)
+      const next = applyMetaPatch(meta, patch)
+      this.writeJson(this.pathFor(id, 'meta', this.layoutOf(id)), next)
+      return next
+    })
+  }
+
+  async updateDelivery(
+    sessionId: string,
+    mutate: (current: SessionDelivery | null, meta: TelemetrySessionMeta) => SessionDelivery,
+    patch: SessionMetaPatch = {}
+  ): Promise<TelemetrySessionMeta> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    return this.withMetaLock(id, async () => {
+      const meta = await this.getSessionMeta(id)
+      if (!meta) throw new Error(`[telemetry] unknown session ${id}`)
+      const next = { ...applyMetaPatch(meta, patch), delivery: mutate(meta.delivery ?? null, meta) }
+      this.writeJson(this.pathFor(id, 'meta', this.layoutOf(id)), next, { durable: true })
+      return next
+    })
+  }
+
+  async listSessions(opts: { limit?: number } = {}): Promise<TelemetrySessionMeta[]> {
+    await this.ensureReady()
+    const limit = Math.max(1, Math.min(opts.limit ?? LIST_DEFAULT, LIST_MAX))
+    const byId = new Map<string, TelemetrySessionMeta>()
+    // Current layout first so it wins over a legacy duplicate.
+    for (const name of this.safeReaddir('sessions')) {
+      if (!SessionIdSchema.safeParse(name).success) continue
+      if (!this.isPlainEntry(this.safeJoin('sessions', name), 'dir')) continue
+      const metaPath = this.safeJoin('sessions', name, 'meta.json')
+      if (!this.isPlainEntry(metaPath, 'file')) continue
+      const meta = this.readMetaFile(metaPath, name)
+      if (meta) byId.set(name, meta)
     }
-    delete (next as { error?: string }).error
-    delete (next as { status?: string }).status
-    this.writeJson(this.pathFor(id, 'meta', this.layoutOf(id)), next)
-    return next
+    for (const file of this.safeReaddir('meta')) {
+      if (!file.endsWith('.json')) continue
+      const name = file.slice(0, -'.json'.length)
+      if (byId.has(name) || !SessionIdSchema.safeParse(name).success) continue
+      const metaPath = this.safeJoin('meta', file)
+      if (!this.isPlainEntry(metaPath, 'file')) continue
+      const meta = this.readMetaFile(metaPath, name)
+      if (meta) byId.set(name, meta)
+    }
+    // ponytail: parses every small meta.json per listing; add a summary index if counts grow large.
+    return [...byId.values()]
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, limit)
+  }
+
+  async saveDeliveryArtifact(
+    sessionId: string,
+    name: DeliveryArtifactName,
+    data: unknown
+  ): Promise<void> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    this.writeJson(this.pathFor(id, name, this.layoutOf(id)), data, { durable: true })
+  }
+
+  async readDeliveryArtifact(sessionId: string, name: DeliveryArtifactName): Promise<unknown | null> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.resolveExisting(id, name)
+    if (!path) return null
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as unknown
+    } catch {
+      return null
+    }
+  }
+
+  async artifactSize(relativePath: string): Promise<number | null> {
+    await this.ensureReady()
+    const session = /^sessions\/([A-Za-z0-9_-]+)\/shots\/([A-Za-z0-9_-]+)\.jpg$/.exec(relativePath)
+    const legacy = /^([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\.jpg$/.exec(relativePath)
+    const path = session
+      ? this.safeJoin('sessions', session[1], 'shots', `${session[2]}.jpg`)
+      : legacy
+        ? this.safeJoin('keyframes', legacy[1], `${legacy[2]}.jpg`)
+        : null
+    if (!path) return null
+    try {
+      const st = lstatSync(path)
+      return st.isFile() ? st.size : null
+    } catch {
+      return null
+    }
+  }
+
+  async syncEvents(sessionId: string): Promise<void> {
+    await this.ensureReady()
+    const id = this.assertSessionId(sessionId)
+    const path = this.resolveExisting(id, 'events')
+    if (!path) return
+    const fd = openSync(path, 'r')
+    try {
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
   }
 
   /** Prefer session layout when its meta.json exists; else legacy. */
@@ -459,19 +584,7 @@ export class FileTelemetryStore implements TelemetryStore {
     return 'session'
   }
 
-  private pathFor(
-    sessionId: string,
-    kind:
-      | 'meta'
-      | 'events'
-      | 'polished'
-      | 'workflow'
-      | 'variables'
-      | 'automation'
-      | 'narration'
-      | 'ground_truth',
-    layout: Layout
-  ): string {
+  private pathFor(sessionId: string, kind: FileKind, layout: Layout): string {
     if (layout === 'session') {
       const nameByKind: Record<typeof kind, string> = {
         meta: 'meta.json',
@@ -481,7 +594,9 @@ export class FileTelemetryStore implements TelemetryStore {
         variables: 'variables.json',
         automation: 'automation.json',
         narration: 'narration.json',
-        ground_truth: 'ground_truth.md'
+        ground_truth: 'ground_truth.md',
+        review: 'review.json',
+        checkpoint: 'checkpoint.json'
       }
       return this.safeJoin('sessions', sessionId, nameByKind[kind])
     }
@@ -502,22 +617,14 @@ export class FileTelemetryStore implements TelemetryStore {
         return this.safeJoin('narration', `${sessionId}.json`)
       case 'ground_truth':
         return this.safeJoin('ground_truth', `${sessionId}.md`)
+      case 'review':
+      case 'checkpoint':
+        return this.safeJoin('delivery', `${sessionId}.${kind}.json`)
     }
   }
 
   /** Read: try session layout, then legacy. */
-  private resolveExisting(
-    sessionId: string,
-    kind:
-      | 'meta'
-      | 'events'
-      | 'polished'
-      | 'workflow'
-      | 'variables'
-      | 'automation'
-      | 'narration'
-      | 'ground_truth'
-  ): string | null {
+  private resolveExisting(sessionId: string, kind: FileKind): string | null {
     const sessionPath = this.pathFor(sessionId, kind, 'session')
     if (existsSync(sessionPath)) return sessionPath
     const legacyPath = this.pathFor(sessionId, kind, 'legacy')
@@ -543,15 +650,62 @@ export class FileTelemetryStore implements TelemetryStore {
     return resolved
   }
 
-  private writeJson(path: string, data: unknown): void {
+  private writeJson(path: string, data: unknown, opts: { durable?: boolean } = {}): void {
     try {
       mkdirSync(dirname(path), { recursive: true })
       const tmp = `${path}.${process.pid}.tmp`
       writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8')
+      if (opts.durable) {
+        const fd = openSync(tmp, 'r')
+        try {
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
+      }
       renameSync(tmp, path)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       throw new Error(`[telemetry] failed to write ${path}: ${msg}`)
+    }
+  }
+
+  private async withMetaLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.metaLocks.get(id) ?? Promise.resolve()
+    const run = prev.catch(() => undefined).then(fn)
+    const tail = run.catch(() => undefined)
+    this.metaLocks.set(id, tail)
+    try {
+      return await run
+    } finally {
+      if (this.metaLocks.get(id) === tail) this.metaLocks.delete(id)
+    }
+  }
+
+  private safeReaddir(dir: string): string[] {
+    try {
+      return readdirSync(this.safeJoin(dir))
+    } catch {
+      return []
+    }
+  }
+
+  /** Reject symlinks so enumeration cannot escape the telemetry root. */
+  private isPlainEntry(path: string, kind: 'file' | 'dir'): boolean {
+    try {
+      const st = lstatSync(path)
+      return kind === 'file' ? st.isFile() : st.isDirectory()
+    } catch {
+      return false
+    }
+  }
+
+  private readMetaFile(path: string, expectedId: string): TelemetrySessionMeta | null {
+    try {
+      const meta = normalizeSessionMeta(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+      return meta && meta.sessionId === expectedId ? meta : null
+    } catch {
+      return null
     }
   }
 
@@ -582,4 +736,20 @@ export class FileTelemetryStore implements TelemetryStore {
     const events = await this.readSessionEvents(sessionId)
     return new Set(events.map((e) => e.eventId))
   }
+}
+
+function applyMetaPatch(meta: TelemetrySessionMeta, patch: SessionMetaPatch): TelemetrySessionMeta {
+  const next: TelemetrySessionMeta = {
+    ...meta,
+    captureStatus: patch.captureStatus ?? meta.captureStatus,
+    processingStatus: patch.processingStatus ?? meta.processingStatus,
+    stoppedAt: patch.stoppedAt ?? meta.stoppedAt,
+    processingErrorCode:
+      patch.processingErrorCode === null
+        ? undefined
+        : (patch.processingErrorCode ?? meta.processingErrorCode)
+  }
+  delete (next as { error?: string }).error
+  delete (next as { status?: string }).status
+  return next
 }

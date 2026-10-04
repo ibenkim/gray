@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import type { RecordingSummary } from '../../../../shared/types'
 import type { Workflow, WorkflowQuestionRef, WorkflowRunContract } from '../../state/types'
 
 /** Plain-language job summary (§9.1). */
@@ -59,41 +61,37 @@ export function needsRunContract(workflow: Workflow): boolean {
 }
 
 /**
- * Local redaction preview before anything leaves the machine (capture-spec §5).
- * Surfaces what Gray kept vs masked for the recorded session.
+ * Privacy status for a recorded workflow, stated only from evidence: an approval
+ * receipt proves a reviewed transfer; without one, earlier history is unknown.
  */
-export function RedactionPreview({
-  sessionId,
-  notes
-}: {
-  sessionId?: string
-  notes?: string[]
-}) {
+export function RedactionPreview({ sessionId }: { sessionId?: string }) {
+  const [summary, setSummary] = useState<RecordingSummary | null>(null)
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+    void window.ghostBridge?.telemetryGetRecording?.(sessionId).then((r) => {
+      if (!cancelled) setSummary(r?.recording ?? null)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
   if (!sessionId) return null
-  const items =
-    notes && notes.length
-      ? notes
-      : [
-          'Secure fields were recorded as events without values.',
-          'Clipboard secrets and credential-bearing URLs were rejected.',
-          'Typed text was scanned for emails, tokens, and long numbers.'
-        ]
   return (
     <div className="ledger-section redaction-preview">
-      <div className="section-label">REDACTION</div>
-      <p className="review-summary-text">
-        Nothing leaves this Mac until you continue. Review what was masked in this
-        session.
-      </p>
-      <ul className="review-questions">
-        {items.map((n) => (
-          <li key={n} className="review-question">
-            {n}
-          </li>
-        ))}
-      </ul>
+      <div className="section-label">PRIVACY</div>
+      <p className="review-summary-text">{privacyStatusText(summary)}</p>
     </div>
   )
+}
+
+export function privacyStatusText(summary: RecordingSummary | null): string {
+  if (summary?.approvedAt) {
+    return `Sanitized text from this recording was sent to OpenAI${
+      summary.approvedModel ? ` (${summary.approvedModel})` : ''
+    } for interpretation after your approval. Screenshots, audio, narration and raw clipboard contents were not included.`
+  }
+  return 'Earlier transfer history for this recording is unknown: it has no review approval receipt.'
 }
 
 /** Lightweight pre-run authorization panel (§9.4). */

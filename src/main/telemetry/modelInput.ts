@@ -172,7 +172,9 @@ export function prepareWorkflowModelInput(
     for (const [s, f] of evidenceMap) {
       if (f === full) return s
     }
-    const s = String(nextId++)
+    // `e`-prefixed so an evidence alias can never be confused with an action order
+    // (acts[].i), a screen id (sN), a step id or an address id.
+    const s = `e${nextId++}`
     evidenceMap.set(s, full)
     return s
   }

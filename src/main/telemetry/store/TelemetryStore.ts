@@ -4,6 +4,7 @@ import type {
   NarrationMarker,
   PolishedSession,
   ProcessingErrorCode,
+  SessionDelivery,
   ProcessingStatus,
   CaptureStatus,
   StoredAutomationScript,
@@ -25,8 +26,16 @@ export type CreateSessionInput = {
 export type AppendEventsResult = {
   accepted: number
   duplicates: number
+  /** Invalid / wrong-session events the store refused (data loss). */
   rejected: number
+  /** Intentionally dropped by privacy filtering (not a loss). */
+  filtered?: number
 }
+
+/** Delivery artifacts stored beside a session (sanitized review payload, stage checkpoint). */
+export type DeliveryArtifactName = 'review' | 'checkpoint'
+
+export type WorkflowProvenance = NonNullable<StoredWorkflowResult['provenance']>
 
 export type SessionMetaPatch = {
   captureStatus?: CaptureStatus
@@ -62,12 +71,33 @@ export interface TelemetryStore {
     sessionId: string,
     workflow: ExtractedWorkflow,
     model: string,
-    opts?: { usage?: TokenUsage }
+    opts?: { usage?: TokenUsage; provenance?: WorkflowProvenance }
   ): Promise<StoredWorkflowResult>
   getWorkflow(sessionId: string): Promise<StoredWorkflowResult | null>
   getSessionMeta(sessionId: string): Promise<TelemetrySessionMeta | null>
   updateSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<TelemetrySessionMeta>
   ensureReady(): Promise<void>
+  /**
+   * Serialized read-modify-write of the session's delivery state (M1-HF). Missing
+   * delivery (legacy) is passed as null. The write is durable before resolving.
+   */
+  updateDelivery(
+    sessionId: string,
+    mutate: (current: SessionDelivery | null, meta: TelemetrySessionMeta) => SessionDelivery,
+    patch?: SessionMetaPatch
+  ): Promise<TelemetrySessionMeta>
+  /** Bounded, newest-first session metadata (both layouts, deduplicated). */
+  listSessions(opts?: { limit?: number }): Promise<TelemetrySessionMeta[]>
+  saveDeliveryArtifact(sessionId: string, name: DeliveryArtifactName, data: unknown): Promise<void>
+  readDeliveryArtifact(sessionId: string, name: DeliveryArtifactName): Promise<unknown | null>
+  /** Byte size of a stored keyframe by the relative path saveKeyframe returned; null if absent. */
+  artifactSize(relativePath: string): Promise<number | null>
+  /** Flush the session event log to stable storage before a completion marker. */
+  syncEvents(sessionId: string): Promise<void>
+  /** Events with corrupt-line accounting (legacy review validation). */
+  readSessionEventsChecked(
+    sessionId: string
+  ): Promise<{ events: TelemetryEvent[]; invalidLines: number }>
   saveVariables?(sessionId: string, variables: WorkflowVariable[]): Promise<StoredVariables>
   getVariables?(sessionId: string): Promise<StoredVariables | null>
   saveAutomationScript?(

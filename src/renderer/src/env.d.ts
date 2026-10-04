@@ -2,6 +2,10 @@
 
 import type {
   DeepLink,
+  DropdownAck,
+  DropdownClosed,
+  RecordDropdownCommand,
+  RecordDropdownSnapshot,
   InvitePreview,
   JoinResult,
   OnboardingStep,
@@ -14,10 +18,29 @@ import type {
   StoreSnapshot,
   Suggestion,
   Team,
+  RecordingSummary,
+  ReviewPreview,
+  TransitionAck,
   Workflow,
   WorkspaceFocus
 } from '../../shared/types'
 import type { ExtractedWorkflow, TelemetryEvent } from '../../shared/telemetry/schema'
+
+type AudioReport = {
+  chunksAcknowledged: number
+  chunksFailed: number
+  timedOut: boolean
+  /** Recorder error or stop exception after capture started (sticky). */
+  recorderFailed?: boolean
+}
+
+type RecordingResult = {
+  ok: boolean
+  sessionId?: string | null
+  error?: string
+  errorCode?: string
+  recording?: RecordingSummary
+}
 
 type TelemetryRecordingStatus = {
   recording: boolean
@@ -26,6 +49,15 @@ type TelemetryRecordingStatus = {
   sequence: number
   startedAt: string | null
   processing: boolean
+  /** Main-owned lifecycle phase (M2). */
+  phase?: 'idle' | 'starting' | 'recording' | 'pausing' | 'paused' | 'resuming' | 'stopping'
+  generation?: number
+  /** Narration ends at the first pause; resume continues without it. */
+  narration?: 'off' | 'active' | 'ended'
+  /** Main lifecycle (M2-R2): Start pending / durable save not yet written / source teardown unconfirmed. */
+  starting?: boolean
+  saving?: boolean
+  teardownFailed?: boolean
 }
 
 type ActivityHoldPayload = {
@@ -90,15 +122,32 @@ type AutomationRunEvent =
 
 declare global {
   interface Window {
+    /** Only in the Record dropdown window (M1-HF3); the pill and workspace never get it. */
+    grayDropdown?: {
+      hello: () => void
+      ready: () => void
+      measured: (height: number) => void
+      command: (cmd: RecordDropdownCommand) => void
+      dismiss: () => void
+      dragStart: () => Promise<number | null>
+      dragEnd: (token: number | null) => Promise<boolean>
+      onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => () => void
+    }
     ghostBridge: {
+      openDropdown: () => Promise<DropdownAck>
+      closeDropdown: () => Promise<DropdownAck | null>
+      sendDropdownSnapshot: (snapshot: RecordDropdownSnapshot) => void
+      onDropdownCommand: (cb: (cmd: RecordDropdownCommand) => void) => () => void
+      onDropdownClosed: (cb: (event: DropdownClosed) => void) => () => void
       setBounds: (
         w: number,
         h: number,
         mode: 'pill' | 'glass' | 'panel',
         opts?: { durationMs?: number; pillDrive?: boolean; center?: boolean }
-      ) => Promise<'above' | 'below'>
-      hideForRestore: () => Promise<boolean>
-      restorePill: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+      ) => Promise<TransitionAck>
+      restorePill: (
+        generation: number
+      ) => Promise<{ x: number; y: number; width: number; height: number } | null>
       openWorkspace: (focus?: string | WorkspaceFocus) => Promise<void>
       closeWindow: () => Promise<void>
       minimizeWindow: () => Promise<void>
@@ -110,8 +159,8 @@ declare global {
         x: number,
         y: number,
         opts?: { collapseToPill?: boolean }
-      ) => Promise<void>
-      dragEnd: () => Promise<void>
+      ) => Promise<number | null>
+      dragEnd: (token?: number | null) => Promise<boolean>
       runWorkflow: (workflowId: string) => Promise<boolean>
       openRecordPanel: () => Promise<void>
       openEditor: () => Promise<void>
@@ -168,25 +217,32 @@ declare global {
         ownerEmail?: string
         narrate?: boolean
       }) => Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }>
-      telemetryPause: () => Promise<{
+      telemetryPause: (payload?: {
+        sessionId?: string
+        audio?: AudioReport
+      }) => Promise<{
         ok: boolean
         status?: TelemetryRecordingStatus
         error?: string
       }>
-      telemetryResume: () => Promise<{
+      telemetryResume: (payload?: { sessionId?: string }) => Promise<{
         ok: boolean
         status?: TelemetryRecordingStatus
         error?: string
       }>
+      onTelemetryStopRequested: (
+        cb: (req: { sessionId: string; reason: string }) => void
+      ) => () => void
       telemetryStop: (
-        sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean }
+        sessionIdOrOpts?: string | { sessionId?: string; discard?: boolean; audio?: AudioReport }
       ) => Promise<{
         ok: boolean
         sessionId?: string | null
         error?: string
         errorCode?: string
-        workflow?: Workflow
-        extracted?: ExtractedWorkflow
+        /** Finish saved locally; no interpretation ran (M1 hold). */
+        localOnly?: boolean
+        recording?: RecordingSummary
         discarded?: boolean
       }>
       telemetryProcessWorkflow: (sessionId: string) => Promise<{
@@ -197,6 +253,23 @@ declare global {
         workflow?: Workflow
         extracted?: ExtractedWorkflow
       }>
+      telemetryRetrySave: (sessionId: string) => Promise<RecordingResult>
+      telemetryListRecordings: (opts?: { limit?: number }) => Promise<RecordingSummary[]>
+      telemetryGetRecording: (sessionId: string) => Promise<RecordingResult>
+      telemetryPrepareReview: (
+        sessionId: string
+      ) => Promise<RecordingResult & { preview?: ReviewPreview }>
+      telemetryCancelReview: (sessionId: string) => Promise<RecordingResult>
+      telemetryApproveInterpretation: (payload: {
+        sessionId: string
+        revision: number
+        digest: string
+        acknowledgeUnknownOutcome?: boolean
+      }) => Promise<RecordingResult & { alreadyRunning?: boolean }>
+      telemetryOpenResult: (
+        sessionId: string
+      ) => Promise<{ ok: boolean; workflow?: Workflow; partial?: boolean; error?: string }>
+      onRecordingChanged: (cb: (summary: RecordingSummary) => void) => () => void
       getTelemetryStatus: () => Promise<TelemetryRecordingStatus>
       getTelemetryWorkflow: (
         sessionId: string
@@ -217,7 +290,7 @@ declare global {
         sessionId: string,
         chunk: ArrayBuffer
       ) => Promise<{ ok: boolean; error?: string }>
-      narrationStop: () => Promise<{
+      narrationStop: (sessionId: string) => Promise<{
         ok: boolean
         sessionId?: string | null
         audioPath?: string | null
