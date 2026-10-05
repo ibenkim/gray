@@ -7,6 +7,7 @@ import type {
   SessionDelivery,
   ProcessingStatus,
   CaptureStatus,
+  ScreenshotCaptureStatus,
   StoredAutomationScript,
   StoredVariables,
   StoredWorkflowResult,
@@ -21,6 +22,8 @@ export type CreateSessionInput = {
   ownerEmail?: string
   recordMode?: 'one-app' | 'full-screen'
   selectedAppId?: string
+  /** M3-A: trusted screenshot availability, stamped by the recorder at creation. */
+  screenshotCapture?: ScreenshotCaptureStatus
 }
 
 export type AppendEventsResult = {

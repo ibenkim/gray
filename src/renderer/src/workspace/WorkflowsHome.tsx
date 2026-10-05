@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { WorkspaceDialog } from './WorkspaceDialog'
+import { WorkspacePopover } from './WorkspacePopover'
 import { formatSchedule } from '../../../shared/schedule'
 import type { Suggestion, Workflow } from '../state/types'
 import type { RecordingSummary } from '../../../shared/types'
@@ -44,7 +46,8 @@ export default function WorkflowsHome({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [nameDraft, setNameDraft] = useState('')
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
+  /** The open row's More button: the menu is anchored to it in the card's overlay layer. */
+  const [menuAnchor, setMenuAnchor] = useState<HTMLButtonElement | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -54,13 +57,10 @@ export default function WorkflowsHome({
     }
   }, [renamingId])
 
+  // Menu shortcuts while a row menu is open (dismissal is the popover's).
   useEffect(() => {
-    if (!openMenuId && !deleteId) return
+    if (!openMenuId) return
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setOpenMenuId(null)
-        setDeleteId(null)
-      }
       if (openMenuId && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
         e.preventDefault()
         setOpenMenuId(null)
@@ -72,18 +72,9 @@ export default function WorkflowsHome({
         setOpenMenuId(null)
       }
     }
-    function onDown(e: MouseEvent) {
-      if (openMenuId && menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpenMenuId(null)
-      }
-    }
     window.addEventListener('keydown', onKey)
-    window.addEventListener('mousedown', onDown)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      window.removeEventListener('mousedown', onDown)
-    }
-  }, [openMenuId, deleteId, onDuplicate])
+    return () => window.removeEventListener('keydown', onKey)
+  }, [openMenuId, onDuplicate])
 
   function commitRename(id: string) {
     const next = nameDraft.trim()
@@ -231,7 +222,7 @@ export default function WorkflowsHome({
                   }}
                 />
               ) : (
-                <span className={`ws-row-name ${w.status === 'off' ? 'ws-row-name-off' : ''}`}>
+                <span className={`ws-row-name ${w.status === 'off' ? 'ws-row-name-off' : ''}`} title={w.name}>
                   {w.name}
                   {schedule && <span className="ws-row-schedule">  ·  {schedule}</span>}
                 </span>
@@ -249,11 +240,7 @@ export default function WorkflowsHome({
                 >
                   {w.status === 'on' ? 'On' : 'Off'}
                 </button>
-                <div
-                  className="ws-row-overflow"
-                  ref={menuOpen ? menuRef : undefined}
-                  onClick={(e) => e.stopPropagation()}
-                >
+                <div className="ws-row-overflow" onClick={(e) => e.stopPropagation()}>
                   <button
                     className="overflow-btn"
                     title="More"
@@ -261,13 +248,18 @@ export default function WorkflowsHome({
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation()
+                      setMenuAnchor(e.currentTarget)
                       setOpenMenuId(menuOpen ? null : w.id)
                     }}
                   >
                     <OverflowDots />
                   </button>
                   {menuOpen && (
-                    <div className="overflow-menu">
+                    <WorkspacePopover
+                      anchor={menuAnchor}
+                      onClose={() => setOpenMenuId(null)}
+                      className="overflow-menu"
+                    >
                       <button
                         className="overflow-item"
                         onClick={() => {
@@ -321,7 +313,7 @@ export default function WorkflowsHome({
                       >
                         Delete…
                       </button>
-                    </div>
+                    </WorkspacePopover>
                   )}
                 </div>
                 <ChevronRight />
@@ -369,38 +361,22 @@ export default function WorkflowsHome({
       </div>
 
       {deleteTarget && (
-        <div
-          className="ws-scrim"
-          onClick={() => setDeleteId(null)}
-          onKeyDown={(e) => e.key === 'Escape' && setDeleteId(null)}
+        <WorkspaceDialog
+          title="Delete workflow?"
+          confirmLabel="Delete workflow"
+          returnFocusTo={menuAnchor}
+          onCancel={() => setDeleteId(null)}
+          onConfirm={() => {
+            setDeleteId(null)
+            onDelete(deleteTarget.id)
+          }}
         >
-          <div
-            className="delete-dialog"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-          >
-            <div className="delete-dialog-title">Delete “{deleteTarget.name}”?</div>
-            <div className="delete-dialog-body">
-              Scheduled runs stop immediately. Its {deleteTarget.runCount} runs stay in History. This
-              can’t be undone.
-            </div>
-            <div className="delete-dialog-actions">
-              <button className="btn btn-secondary" onClick={() => setDeleteId(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => {
-                  setDeleteId(null)
-                  onDelete(deleteTarget.id)
-                }}
-              >
-                Delete workflow
-              </button>
-            </div>
-          </div>
-        </div>
+          <p className="delete-dialog-target">“{deleteTarget.name}”</p>
+          <p>
+            Scheduled runs stop immediately. Its {deleteTarget.runCount} runs stay in History. This
+            can’t be undone.
+          </p>
+        </WorkspaceDialog>
       )}
     </div>
   )

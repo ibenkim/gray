@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * M2 capture-session ownership. Real: TelemetryRecorder, TelemetryQueue, FileTelemetryStore,
- * NarrationRecorder, IPC handlers and the shared stop barrier. Fake: interaction child,
- * active-window reads, keyframes, clipboard and the owning window (an EventEmitter standing
+ * NarrationRecorder, IPC handlers and the shared stop barrier (screenshots are disabled in
+ * production, M3-A). Fake: interaction child, active-window reads, clipboard and the owning window (an EventEmitter standing
  * in for WebContents). All data is synthetic; the runner denies network.
  */
 
@@ -22,7 +22,7 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   devDir: '',
   /** Source reads that actually happened (the privacy measure, not downstream drops). */
-  reads: { window: 0, shot: 0 },
+  reads: { window: 0 },
   winGate: null as null | Promise<void>,
   /** Give each window read a new title so the recorder emits screen events for it. */
   varyTitle: false,
@@ -126,25 +126,14 @@ vi.mock('./ax/JxaAccessibilityProvider', () => ({
   }
 }))
 
-vi.mock('./keyframes', () => ({
-  SparseKeyframeProvider: class {
-    readonly enabled = true
-    async captureKeyframe() {
-      h.reads.shot += 1
-      return null
-    }
-  }
-}))
-
 vi.mock('./clipboard', () => ({
   ClipboardWatcher: class {
-    start() {}
-    stop() {}
-    getLatest() {
+    reset() {}
+    readNow() {
       return null
     }
-    snapshotSessionValues() {
-      return new Map()
+    getLatest() {
+      return null
     }
   },
   inferPaste: () => ({ matched: false })
@@ -220,7 +209,6 @@ async function boot(): Promise<Mod> {
   h.handlers.clear()
   h.devDir = mkdtempSync(join(tmpdir(), 'gray-m2-lifecycle-'))
   h.reads.window = 0
-  h.reads.shot = 0
   h.winGate = null
   h.varyTitle = false
   Object.assign(h.ix, { live: 0, starts: 0, stops: 0, cb: null, stale: [], buffered: null, exitGate: null })

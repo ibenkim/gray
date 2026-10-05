@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { WorkspaceDialog } from './WorkspaceDialog'
+import { WorkspacePopover } from './WorkspacePopover'
 import {
   formatLogOutcome,
   formatReturned,
@@ -57,7 +59,8 @@ export default function WorkflowDetail({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [alwaysOffer, setAlwaysOffer] = useState<string | null>(null)
   const [showContract, setShowContract] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
+  /** The More button: its menu is anchored to it in the card's overlay layer. */
+  const moreRef = useRef<HTMLButtonElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
 
@@ -99,13 +102,10 @@ export default function WorkflowDetail({
     renameRef.current?.select()
   }, [renaming])
 
+  // Menu shortcuts while the menu is open (dismissal is the popover's).
   useEffect(() => {
-    if (!menuOpen && !deleteOpen) return
+    if (!menuOpen) return
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setMenuOpen(false)
-        setDeleteOpen(false)
-      }
       if (menuOpen && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
         e.preventDefault()
         setMenuOpen(false)
@@ -117,18 +117,9 @@ export default function WorkflowDetail({
         setMenuOpen(false)
       }
     }
-    function onDown(e: MouseEvent) {
-      if (menuOpen && menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false)
-      }
-    }
     window.addEventListener('keydown', onKey)
-    window.addEventListener('mousedown', onDown)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      window.removeEventListener('mousedown', onDown)
-    }
-  }, [menuOpen, deleteOpen, onDuplicate, workflow.id])
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menuOpen, onDuplicate, workflow.id])
 
   const selectedRun = selectedRunId ? runs.find((r) => r.id === selectedRunId) ?? null : null
 
@@ -191,7 +182,9 @@ export default function WorkflowDetail({
                 }}
               />
             ) : (
-              <div className="ws-detail-title">{workflow.name}</div>
+              <div className="ws-detail-title" title={workflow.name}>
+                {workflow.name}
+              </div>
             )}
             <div className="ws-header-sub">
               {workflow.status === 'on' ? 'On' : 'Off'} · {workflow.runCount} runs ·{' '}
@@ -199,7 +192,7 @@ export default function WorkflowDetail({
             </div>
           </div>
         </div>
-        <div className="ws-detail-actions" ref={menuRef}>
+        <div className="ws-detail-actions">
           <button
             className="btn btn-secondary"
             onMouseDown={(e) => e.stopPropagation()}
@@ -221,15 +214,17 @@ export default function WorkflowDetail({
             </button>
           )}
           <button
+            ref={moreRef}
             className="overflow-btn"
             title="More"
+            aria-expanded={menuOpen}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setMenuOpen((o) => !o)}
           >
             <OverflowDots />
           </button>
           {menuOpen && (
-            <div className="overflow-menu">
+            <WorkspacePopover anchor={moreRef.current} onClose={() => setMenuOpen(false)} className="overflow-menu">
               <button
                 className="overflow-item"
                 onClick={() => {
@@ -285,7 +280,7 @@ export default function WorkflowDetail({
               >
                 Delete…
               </button>
-            </div>
+            </WorkspacePopover>
           )}
         </div>
       </div>
@@ -371,38 +366,22 @@ export default function WorkflowDetail({
       )}
 
       {deleteOpen && (
-        <div
-          className="ws-scrim"
-          onClick={() => setDeleteOpen(false)}
-          onKeyDown={(e) => e.key === 'Escape' && setDeleteOpen(false)}
+        <WorkspaceDialog
+          title="Delete workflow?"
+          confirmLabel="Delete workflow"
+          returnFocusTo={moreRef.current}
+          onCancel={() => setDeleteOpen(false)}
+          onConfirm={() => {
+            setDeleteOpen(false)
+            onDelete()
+          }}
         >
-          <div
-            className="delete-dialog"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-          >
-            <div className="delete-dialog-title">Delete “{workflow.name}”?</div>
-            <div className="delete-dialog-body">
-              Scheduled runs stop immediately. Its {workflow.runCount} runs stay in History. This
-              can’t be undone.
-            </div>
-            <div className="delete-dialog-actions">
-              <button className="btn btn-secondary" onClick={() => setDeleteOpen(false)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => {
-                  setDeleteOpen(false)
-                  onDelete()
-                }}
-              >
-                Delete workflow
-              </button>
-            </div>
-          </div>
-        </div>
+          <p className="delete-dialog-target">“{workflow.name}”</p>
+          <p>
+            Scheduled runs stop immediately. Its {workflow.runCount} runs stay in History. This
+            can’t be undone.
+          </p>
+        </WorkspaceDialog>
       )}
     </div>
   )

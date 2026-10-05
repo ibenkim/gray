@@ -2,12 +2,15 @@ import { globalShortcut, screen } from 'electron'
 import { newId } from '../../shared/id'
 import {
   SCHEMA_VERSION,
+  type ScreenshotCaptureStatus,
   type TelemetryEvent,
   type TelemetryEventType
 } from '../../shared/telemetry/schema'
 import { redactEvent, sanitizeLabel, sanitizeUrl, sanitizeWindowTitle } from '../../shared/telemetry/sanitize'
 import { ClipboardWatcher, inferPaste } from './clipboard'
 import {
+  appInScope,
+  appScope,
   DisabledScreenshotProvider,
   NoopInteractionProvider,
   type InteractionPartial,
@@ -92,30 +95,6 @@ export type CaptureOptions = {
   ignoreAppNames?: string[]
 }
 
-/** Hard denylist — password managers, banking, messaging (capture-spec §5). */
-const APP_DENYLIST = [
-  '1password',
-  '1password for safari',
-  'bitwarden',
-  'lastpass',
-  'dashlane',
-  'keeper',
-  'enpass',
-  'keychain access',
-  'chase',
-  'wells fargo',
-  'bank of america',
-  'capital one',
-  'paypal',
-  'venmo',
-  'cash app',
-  'messages',
-  'whatsapp',
-  'signal',
-  'telegram',
-  'imessage'
-]
-
 type ActiveWinModule = {
   default?: () => Promise<ActiveWinResult | undefined>
   (): Promise<ActiveWinResult | undefined>
@@ -129,6 +108,8 @@ type ActiveWinResult = {
 }
 
 const POLL_MS = 800
+/** Pasteboard settle time after an observed copy/cut chord before the single read (M3-B). */
+const COPY_SETTLE_MS = 150
 /** Admitted async source work (window polls, screenshots) owned until Stop drains it. */
 const MAX_ADMITTED_JOBS = 16
 
@@ -191,6 +172,8 @@ export class TelemetryRecorder {
     appName?: string
   } | null = null
   private pendingClipboardPairId: string | null = null
+  /** Generation with a copy-triggered clipboard read in flight (one at a time). */
+  private copyPending: number | null = null
   private opts: CaptureOptions = {}
   private onEventListeners = new Set<(event: TelemetryEvent) => void>()
   private onStatusListeners = new Set<(status: RecordingStatus) => void>()
@@ -296,11 +279,6 @@ export class TelemetryRecorder {
       this.generation += 1
       // A stop failure is kept (not swallowed); every other source still halts.
       this.sourceStop = Promise.resolve().then(() => this.interaction.stop())
-      try {
-        this.clipboard.stop()
-      } catch {
-        /* never block the halt */
-      }
     }
     this.finalizing = true
     if (this.settleTimer) {
@@ -314,9 +292,8 @@ export class TelemetryRecorder {
     const gen = this.generation
     this.sourcesActive = true
     this.startPolling(gen)
-    this.startClipboard(gen)
     if (this.interaction.enabled) {
-      this.interaction.start((partial) => this.ingestInteraction(partial, gen))
+      this.interaction.start((partial) => this.ingestInteraction(partial, gen), appScope(this.opts))
     }
     this.registerShortcuts(gen)
   }
@@ -373,11 +350,6 @@ export class TelemetryRecorder {
     this.emitStatus()
   }
 
-  /** In-session clipboard plaintext (hash → text). Survives stop until next start. */
-  getClipboardSessionValues(): Map<string, string> {
-    return this.clipboard.snapshotSessionValues()
-  }
-
   startRecording(opts: CaptureOptions = {}): Promise<RecordingStatus> {
     if (this.phase !== 'idle') return Promise.resolve(this.getRecordingStatus())
     return this.serial(() => this.doStart(opts))
@@ -413,6 +385,7 @@ export class TelemetryRecorder {
     this.finalizing = false
     this.artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] }
     this.screenStates.reset()
+    this.clipboard.reset()
 
     const sessionId = this.sessionId
     let created = false
@@ -426,7 +399,8 @@ export class TelemetryRecorder {
         sessionId,
         ownerEmail: opts.ownerEmail,
         recordMode: opts.recordMode,
-        selectedAppId: opts.selectedAppId
+        selectedAppId: opts.selectedAppId,
+        screenshotCapture: this.screenshotCaptureStatus()
       })
       created = true
       proceed()
@@ -686,32 +660,38 @@ export class TelemetryRecorder {
     }
   }
 
-  private startClipboard(gen: number): void {
-    this.clipboard.start((change) => {
+  /**
+   * M3-B: read the clipboard once, after an observed copy/cut chord from a known, in-scope
+   * app, and only while this generation is still recording (Pause/Stop/owner loss end it).
+   * The event is attributed to the chord's own app, never a stale focus target.
+   */
+  private async readCopiedClipboard(
+    gen: number,
+    chord: { appName: string; target?: InteractionPartial['target'] }
+  ): Promise<void> {
+    try {
+      // Let the target app finish writing the pasteboard before the single read.
+      await new Promise((resolve) => setTimeout(resolve, COPY_SETTLE_MS))
       if (!this.admits(gen)) return
+      const change = this.clipboard.readNow()
+      if (!change || !this.admits(gen)) return
       const pairId = newId('clip')
       this.pendingClipboardPairId = pairId
-      const clipboard = { ...change.clipboard, pairId }
       this.recordEvent('clipboard_changed', {
-        target: this.lastFocusTarget
-          ? {
-              role: this.lastFocusTarget.role,
-              accessibleLabel: this.lastFocusTarget.label,
-              visibleLabel: this.lastFocusTarget.label,
-              appName: this.lastFocusTarget.appName
-            }
-          : undefined,
+        target: { ...chord.target, appName: chord.appName },
         data: {
-          clipboard,
+          clipboard: { ...change.clipboard, pairId },
           clipboardPairId: pairId,
-          elementLabel: this.lastFocusTarget?.label,
-          elementRole: this.lastFocusTarget?.role,
-          appName: this.lastFocusTarget?.appName
+          elementLabel: chord.target?.accessibleLabel,
+          elementRole: chord.target?.role,
+          appName: chord.appName
         }
       })
       this.interaction.poke?.()
       this.admit(() => this.captureKeyframe('clipboard'))
-    })
+    } finally {
+      if (this.copyPending === gen) this.copyPending = null
+    }
   }
 
   private async pollActiveWindow(gen: number): Promise<void> {
@@ -905,37 +885,30 @@ export class TelemetryRecorder {
   }
 
   /**
-   * Whether events from this app must be discarded — Ghost itself, denylisted
-   * apps (password managers / banking / messaging), or outside the one-app scope.
+   * Whether events from this app must be discarded — Ghost itself, denylisted apps
+   * (password managers / banking / messaging), outside the one-app scope, or unknown (M3-C).
    */
   private shouldIgnoreApp(appName?: string): boolean {
-    if (!appName) return false
-    const lower = appName.toLowerCase()
+    return !appInScope(appScope(this.opts), appName)
+  }
 
-    const ignore = this.opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']
-    if (ignore.some((n) => lower === n.toLowerCase())) return true
-    if (APP_DENYLIST.some((n) => lower.includes(n))) return true
-
-    if (this.opts.recordMode === 'one-app' && this.opts.selectedAppId) {
-      const selected = this.opts.selectedAppId.toLowerCase()
-      const aliases: Record<string, string[]> = {
-        chrome: ['google chrome', 'chrome', 'chromium'],
-        figma: ['figma'],
-        slack: ['slack'],
-        finder: ['finder'],
-        mail: ['mail']
-      }
-      const names = aliases[selected] ?? [selected]
-      if (!names.some((n) => lower.includes(n))) return true
-    }
-
-    return false
+  /**
+   * Trusted screenshot availability for a new session (M3-A): only the disabled provider that
+   * declares it may claim `disabled_privacy`; any other source is `unknown`. Never taken from
+   * a renderer/IPC payload.
+   */
+  private screenshotCaptureStatus(): ScreenshotCaptureStatus {
+    const s = this.screenshot
+    return s instanceof DisabledScreenshotProvider && !s.enabled && s.availability === 'disabled_privacy'
+      ? 'disabled_privacy'
+      : 'unknown'
   }
 
   private scheduleSettleKeyframe(): void {
     if (this.settleTimer) clearTimeout(this.settleTimer)
     this.settleTimer = null
-    if (this.finalizing || this.paused) return
+    // The settle timer exists only to take a screenshot.
+    if (!this.screenshot.enabled || this.finalizing || this.paused) return
     this.settleTimer = setTimeout(() => {
       if (!this.recording || this.finalizing) return
       this.admit(() => this.captureKeyframe('settle'))
@@ -1125,6 +1098,16 @@ export class TelemetryRecorder {
       }
     }
 
+    // M3-B: an observed copy/cut in a known, in-scope app is the only clipboard read trigger.
+    // Unknown app identity means no read; repeated chords share one pending read.
+    if (partial.type === 'keyboard_shortcut' && isCopyChord(partial.data?.shortcut)) {
+      const appName = partial.data?.appName ?? partial.target?.appName
+      if (appName && !this.shouldIgnoreApp(appName) && this.copyPending !== gen) {
+        this.copyPending = gen
+        this.admit(() => this.readCopiedClipboard(gen, { appName, target: partial.target }))
+      }
+    }
+
     // Record the interaction immediately so callers/tests see it without waiting
     // on screenshot I/O; attach pre/post shot paths asynchronously when enabled.
     this.recordEvent(partial.type, {
@@ -1162,6 +1145,12 @@ export class TelemetryRecorder {
       })
     }
   }
+}
+
+/** Cmd/Ctrl+C or +X (copy/cut), the only clipboard read triggers (M3-B). */
+function isCopyChord(shortcut?: string): boolean {
+  if (!shortcut) return false
+  return /^(?:Cmd|Ctrl)\+[CX]$/i.test(shortcut)
 }
 
 /** Cmd+V / Ctrl+V, including Shift+Cmd+V ("paste and match style"). */

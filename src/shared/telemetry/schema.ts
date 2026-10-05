@@ -587,6 +587,14 @@ export function initialDelivery(): SessionDelivery {
   }
 }
 
+/**
+ * M3-A: what a session can claim about screenshots. `disabled_privacy` is stamped only by the
+ * trusted disabled provider at session creation; anything absent or unrecognized is `unknown`.
+ * There is deliberately no "available"/"redacted" claim.
+ */
+export const ScreenshotCaptureStatusSchema = z.enum(['disabled_privacy', 'unknown'])
+export type ScreenshotCaptureStatus = z.infer<typeof ScreenshotCaptureStatusSchema>
+
 export const TelemetrySessionMetaSchema = z
   .object({
     sessionId: z.string().min(1).max(80),
@@ -600,6 +608,7 @@ export const TelemetrySessionMetaSchema = z
     recordMode: z.enum(['one-app', 'full-screen']).optional(),
     selectedAppId: z.string().max(80).optional(),
     delivery: SessionDeliverySchema.optional(),
+    screenshotCapture: ScreenshotCaptureStatusSchema.optional(),
     /**
      * Legacy single status kept optional for older meta files.
      * Prefer captureStatus + processingStatus.
@@ -684,7 +693,16 @@ export function normalizeSessionMeta(raw: unknown): TelemetrySessionMeta | null 
     schemaVersion: SCHEMA_VERSION,
     recordMode: data.recordMode,
     selectedAppId: data.selectedAppId,
-    ...(delivery ? { delivery } : {})
+    ...(delivery ? { delivery } : {}),
+    // Absent stays absent (read as unknown); a malformed value never becomes a claim and
+    // never hides the recording.
+    ...(data.screenshotCapture !== undefined
+      ? {
+          screenshotCapture: ScreenshotCaptureStatusSchema.safeParse(data.screenshotCapture).success
+            ? (data.screenshotCapture as ScreenshotCaptureStatus)
+            : 'unknown'
+        }
+      : {})
     // intentionally omit legacy error / status from persisted shape
   }
 

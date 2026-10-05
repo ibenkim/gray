@@ -36,6 +36,24 @@
 }
 .ws-drag-strip:active { cursor: grabbing; }
 
+/* Card-local overlay layer (HF4): menus and confirmations stay inside the card, above the
+ * content column and drag strip, never clipped by a scrolling list. */
+.ws-overlay-host {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+.ws-overlay-host > * { pointer-events: auto; }
+.ws-popover {
+  position: absolute;
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ── Sidebar (172px) ── */
 .ws-sidebar {
   width: 172px;
@@ -126,6 +144,7 @@
 }
 .team-menu-item {
   text-align: left;
+  overflow-wrap: anywhere;
   font-size: 12px;
   color: var(--text-70);
   background: transparent;
@@ -193,7 +212,17 @@
 .ws-header:active { cursor: grabbing; }
 .ws-header-title { font-size: 15px; line-height: 20px; font-weight: 600; color: var(--text); }
 .ws-header-sub { font-size: 12px; color: var(--text-30); margin-top: 1px; }
-.ws-detail-title { font-size: 15px; font-weight: 600; color: var(--text); line-height: 16px; }
+.ws-detail-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 16px;
+  /* Compact header: one line; the full name is the element's title and appears in dialogs. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-header > :first-child { min-width: 0; }
 .ws-rename-input {
   font-size: 15px;
   font-weight: 600;
@@ -207,8 +236,10 @@
   font-family: inherit;
 }
 
-.ws-detail-head { display: flex; align-items: flex-start; gap: 10px; }
+.ws-detail-head { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.ws-detail-head > div { min-width: 0; }
 .ws-detail-actions {
+  flex-shrink: 0;
   position: relative;
   display: flex;
   align-items: center;
@@ -267,7 +298,7 @@
 .overflow-item:disabled { opacity: 0.45; cursor: default; }
 .overflow-item-dim { color: var(--text-40); }
 .overflow-item-rose { color: var(--rose); }
-.overflow-shortcut { font-size: 12px; color: var(--text-40); }
+.overflow-shortcut { font-size: 12px; color: var(--text-40); flex-shrink: 0; }
 .overflow-divider {
   height: 1px;
   background: rgba(20, 20, 15, 0.06);
@@ -275,8 +306,10 @@
 }
 
 .ws-scrim {
-  position: fixed;
+  position: absolute;
   inset: 0;
+  padding: 16px;
+  box-sizing: border-box;
   background: rgba(20, 20, 15, 0.2);
   display: flex;
   align-items: center;
@@ -284,7 +317,11 @@
   z-index: 40;
 }
 .delete-dialog {
-  width: 400px;
+  /* Nominal 400px, never wider or taller than the card: body scrolls, footer stays. */
+  width: min(400px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
   background: var(--gray-color-surface);
   border: 1px solid var(--gray-color-gray-1);
   border-radius: var(--gray-radius-window);
@@ -298,13 +335,29 @@
   font-size: 15px;
   font-weight: 600;
   color: var(--text);
+  flex-shrink: 0;
 }
 .delete-dialog-body {
   font-size: 12px;
   line-height: 17px;
   color: var(--gray-color-gray-2);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 6px;
+}
+.delete-dialog-body:focus-visible { outline: 2px solid var(--gray-color-gray-2); outline-offset: 2px; }
+.delete-dialog-target {
+  color: var(--text);
+  font-weight: 500;
+  white-space: pre-wrap;
 }
 .delete-dialog-actions {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -331,6 +384,7 @@
 }
 .ws-row:hover { background: var(--white3); }
 .ws-row-name {
+  min-width: 0;
   font-size: 12px;
   font-weight: 500;
   color: var(--text);
@@ -809,9 +863,10 @@
 .upload-review .review-status { font-size: 13px; color: var(--text); margin: 0 0 8px; }
 .upload-review .review-warning { font-size: 13px; color: var(--gray-color-error); margin: 0 0 10px; }
 .upload-review .review-note { font-size: 12px; color: var(--text-40); margin: 10px 0; }
-.upload-review .review-facts { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; font-size: 13px; margin: 0 0 12px; }
+.upload-review .ws-home-body { min-width: 0; overflow-wrap: anywhere; }
+.upload-review .review-facts { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 4px 12px; font-size: 13px; margin: 0 0 12px; }
 .upload-review .review-facts dt { color: var(--text-40); }
-.upload-review .review-facts dd { margin: 0; color: var(--text); }
+.upload-review .review-facts dd { margin: 0; min-width: 0; color: var(--text); }
 .upload-review .review-list { font-size: 13px; color: var(--text-70); margin: 4px 0 12px; padding-left: 18px; }
 .upload-review .review-payload summary { font-size: 12px; color: var(--text-70); cursor: pointer; }
 .upload-review .review-payload pre {

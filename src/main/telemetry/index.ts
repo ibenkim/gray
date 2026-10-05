@@ -26,9 +26,9 @@ import {
   type StopResult
 } from './capture'
 import { ClipboardWatcher } from './clipboard'
+import { DisabledScreenshotProvider } from './providers'
 import { loadTelemetryConfig, type TelemetryConfig } from './config'
 import { mapToProcessingError, uploadReviewRequired, userMessageForCode } from './errors'
-import { SparseKeyframeProvider } from './keyframes'
 import { emptyNarration, NarrationRecorder } from './narration'
 import { polishSession } from './polish'
 import { processApprovedSession, ResultSaveError } from './processSession'
@@ -236,25 +236,11 @@ export async function initTelemetry(): Promise<void> {
       )
     }
   }
-  const screenshot =
-    store && typeof store.saveKeyframe === 'function' && typeof store.keyframesRoot === 'function'
-      ? new SparseKeyframeProvider({
-          rootDir: store.keyframesRoot(),
-          saveKeyframe: async (sessionId, eventId, jpeg) => {
-            try {
-              return await store!.saveKeyframe!(sessionId, eventId, jpeg)
-            } catch (err) {
-              // The provider swallows errors as "no frame"; count it for the save manifest.
-              recorder?.noteArtifactWriteFailure(sessionId)
-              throw err
-            }
-          }
-        })
-      : undefined
-
   recorder = new TelemetryRecorder(store, {
     interaction,
-    screenshot,
+    // M3-A: no unredacted screenshots. The display is never read; sessions record that
+    // screenshots were disabled. Restoring images needs scoped pixels and masking first.
+    screenshot: new DisabledScreenshotProvider(),
     clipboard: new ClipboardWatcher()
   })
   narrationRecorder = new NarrationRecorder(config.devDir)

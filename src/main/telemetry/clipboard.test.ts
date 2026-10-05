@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   ClipboardWatcher,
   classifyContent,
@@ -58,12 +58,10 @@ describe('clipboard helpers', () => {
 
 describe('ClipboardWatcher', () => {
   it('emits clipboard_changed with host/path/query and redacted text under threshold', () => {
-    const changes: Array<ReturnType<ClipboardWatcher['ingestText']>> = []
     const watcher = new ClipboardWatcher({
       readText: () => '',
       readFormats: () => []
     })
-    watcher.start((c) => changes.push(c))
 
     const first = watcher.ingestText('https://www.figma.com/design/xyz?node-id=1', [
       'text/plain'
@@ -82,8 +80,38 @@ describe('ClipboardWatcher', () => {
       'text/plain'
     ])
     expect(second).toBeNull()
+  })
 
-    watcher.stop()
+  it('reads only when asked (M3-B): no timer, one read per call, de-duplicated, no raw value', () => {
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      let text = 'synthetic copied text'
+      const watcher = new ClipboardWatcher({
+        readText: () => {
+          reads += 1
+          return text
+        },
+        readFormats: () => ['text/plain']
+      })
+      expect(vi.getTimerCount()).toBe(0)
+      vi.advanceTimersByTime(5000)
+      expect(reads).toBe(0)
+      const first = watcher.readNow()
+      expect(reads).toBe(1)
+      expect(first).toEqual({ clipboard: expect.objectContaining({ contentType: 'text', text: 'synthetic copied text' }) })
+      expect(Object.keys(first!)).toEqual(['clipboard'])
+      expect(watcher.readNow()).toBeNull() // unchanged content
+      text = 'password=synthetic'
+      expect(watcher.readNow()).toBeNull() // sensitive content is never recorded
+      watcher.reset()
+      text = 'synthetic copied text'
+      expect(watcher.readNow()).not.toBeNull() // a new session starts clean
+      expect(reads).toBe(4)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rejects credential-bearing clipboard URLs', () => {

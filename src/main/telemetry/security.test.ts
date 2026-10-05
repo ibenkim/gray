@@ -33,3 +33,25 @@ describe('normalizeSessionMeta', () => {
     expect(JSON.stringify(meta)).not.toMatch(/sk-/)
   })
 })
+
+describe('screenshot availability is never a forged claim (M3-A)', () => {
+  it('normalization keeps only the trusted values; absent, malformed and stripped stay unknown', () => {
+    const base = { sessionId: 'tsess_s', startedAt: '2026-07-29T04:28:43.153Z', captureStatus: 'stopped', processingStatus: 'not_started', schemaVersion: 1 }
+    expect(normalizeSessionMeta({ ...base, screenshotCapture: 'disabled_privacy' })?.screenshotCapture).toBe('disabled_privacy')
+    expect(normalizeSessionMeta(base)?.screenshotCapture).toBeUndefined()
+    for (const bad of ['available', 'redacted', true, { v: 1 }, 'DISABLED_PRIVACY']) {
+      const meta = normalizeSessionMeta({ ...base, screenshotCapture: bad })
+      expect(meta).not.toBeNull()
+      expect(meta?.screenshotCapture).toBe('unknown')
+    }
+  })
+
+  it('the recorder stamps disabled_privacy only from the trusted disabled provider, never from a start payload', () => {
+    const capture = readFileSync(resolve(__dirname, 'capture.ts'), 'utf8')
+    expect(capture).toMatch(/screenshotCapture: this\.screenshotCaptureStatus\(\)/)
+    expect(capture).not.toMatch(/screenshotCapture: opts\./)
+    const index = readFileSync(resolve(__dirname, 'index.ts'), 'utf8')
+    expect(index).toMatch(/screenshot: new DisabledScreenshotProvider\(\)/)
+    expect(index).not.toMatch(/SparseKeyframeProvider|desktopCapturer/)
+  })
+})

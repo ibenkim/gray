@@ -3,7 +3,6 @@ import { clipboard } from 'electron'
 import type { ClipboardContentType, ClipboardData } from '../../shared/telemetry/schema'
 import { sanitizeTypedText, sanitizeUrl } from '../../shared/telemetry/sanitize'
 
-const POLL_MS = 500
 /** Persist redacted plaintext at or below this size; larger stays hash-only. */
 const TEXT_PERSIST_MAX = 500
 const SENSITIVE_RE =
@@ -11,12 +10,9 @@ const SENSITIVE_RE =
 
 export type ClipboardChange = {
   clipboard: ClipboardData
-  /** Full value held in-memory for the session (also may appear redacted on clipboard.text). */
-  rawValue?: string
 }
 
 export type ClipboardWatcherOptions = {
-  pollMs?: number
   /** Hashes Ghost itself wrote — ignore so we don't echo our own clipboard. */
   ignoreHashes?: Set<string>
   readText?: () => string
@@ -25,23 +21,19 @@ export type ClipboardWatcherOptions = {
 }
 
 /**
- * Poll Electron clipboard for changes. Never registers global shortcuts,
- * so Cmd+C/V keep working in the target app.
+ * Reads the clipboard only when asked (M3-B): the recorder calls `readNow` after an observed
+ * in-scope copy/cut chord. No timer, no read at Start/Resume, no raw plaintext kept. Never
+ * registers global shortcuts, so Cmd+C/V keep working in the target app.
  */
 export class ClipboardWatcher {
-  private timer: ReturnType<typeof setInterval> | null = null
   private lastHash: string | null = null
-  private readonly sessionValues = new Map<string, string>()
   private readonly ignoreHashes: Set<string>
-  private readonly pollMs: number
   private readonly readText: () => string
   private readonly readFormats: () => string[]
-  private onChange: ((change: ClipboardChange) => void) | null = null
   /** Most recent non-sensitive clipboard snapshot for paste inference. */
   private latest: { at: number; clipboard: ClipboardData } | null = null
 
   constructor(opts: ClipboardWatcherOptions = {}) {
-    this.pollMs = opts.pollMs ?? POLL_MS
     this.ignoreHashes = opts.ignoreHashes ?? new Set()
     this.readText =
       opts.readText ??
@@ -63,36 +55,15 @@ export class ClipboardWatcher {
       })
   }
 
-  start(onChange: (change: ClipboardChange) => void): void {
-    this.onChange = onChange
-    this.lastHash = null
-    this.sessionValues.clear()
-    this.latest = null
-    if (this.timer) return
-    this.timer = setInterval(() => this.tick(), this.pollMs)
-    this.tick()
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = null
-    }
-    this.onChange = null
-    // Keep sessionValues until the next start() so stop→process can still
-    // resolve clipboard hashes into set_clipboard literals for replay.
+  /** Forget the previous session's copy (de-duplication and paste matching start clean). */
+  reset(): void {
     this.latest = null
     this.lastHash = null
   }
 
-  /** In-memory session value for workflow variable promotion. */
-  getRawValue(contentHash: string): string | undefined {
-    return this.sessionValues.get(contentHash)
-  }
-
-  /** Snapshot of in-session clipboard plaintext (never persisted to JSONL). */
-  snapshotSessionValues(): Map<string, string> {
-    return new Map(this.sessionValues)
+  /** One read after an observed in-scope copy; null when unchanged, sensitive or empty. */
+  readNow(): ClipboardChange | null {
+    return this.process(this.readText(), this.readFormats())
   }
 
   getLatest(): { at: number; clipboard: ClipboardData } | null {
@@ -102,12 +73,6 @@ export class ClipboardWatcher {
   /** Test/helper: process a text snapshot without Electron. */
   ingestText(text: string, formats: string[] = ['text/plain']): ClipboardChange | null {
     return this.process(text, formats)
-  }
-
-  private tick(): void {
-    const text = this.readText()
-    const formats = this.readFormats()
-    this.process(text, formats)
   }
 
   private process(text: string, formats: string[]): ClipboardChange | null {
@@ -147,17 +112,8 @@ export class ClipboardWatcher {
       text: persistedText
     }
 
-    if (trimmed) {
-      this.sessionValues.set(contentHash, trimmed)
-    }
     this.latest = { at: Date.now(), clipboard: clipboardData }
-
-    const change: ClipboardChange = {
-      clipboard: clipboardData,
-      rawValue: trimmed || undefined
-    }
-    this.onChange?.(change)
-    return change
+    return { clipboard: clipboardData }
   }
 }
 

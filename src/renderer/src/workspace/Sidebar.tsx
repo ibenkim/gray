@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
+import { WorkspacePopover } from './WorkspacePopover'
 import type { Team } from '../state/types'
 import type { Space, WorkspaceNav } from './WorkspaceApp'
 
@@ -19,20 +20,11 @@ export default function Sidebar({
   isOwner: boolean
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
+  /** The switcher button: the team menu is anchored to it in the card's overlay layer. */
+  const buttonRef = useRef<HTMLButtonElement>(null)
   const teamName = team?.name ?? "Harry's team"
   const spaces: Space[] = ['Personal', teamName]
   const hasTeam = Boolean(team)
-
-  // Press anywhere outside to dismiss the team menu.
-  useEffect(() => {
-    if (!menuOpen) return
-    function onDown(e: MouseEvent) {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
-    }
-    window.addEventListener('mousedown', onDown)
-    return () => window.removeEventListener('mousedown', onDown)
-  }, [menuOpen])
 
   const switcherLabel =
     space === 'Personal'
@@ -59,14 +51,26 @@ export default function Sidebar({
         <span className="light light-zoom" />
       </div>
 
-      <div className="team-menu-wrap" ref={menuRef}>
-        <button className="team-menu-btn" onClick={() => setMenuOpen((o) => !o)}>
+      <div className="team-menu-wrap">
+        <button
+          ref={buttonRef}
+          className="team-menu-btn"
+          title={switcherLabel}
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((o) => !o)}
+        >
           <span className="team-avatar" />
           <span className="team-name">{switcherLabel}</span>
           <ChevronTiny />
         </button>
         {menuOpen && (
-          <div className="team-menu">
+          <WorkspacePopover
+            anchor={buttonRef.current}
+            onClose={() => setMenuOpen(false)}
+            className="team-menu"
+            align="left"
+            matchAnchorWidth
+          >
             {spaces.map((s) => (
               <button
                 key={s}
@@ -91,7 +95,7 @@ export default function Sidebar({
             >
               Log out
             </button>
-          </div>
+          </WorkspacePopover>
         )}
       </div>
 

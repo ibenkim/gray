@@ -5,7 +5,7 @@ import {
   sanitizeTypedText,
   sanitizeWindowTitle
 } from '../../../shared/telemetry/sanitize'
-import type { InteractionPartial, InteractionProvider } from '../providers'
+import type { AppScope, InteractionPartial, InteractionProvider } from '../providers'
 import { looksLikeShellNoise } from '../automation/groundText'
 import { resolveTargetTier } from '../axTarget'
 import { JXA_SENSOR_SCRIPT } from './jxaScript'
@@ -265,7 +265,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     if (this.capabilities) cb({ capturesKeys: this.capturesKeys })
   }
 
-  start(onEvent: (partial: InteractionPartial) => void): void {
+  start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope): void {
     if (this.disabled || process.platform !== 'darwin') {
       this.enabled = false
       return
@@ -293,8 +293,9 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     try {
       child = spawn('osascript', ['-l', 'JavaScript', '-e', JXA_SENSOR_SCRIPT], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        // The sensor exits on its own once this process is no longer its parent.
-        env: { ...process.env, GRAY_JXA_PARENT_PID: String(process.pid) }
+        // The sensor exits on its own once this process is no longer its parent, and reads
+        // nothing from apps outside `scope` (no scope = reads nothing).
+        env: { ...process.env, GRAY_JXA_PARENT_PID: String(process.pid), GRAY_JXA_SCOPE: JSON.stringify(scope ?? null) }
       })
     } catch (err) {
       console.error('[telemetry/ax] spawn failed', err instanceof Error ? err.name : 'error')

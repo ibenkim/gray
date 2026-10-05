@@ -8,7 +8,7 @@
  * telemetry main module (src/main/telemetry/index.ts) bundled for this run with its IPC,
  * recorder, queue, FileTelemetryStore and NarrationRecorder.
  * Fake: getUserMedia/MediaRecorder/tracks (injected ahead of app code), the accessibility
- * child, active-window reads, keyframes, clipboard, the app store and any provider client
+ * child, active-window reads, clipboard, the app store and any provider client
  * (construction is counted and must stay 0). Fresh temp profile/store, network denied by
  * the caller, no real capture. Unknown flags refuse to run.
  *
@@ -83,10 +83,7 @@ const MAIN_FAKES = {
       if (g.stopFails) { g.pendingTeardown = true; throw new Error('synthetic: sensor did not exit') }
       g.ixLive = Math.max(0, g.ixLive - 1) }
     flush() {} }`,
-  keyframes: `export class SparseKeyframeProvider { constructor() { this.enabled = false }
-    async captureKeyframe() { return null } }`,
-  clipboard: `export class ClipboardWatcher { start() {} stop() {} getLatest() { return null }
-    snapshotSessionValues() { return new Map() } }
+  clipboard: `export class ClipboardWatcher { reset() {} readNow() { return null } getLatest() { return null } }
     export function inferPaste() { return { matched: false } }`,
   activeWin: `export default async function activeWin() {
     globalThis.__captureSmoke.winReads++
@@ -109,7 +106,6 @@ async function bundleMain() {
           if (a.path === './config') return fake('config')
           if (a.path === '../store') return fake('appStore')
           if (a.path === './ax/JxaAccessibilityProvider') return fake('jxa')
-          if (a.path === './keyframes') return fake('keyframes')
           if (a.path === './clipboard') return fake('clipboard')
         }
         return undefined

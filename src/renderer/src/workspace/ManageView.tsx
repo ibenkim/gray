@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { formatInviteAge, isInviteExpired, memberShortName } from '../../../shared/teamFormat'
+import { WorkspaceDialog } from './WorkspaceDialog'
+import { formatInviteAge, isInviteExpired } from '../../../shared/teamFormat'
 import type { Invite, Member, Team } from '../state/types'
 
 /**
@@ -37,15 +38,6 @@ export default function ManageView({
       renameRef.current?.select()
     }
   }, [renaming])
-
-  useEffect(() => {
-    if (!removeTarget) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setRemoveTarget(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [removeTarget])
 
   async function commitRename() {
     const next = nameDraft.trim()
@@ -182,40 +174,22 @@ export default function ManageView({
       )}
 
       {removeTarget && canManage && (
-        <div
-          className="ws-scrim"
-          onClick={() => setRemoveTarget(null)}
+        <WorkspaceDialog
+          title="Remove member?"
+          confirmLabel="Remove member"
+          onCancel={() => setRemoveTarget(null)}
+          onConfirm={() => {
+            const id = removeTarget.id
+            setRemoveTarget(null)
+            void window.ghostBridge?.teamRemoveMember?.(id)
+          }}
         >
-          <div
-            className="delete-dialog"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-          >
-            <div className="delete-dialog-title">
-              Remove {memberShortName(removeTarget.name)} from the team?
-            </div>
-            <div className="delete-dialog-body">
-              They keep their personal workflows. Workflows they shared stay with the team. Their
-              scheduled team runs stop today.
-            </div>
-            <div className="delete-dialog-actions">
-              <button className="btn btn-secondary" onClick={() => setRemoveTarget(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => {
-                  const id = removeTarget.id
-                  setRemoveTarget(null)
-                  void window.ghostBridge?.teamRemoveMember?.(id)
-                }}
-              >
-                Remove member
-              </button>
-            </div>
-          </div>
-        </div>
+          <p className="delete-dialog-target">{removeTarget.name}</p>
+          <p>
+            They keep their personal workflows. Workflows they shared stay with the team. Their
+            scheduled team runs stop today.
+          </p>
+        </WorkspaceDialog>
       )}
     </div>
   )

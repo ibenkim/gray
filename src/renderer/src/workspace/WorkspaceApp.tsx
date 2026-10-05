@@ -19,6 +19,7 @@ import WorkflowDetail from './WorkflowDetail'
 import ActivityView from './ActivityView'
 import ManageView from './ManageView'
 import UploadReview from './UploadReview'
+import { OverlayHostContext } from './WorkspacePopover'
 
 export type WorkspaceNav = 'workflows' | 'activity' | 'shared' | 'teams'
 
@@ -46,6 +47,8 @@ export default function WorkspaceApp() {
   const [recordings, setRecordings] = useState<RecordingSummary[]>([])
   const [reviewSessionId, setReviewSessionId] = useState<string | null>(null)
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
+  /** Card-local overlay layer for menus and confirmations (HF4). */
+  const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null)
 
   function applySnapshot(snap: StoreSnapshot) {
     setWorkflows(snap.workflows)
@@ -240,6 +243,7 @@ export default function WorkspaceApp() {
   }
 
   return (
+    <OverlayHostContext.Provider value={overlayHost}>
     <div className="workspace-shell">
       <div className="workspace-window">
         <div
@@ -357,7 +361,9 @@ export default function WorkspaceApp() {
             />
           )}
         </div>
+        <div className="ws-overlay-host" ref={setOverlayHost} />
       </div>
     </div>
+    </OverlayHostContext.Provider>
   )
 }

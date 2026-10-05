@@ -69,7 +69,6 @@ vi.mock('./store', () => ({
 }))
 
 vi.mock('./ax/JxaAccessibilityProvider', () => ({ JxaAccessibilityProvider: class {} }))
-vi.mock('./keyframes', () => ({ SparseKeyframeProvider: class {} }))
 vi.mock('./clipboard', () => ({ ClipboardWatcher: class {} }))
 
 vi.mock('./capture', () => ({
@@ -106,9 +105,6 @@ vi.mock('./capture', () => ({
     }
     setProcessing(v: boolean) {
       this.status.processing = v
-    }
-    getClipboardSessionValues() {
-      return new Map<string, string>()
     }
     noteArtifactWriteFailure() {}
     async retrySessionDrain() {

@@ -36,10 +36,30 @@ function exitIfOrphaned() {
 }
 `
 
+/**
+ * App scope (M3-C), checked before any content read. Mirrors `appInScope` in ../providers.ts
+ * (host re-checks at ingest). No/invalid policy, unknown or excluded app = read nothing.
+ */
+const JXA_SCOPE_POLICY = `
+var SCOPE = null;
+try { SCOPE = JSON.parse(String($.getenv('GRAY_JXA_SCOPE'))); } catch (eScope) { SCOPE = null; }
+function appAllowed(name) {
+  if (!SCOPE || !SCOPE.self || !SCOPE.deny || !name) return false;
+  var lower = String(name).toLowerCase();
+  var i;
+  for (i = 0; i < SCOPE.self.length; i++) if (lower === SCOPE.self[i]) return false;
+  for (i = 0; i < SCOPE.deny.length; i++) if (lower.indexOf(SCOPE.deny[i]) !== -1) return false;
+  if (!SCOPE.allow) return true;
+  for (i = 0; i < SCOPE.allow.length; i++) if (lower.indexOf(SCOPE.allow[i]) !== -1) return true;
+  return false;
+}
+`
+
 export const JXA_SENSOR_SCRIPT = `
 ObjC.import('Cocoa');
 ObjC.import('ApplicationServices');
 ${JXA_PARENT_LIFETIME}
+${JXA_SCOPE_POLICY}
 var STDOUT = $.NSFileHandle.fileHandleWithStandardOutput;
 
 function writeLine(text) {
@@ -176,6 +196,32 @@ function elementAtPoint(x, y) {
   } catch (e) {
     return null;
   }
+}
+
+/** Name of the app owning an AX element (process metadata only), or null. */
+function elementAppName(el) {
+  try {
+    var pid = Ref();
+    if ($.AXUIElementGetPid(el, pid) !== 0) return null;
+    var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid[0]);
+    return app ? String(app.localizedName.js) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * The in-scope element under the pointer, or null. The front app must be in scope, and so
+ * must the element's own app when it resolves (a background window can be another app's).
+ * ponytail: an unresolvable element owner falls back to the front-app check alone.
+ */
+function scopedElementAt(pt, front) {
+  if (!pt || !appAllowed(front.name)) return null;
+  var el = elementAtPoint(pt.x, pt.y);
+  if (!el) return null;
+  var owner = elementAppName(el);
+  if (owner && !appAllowed(owner)) return null;
+  return el;
 }
 
 /** Identity of a clicked element: role + best label + ancestor + list context. */
@@ -433,9 +479,10 @@ function sample() {
     var procs = se.applicationProcesses.whose({ frontmost: true });
     if (!procs || procs.length === 0) return null;
     var proc = procs[0];
-    var appName = String(proc.name());
+    var appName = jsString(proc.name());
     var bundleId = null;
     try { bundleId = String(proc.bundleIdentifier()); } catch (e) {}
+    if (!appAllowed(appName)) return { k: 'ax', outOfScope: true };
 
     var win = null;
     try {
@@ -523,6 +570,11 @@ function keyOf(s) {
 function emitSample() {
   var s = sample();
   if (!s) return;
+  if (s.outOfScope) {
+    /* Nothing read or emitted; returning to an in-scope app samples afresh. */
+    lastKey = null;
+    return;
+  }
   if (s.error) {
     emit({ k: 'fault', where: 'ax_sample' });
     return;
@@ -551,6 +603,8 @@ function scheduleSample(delayMs) {
 function onKey(evt) {
   try {
     keyCallbacks += 1;
+    var front = frontApp();
+    if (!appAllowed(front.name)) return;
     var flags = 0;
     try { flags = evt.modifierFlags; } catch (e) {}
     var secure = secureInputActive();
@@ -562,7 +616,6 @@ function onKey(evt) {
       try { var b = evt.charactersIgnoringModifiers; if (b) base = String(b.js); } catch (e3) {}
     }
 
-    var front = frontApp();
     emit({
       k: 'key',
       code: evt.keyCode,
@@ -600,9 +653,12 @@ function pointOf(evt) {
 function onMouse(evt, button) {
   try {
     clickCallbacks += 1;
-    var pt = pointOf(evt);
-    var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
     var front = frontApp();
+    if (!appAllowed(front.name)) return;
+    var pt = pointOf(evt);
+    var el = scopedElementAt(pt, front);
+    if (pt && !el) return;
+    var target = describeElement(el);
     var count = 1;
     try { count = evt.clickCount || 1; } catch (e) {}
     var flags = 0;
@@ -651,9 +707,12 @@ function onScroll(evt) {
     try { dx = evt.scrollingDeltaX || 0; } catch (e1) {}
     try { dy = evt.scrollingDeltaY || 0; } catch (e2) {}
     if (!dx && !dy) return;
-    var pt = pointOf(evt);
-    var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
     var front = frontApp();
+    if (!appAllowed(front.name)) return;
+    var pt = pointOf(evt);
+    var el = scopedElementAt(pt, front);
+    if (pt && !el) return;
+    var target = describeElement(el);
     emit({
       k: 'scroll',
       axis: Math.abs(dy) >= Math.abs(dx) ? 'vertical' : 'horizontal',
@@ -770,14 +829,17 @@ function readMouseButtons() {
 function emitPolledClick(button) {
   pollClicks += 1;
   clickCallbacks += 1;
+  var front = frontApp();
+  if (!appAllowed(front.name)) return;
   var pt = null;
   try {
     var m = $.NSEvent.mouseLocation;
     var h = $.CGDisplayBounds($.CGMainDisplayID()).size.height;
     pt = { x: Math.round(m.x), y: Math.round(h - m.y) };
   } catch (ePt) {}
-  var target = pt ? describeElement(elementAtPoint(pt.x, pt.y)) : null;
-  var front = frontApp();
+  var el = scopedElementAt(pt, front);
+  if (pt && !el) return;
+  var target = describeElement(el);
   emit({
     k: 'click',
     button: button,

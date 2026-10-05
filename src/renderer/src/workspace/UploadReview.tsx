@@ -159,6 +159,14 @@ export function UploadReviewView({
           </div>
         )}
 
+        {summary && (
+          <p className="review-status">
+            {summary.screenshotCapture === 'disabled_privacy'
+              ? 'Screenshots were disabled for this recording. Interpretation uses the reviewed text.'
+              : 'Screenshot capture status is unknown for this recording. Images are excluded from interpretation.'}
+          </p>
+        )}
+
         {sending && (
           <p className="review-status">
             Sending for interpretation…

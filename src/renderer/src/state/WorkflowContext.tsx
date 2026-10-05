@@ -405,6 +405,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const lastBoundsKeyRef = useRef<string | null>(null)
   /** Generation of the latest dropdown open acknowledged as current (M1-HF3). */
   const dropdownGenRef = useRef(-1)
+  /**
+   * Newest close generation main reported in this renderer lifetime, recorded even while an
+   * open is still pending (HF3-B-R1): a delayed open reply older than it is stale.
+   */
+  const dropdownClosedGenRef = useRef(-1)
   /** One Start from the dropdown at a time. */
   const dropdownStartRef = useRef(false)
 
@@ -1164,6 +1169,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       void window.ghostBridge?.closeDropdown?.()
       return false
     }
+    if (ack.generation < dropdownClosedGenRef.current) {
+      // Main already closed this open (outside focus, Escape, dismissal) before its reply
+      // arrived: stay closed and leave the driver closed so the next click opens once.
+      hoverDriverRef.current?.request('closed')
+      return false
+    }
     dropdownGenRef.current = ack.generation
     // Synchronous so the driver sees the new state before deciding its next step.
     flushSync(() => setState('hover'))
@@ -1204,6 +1215,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   // A close older than the latest acknowledged open is stale and ignored.
   useEffect(() => {
     return window.ghostBridge?.onDropdownClosed?.((event) => {
+      // Recorded before any state check: an open may still be awaiting its reply.
+      dropdownClosedGenRef.current = Math.max(dropdownClosedGenRef.current, event.generation)
       if (event.generation <= dropdownGenRef.current) return
       if (stateRef.current !== 'hover') return
       flushSync(() => setState('idle'))

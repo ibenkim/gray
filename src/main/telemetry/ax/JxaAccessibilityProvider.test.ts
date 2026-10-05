@@ -640,9 +640,12 @@ describe('child ownership (M2)', () => {
       return make(...args)
     }
     const provider = new JxaAccessibilityProvider({ isAccessibilityTrusted: () => true })
-    provider.start(() => {})
+    const scope = { self: ['electron'], deny: ['1password'], allow: ['google chrome'] }
+    provider.start(() => {}, scope)
     const opts = calls[0][2] as { env: Record<string, string> }
     expect(opts.env.GRAY_JXA_PARENT_PID).toBe(String(process.pid))
+    // M3-C: the sensor enforces this scope before reading; no scope = it reads nothing.
+    expect(JSON.parse(opts.env.GRAY_JXA_SCOPE)).toEqual(scope)
     void provider.stop()
   })
 })

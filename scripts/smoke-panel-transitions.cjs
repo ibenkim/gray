@@ -242,12 +242,14 @@ const countingIpc = {
       const entry = { ch, arg: a[1], t: Date.now() }
       ipcLog.push(entry)
       const r = await fn(...a)
+      if (r && typeof r === 'object' && 'generation' in r) Object.assign(entry, { gen: r.generation, open: r.open, done: Date.now() })
       if (holdNext && holdNext.match(entry)) {
         const h = holdNext
         holdNext = null
         h.entry = entry
         h.received()
         await h.gate
+        entry.done = Date.now() // the held reply reaches the renderer now
       }
       return r
     }),
@@ -304,6 +306,26 @@ async function childDom() {
       apps: document.querySelectorAll('.app-row').length,
       font: getComputedStyle(document.body).fontFamily,
       ghostBridge: typeof window.ghostBridge,
+      // HF4: every app row and its name/detail/icon/radio stay inside the row and panel.
+      rowCheck: (() => {
+        const pr = p ? p.getBoundingClientRect() : null
+        if (!pr) return null
+        let outOfBounds = 0, overlap = 0, prevBottom = -1
+        const rows = [...document.querySelectorAll('.app-row')]
+        for (const row of rows) {
+          const rr = row.getBoundingClientRect()
+          if (rr.right > pr.right + 0.5 || rr.x < pr.x - 0.5) outOfBounds++
+          for (const k of ['.app-icon', '.app-name', '.app-detail', '.radio']) {
+            const e = row.querySelector(k)
+            if (!e) continue
+            const er = e.getBoundingClientRect()
+            if (er.right > rr.right + 0.5 || er.x < rr.x - 0.5 || er.bottom > rr.bottom + 0.5 || er.y < rr.y - 0.5) outOfBounds++
+          }
+          if (rr.y < prevBottom - 0.5) overlap++
+          prevBottom = rr.bottom
+        }
+        return { rows: rows.length, outOfBounds, overlap, fullTitles: rows.every((r) => !!r.title) }
+      })(),
       vw: innerWidth, vh: innerHeight
     }
   })()`)
@@ -955,7 +977,7 @@ async function runLifecycle() {
     fs.writeFileSync(path.join(fxReal, 'report.json'), JSON.stringify(report, null, 2))
     console.log('SMOKE-REPORT ' + JSON.stringify({ watchdog: true, scenarios: report.scenarios, failures }))
     app.exit(4)
-  }, 240000).unref()
+  }, 360000).unref()
   await app.whenReady()
   const primary = screen.getPrimaryDisplay()
   report.display = { scaleFactor: primary.scaleFactor, workArea: primary.workArea, displays: screen.getAllDisplays().length }
@@ -1171,6 +1193,99 @@ async function runLifecycle() {
   await closesTo(sc, clickPill, home)
   steps.staleCloseAfterReload = await staleCase('stale-close-reload', 'close', reload)
   await closesTo(sc, clickPill, home)
+
+  // 8. HF3-B-R1: within ONE mounted provider lifetime, a main close overtakes a delayed open
+  // acknowledgement. Ordering is recorded content-free (channel, generation, time).
+  const closedLog = []
+  const realNotify = dropdownWiring.notifyClosed
+  let heldCloses = null
+  dropdownWiring.notifyClosed = (e) => {
+    closedLog.push({ t: Date.now(), gen: e.generation, reason: e.reason })
+    if (heldCloses) heldCloses.push(e)
+    else realNotify(e)
+  }
+  const order = (mark, c0) => [
+    ...ipcLog.slice(mark).filter((e) => isOpenReq(e) || isCloseReq(e)).map((e) => ({ t: e.done || e.t, ev: e.ch === 'dropdown:open' ? 'open-reply' : 'close-reply', gen: e.gen })),
+    ...closedLog.slice(c0).map((c) => ({ t: c.t, ev: 'closed-notice', gen: c.gen, reason: c.reason }))
+  ].sort((a, b) => a.t - b.t).map(({ t, ...rest }) => rest)
+  async function overtakenOpen(name, closeFromMain) {
+    await ensureIdle()
+    const mark = ipcLog.length
+    const c0 = closedLog.length
+    const h = holdOne(isOpenReq)
+    await clickPill()
+    let released = false
+    try {
+      if (!(await Promise.race([h.arrived.then(() => true), sleep(3000).then(() => false)]))) {
+        holdNext = null
+        fail(sc, 'held_request_never_sent', { name })
+        return { requestSent: false }
+      }
+      await waitFor(async () => ddVisible(), 3000) // main applied open(1); its reply is held
+      await closeFromMain()
+      await waitFor(async () => !ddVisible(), 2000)
+      await sleep(300) // the close notice reaches the still-idle renderer first
+      h.release()
+      released = true
+      await sleep(600)
+    } finally {
+      if (!released) h.release()
+    }
+    const afterRelease = { visible: ddVisible(), open: ctl.inspect().dropdown.open, requestsSinceRelease: ipcLog.length - mark - 1 }
+    // The first ordinary click must open exactly once; the next closes normally.
+    const i1 = ipcLog.length
+    await clickPill()
+    await waitFor(async () => ddVisible(), 2000)
+    await sleep(300)
+    const first = { opens: since(i1, isOpenReq), closes: since(i1, isCloseReq), visible: ddVisible() }
+    const i2 = ipcLog.length
+    await clickPill()
+    await waitFor(async () => !ddVisible(), 2000)
+    await sleep(300)
+    const second = { opens: since(i2, isOpenReq), closes: since(i2, isCloseReq), visible: ddVisible() }
+    const r = { order: order(mark, c0), afterRelease, firstClick: first, secondClick: second }
+    if (afterRelease.visible || afterRelease.open || afterRelease.requestsSinceRelease) fail(sc, 'overtaken_open_not_reconciled', { name, ...afterRelease })
+    if (first.opens !== 1 || first.closes !== 0 || !first.visible) fail(sc, 'first_click_after_overtaken_open', { name, ...first, order: r.order })
+    if (second.closes !== 1 || second.opens !== 0 || second.visible) fail(sc, 'second_click_after_overtaken_open', { name, ...second })
+    await checkIdle(sc, home)
+    return r
+  }
+  steps.overtakenOpenMainDismiss = await overtakenOpen('main-dismiss', async () => { tracked.closeDropdown() })
+  steps.overtakenOpenChildEscape = await overtakenOpen('child-escape', async () => {
+    ddChild.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' })
+    ddChild.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
+  })
+  // An older close notice delivered after a newer accepted open must not cancel it.
+  {
+    await ensureIdle()
+    const mark = ipcLog.length
+    const c0 = closedLog.length
+    await clickOpens(sc, 'older-close-open-1') // open(1) accepted
+    heldCloses = []
+    tracked.closeDropdown() // close(2) by main; its notice is held
+    await waitFor(async () => !ddVisible(), 2000)
+    await clickPill() // renderer still open → this click is its own close (no-op in main)
+    await sleep(400)
+    const i3 = ipcLog.length
+    await clickPill() // open(3) accepted
+    await waitFor(async () => ddVisible(), 2000)
+    await sleep(300)
+    const held = heldCloses
+    heldCloses = null
+    for (const e of held) realNotify(e) // the older close(2) notice arrives late
+    await sleep(400)
+    const afterStale = { visible: ddVisible(), open: ctl.inspect().dropdown.open, opensForReopen: since(i3, isOpenReq) }
+    const ci = ipcLog.length
+    await clickPill()
+    await waitFor(async () => !ddVisible(), 2000)
+    await sleep(300)
+    const closeClick = { closes: since(ci, isCloseReq), opens: since(ci, isOpenReq), visible: ddVisible() }
+    steps.olderCloseAfterNewerOpen = { order: order(mark, c0), heldNotices: held.length, afterStale, closeClick }
+    if (!afterStale.visible || !afterStale.open || afterStale.opensForReopen !== 1) fail(sc, 'older_close_cancelled_newer_open', steps.olderCloseAfterNewerOpen)
+    if (closeClick.closes !== 1 || closeClick.opens !== 0 || closeClick.visible) fail(sc, 'close_after_stale_notice', closeClick)
+    await checkIdle(sc, home)
+  }
+  dropdownWiring.notifyClosed = realNotify
 
   // ── Teardown: unmount, then no owned timer/promise/window may survive ──
   const i = ipcLog.length
@@ -1564,6 +1679,10 @@ async function runAnchoredDropdown() {
     await sleep(400)
     v.longLabelsBusy = { ...(await childDom()), shot: (await capture('variant_long_labels_busy', ddChild)).size, injected: true }
     if (!v.longLabelsBusy.record || !v.longLabelsBusy.record.disabled) fail(sc, 'busy_not_disabled', v.longLabelsBusy.record)
+    for (const [k, d] of [['oneApp', v.oneApp], ['longLabelsBusy', v.longLabelsBusy]]) {
+      const rc = d.rowCheck
+      if (!rc || rc.outOfBounds || rc.overlap || !rc.fullTitles) fail(sc, 'record_row_containment', { variant: k, ...rc })
+    }
     await ddChild.webContents.executeJavaScript('window.grayDropdown.hello()') // main resends the pill's real snapshot
     await sleep(400)
     // Real permission events to the pill: microphone off, then Screen Recording off.

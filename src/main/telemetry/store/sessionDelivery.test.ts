@@ -172,3 +172,65 @@ describe('evidence checks', () => {
     expect(await store.artifactSize('../../etc/passwd')).toBeNull()
   })
 })
+
+describe('screenshot availability (M3-A)', () => {
+  it('file and in-memory stores round-trip disabled availability; create stays idempotent', async () => {
+    const { InMemoryTelemetryStore } = await import('./InMemoryTelemetryStore')
+    const root = freshRoot()
+    const store = open(root)
+    await store.createSession({ sessionId: 'tsess_sc', screenshotCapture: 'disabled_privacy' })
+    // Re-creating an existing id never relabels it.
+    const again = await store.createSession({ sessionId: 'tsess_sc', screenshotCapture: 'unknown' })
+    expect(again.screenshotCapture).toBe('disabled_privacy')
+    expect((await open(root).getSessionMeta('tsess_sc'))?.screenshotCapture).toBe('disabled_privacy')
+
+    const mem = new InMemoryTelemetryStore()
+    await mem.createSession({ sessionId: 'tsess_mem', screenshotCapture: 'disabled_privacy' })
+    expect((await mem.createSession({ sessionId: 'tsess_mem' })).screenshotCapture).toBe('disabled_privacy')
+    expect(toRecordingSummary((await mem.getSessionMeta('tsess_mem'))!).screenshotCapture).toBe('disabled_privacy')
+  })
+
+  it('save, review preparation, approval and interpretation updates keep it', async () => {
+    const root = freshRoot()
+    const store = open(root)
+    await store.createSession({ sessionId: 'tsess_keep', screenshotCapture: 'disabled_privacy' })
+    await store.stopSession('tsess_keep')
+    await store.updateDelivery('tsess_keep', (d) => ({ ...d!, save: { state: 'complete', storedEvents: 2 } }))
+    await store.updateDelivery('tsess_keep', (d) => ({ ...d!, review: { state: 'prepared', revision: 1, digest: 'b'.repeat(64) } }))
+    await store.updateDelivery('tsess_keep', (d) => ({
+      ...d!,
+      review: { ...d!.review, state: 'approved', approval: { revision: 1, digest: 'b'.repeat(64), principal: 'synthetic-local-user', approvedAt: '2026-01-01T00:00:00.000Z', purpose: 'interpretation_text', provider: 'openai', model: 'test-model', promptVersion: 'p1', policyVersion: 'v1', legacyUnverified: false } }
+    }))
+    await store.updateDelivery('tsess_keep', (d) => ({ ...d!, interpretation: { state: 'complete', workflowId: 'wf_x' } }))
+    const meta = (await open(root).getSessionMeta('tsess_keep'))!
+    expect(meta.screenshotCapture).toBe('disabled_privacy')
+    expect(meta.delivery?.review.approval).toMatchObject({ revision: 1, model: 'test-model' })
+    expect(toRecordingSummary(meta)).toMatchObject({ screenshotCapture: 'disabled_privacy', saveState: 'complete', interpretationState: 'complete' })
+  })
+
+  it('legacy sessions and their image files stay intact and read as unknown; malformed never becomes a claim', async () => {
+    const root = freshRoot()
+    writeLegacyMeta(root, 'tsess_legacy', '2020-01-01T00:00:00.000Z')
+    mkdirSync(join(root, 'keyframes', 'tsess_legacy'), { recursive: true })
+    const image = join(root, 'keyframes', 'tsess_legacy', 'tevt_old.jpg')
+    writeFileSync(image, Buffer.from('synthetic-legacy-jpeg'))
+    const store = open(root)
+    await store.createSession({ sessionId: 'tsess_new', screenshotCapture: 'disabled_privacy' })
+    const listed = await store.listSessions({ limit: 10 })
+    const legacy = listed.find((m) => m.sessionId === 'tsess_legacy')!
+    expect(legacy.screenshotCapture).toBeUndefined()
+    expect(toRecordingSummary(legacy).screenshotCapture).toBe('unknown')
+    expect(readFileSync(image, 'utf8')).toBe('synthetic-legacy-jpeg')
+
+    // A malformed value: still listed, delivery intact, status unknown (not disabled).
+    const path = join(root, 'sessions', 'tsess_new', 'meta.json')
+    const raw = JSON.parse(readFileSync(path, 'utf8'))
+    raw.screenshotCapture = 'available'
+    writeFileSync(path, JSON.stringify(raw))
+    const meta = await open(root).getSessionMeta('tsess_new')
+    expect(meta).not.toBeNull()
+    expect(meta!.screenshotCapture).toBe('unknown')
+    expect(meta!.delivery?.save.state).toBe('recording')
+    expect(toRecordingSummary(meta!).screenshotCapture).toBe('unknown')
+  })
+})

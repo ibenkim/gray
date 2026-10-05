@@ -71,6 +71,7 @@ export default function RecordPanel({
             return (
               <button
                 key={app.id}
+                title={`${app.name} · ${app.detail}`}
                 className={`app-row ${selected ? 'app-row-selected' : ''}`}
                 onClick={() => onSelectApp(app.id)}
               >
@@ -108,6 +109,10 @@ export default function RecordPanel({
           </button>
         )}
       </div>
+
+      <p className="record-hint">
+        Screenshots are disabled in this build. Actions and text may still be recorded.
+      </p>
 
       <button
         className="btn-record"

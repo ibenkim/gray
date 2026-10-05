@@ -10,6 +10,7 @@ import {
   type UploadReviewViewProps
 } from './UploadReview'
 import WorkflowsHome from './WorkflowsHome'
+import RecordPanel from '../components/panels/RecordPanel'
 
 // Synthetic summaries only. Static rendering + element-tree action wiring; no DOM/Electron.
 
@@ -295,5 +296,51 @@ describe('privacy panel', () => {
     expect(
       privacyStatusText(summary({ approvedAt: '2026-01-01T12:05:00.000Z', approvedModel: 'm' }))
     ).toMatch(/sent to OpenAI \(m\) for interpretation after your approval/)
+  })
+})
+
+describe('screenshot availability notices (M3-A)', () => {
+  it('the actual RecordPanel says screenshots are disabled before Record, controls intact', () => {
+    const html = renderToStaticMarkup(
+      createElement(RecordPanel, {
+        recordMode: 'one-app',
+        onRecordMode: vi.fn(),
+        apps: [{ id: 'syn', name: 'Synthetic', detail: 'fixture' }],
+        selectedAppId: 'syn',
+        onSelectApp: vi.fn(),
+        narrate: true,
+        onNarrate: vi.fn(),
+        screenGranted: true,
+        micGranted: true,
+        onRecord: vi.fn(),
+        onScreenRecovery: vi.fn(),
+        onMicSettings: vi.fn()
+      })
+    )
+    expect(html).toContain('Screenshots are disabled in this build. Actions and text may still be recorded.')
+    expect(html).toContain('btn-record')
+    expect(html).toContain('role="switch"')
+    expect(html.indexOf('Screenshots are disabled')).toBeLessThan(html.indexOf('btn-record'))
+  })
+
+  it('new sessions say screenshots were disabled; legacy/missing say unknown; neither implies images are sent', () => {
+    const disabled = render(viewProps({ summary: summary({ screenshotCapture: 'disabled_privacy' }) }))
+    expect(disabled).toContain('Screenshots were disabled for this recording. Interpretation uses the reviewed text.')
+    expect(disabled).toContain('Screenshots and screen video') // exclusions still listed
+    const legacy = render(viewProps({ summary: summary({ saveState: 'legacy_unverified' }) }))
+    expect(legacy).toContain('Screenshot capture status is unknown for this recording. Images are excluded from interpretation.')
+    expect(legacy).toContain('capture completeness cannot be verified')
+    for (const html of [disabled, legacy]) expect(html).not.toMatch(/screenshots? (are|were) included|includes? screenshots/i)
+  })
+
+  it('the notice sits alongside an incomplete save or a failed preview without hiding them', () => {
+    const incomplete = render(
+      viewProps({ preview: null, summary: summary({ saveState: 'incomplete', saveMessage: 'Not all saved.', screenshotCapture: 'disabled_privacy' }) })
+    )
+    expect(incomplete).toContain('Not all saved.')
+    expect(incomplete).toContain('Screenshots were disabled for this recording.')
+    const failedPreview = render(viewProps({ preview: null, error: 'Couldn’t prepare the review.', summary: summary({ screenshotCapture: 'unknown' }) }))
+    expect(failedPreview).toContain('Couldn’t prepare the review.')
+    expect(failedPreview).toContain('Screenshot capture status is unknown')
   })
 })

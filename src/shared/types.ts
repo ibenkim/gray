@@ -371,6 +371,8 @@ export type RecordingSummary = {
   storedEvents?: number
   artifactsSaved?: number
   audio?: 'none' | 'complete' | 'incomplete'
+  /** M3-A: screenshots deliberately disabled for this session; absent means unknown. */
+  screenshotCapture?: 'disabled_privacy' | 'unknown'
 }
 
 /** The exact sanitized dataset a user approves before an interpretation request. */

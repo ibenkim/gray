@@ -132,6 +132,7 @@ export class FileTelemetryStore implements TelemetryStore {
       schemaVersion: SCHEMA_VERSION,
       recordMode: input.recordMode,
       selectedAppId: input.selectedAppId,
+      ...(input.screenshotCapture ? { screenshotCapture: input.screenshotCapture } : {}),
       delivery: initialDelivery()
     }
     const metaPath = this.pathFor(sessionId, 'meta', 'session')

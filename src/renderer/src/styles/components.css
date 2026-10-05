@@ -99,6 +99,17 @@
 }
 .app-name { font-size: 12px; color: var(--gray-color-ink); }
 .app-detail { font-size: 12px; color: var(--gray-color-gray-2); }
+/* Long names stay on their row (HF4): one line each, the full text is the row's title. */
+.app-row { min-width: 0; }
+.app-name,
+.app-detail {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.app-name { flex: 0 1 auto; }
+.app-detail { flex: 1 1 0; text-align: left; }
 .radio {
   margin-left: auto;
   width: 14px;
@@ -664,6 +675,10 @@
   margin: 0;
   color: var(--text);
 }
+/* Approval-relevant values wrap in full inside the dashboard (HF4). */
+.workspace-window .run-contract { min-width: 0; }
+.workspace-window .run-contract-list { grid-template-columns: auto minmax(0, 1fr); }
+.workspace-window .run-contract-list dd { min-width: 0; overflow-wrap: anywhere; }
 .run-contract-actions {
   display: flex;
   justify-content: flex-end;

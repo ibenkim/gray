@@ -51,6 +51,7 @@ export class InMemoryTelemetryStore implements TelemetryStore {
       schemaVersion: SCHEMA_VERSION,
       recordMode: input.recordMode,
       selectedAppId: input.selectedAppId,
+      ...(input.screenshotCapture ? { screenshotCapture: input.screenshotCapture } : {}),
       delivery: initialDelivery()
     }
     this.sessions.set(input.sessionId, meta)

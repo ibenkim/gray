@@ -133,30 +133,32 @@ vi.mock('./ax/JxaAccessibilityProvider', () => ({
   }
 }))
 
-vi.mock('./keyframes', () => ({
-  SparseKeyframeProvider: class {
+/**
+ * Production composes DisabledScreenshotProvider (M3-A). To keep artifact drain and write
+ * failure coverage, this TEST-ONLY wrapper injects an enabled synthetic provider backed by the
+ * real store; every recorder behavior is the actual TelemetryRecorder. Its availability is
+ * unknown, so these sessions are stamped `unknown`, never `disabled_privacy`.
+ */
+vi.mock('./capture', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./capture')>()
+  type Store = ConstructorParameters<typeof mod.TelemetryRecorder>[0]
+  type Providers = NonNullable<ConstructorParameters<typeof mod.TelemetryRecorder>[1]>
+  class SyntheticShots {
     readonly enabled = true
     private busy = false
-    constructor(
-      private readonly target: {
-        saveKeyframe: (s: string, e: string, b: Buffer) => Promise<{ relativePath: string }>
-      }
-    ) {}
+    constructor(private readonly store: Store, private readonly owner: { recorder?: InstanceType<typeof mod.TelemetryRecorder> }) {}
     async captureKeyframe(_id: string, opts: { sessionId?: string; eventId?: string } = {}) {
-      if (this.busy || !opts.sessionId || !opts.eventId) return null
+      if (this.busy || !opts.sessionId || !opts.eventId || !this.store?.saveKeyframe) return null
       this.busy = true
       try {
         if (h.shotGate) await h.shotGate
-        // Mirrors the real provider: write errors are swallowed as "no frame".
         try {
-          const saved = await this.target.saveKeyframe(
-            opts.sessionId,
-            opts.eventId,
-            Buffer.from('synthetic-frame-bytes')
-          )
+          const saved = await this.store.saveKeyframe(opts.sessionId, opts.eventId, Buffer.from('synthetic-frame-bytes'))
           h.log.push('artifact-ack')
           return { relativePath: saved.relativePath }
         } catch {
+          // Reported, not swallowed: the save manifest must count it.
+          this.owner.recorder?.noteArtifactWriteFailure(opts.sessionId)
           return null
         }
       } finally {
@@ -164,17 +166,24 @@ vi.mock('./keyframes', () => ({
       }
     }
   }
-}))
+  class TestRecorder extends mod.TelemetryRecorder {
+    constructor(store: Store, providers: Providers = {}) {
+      const owner: { recorder?: InstanceType<typeof mod.TelemetryRecorder> } = {}
+      super(store, { ...providers, screenshot: new SyntheticShots(store, owner) })
+      owner.recorder = this
+    }
+  }
+  return { ...mod, TelemetryRecorder: TestRecorder }
+})
 
 vi.mock('./clipboard', () => ({
   ClipboardWatcher: class {
-    start() {}
-    stop() {}
-    getLatest() {
+    reset() {}
+    readNow() {
       return null
     }
-    snapshotSessionValues() {
-      return h.clipboardRaw
+    getLatest() {
+      return null
     }
   },
   inferPaste: () => ({ matched: false })

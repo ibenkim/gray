@@ -375,6 +375,8 @@ export function toRecordingSummary(meta: TelemetrySessionMeta): RecordingSummary
     ...(interp?.state === 'complete' && interp.workflowId ? { workflowId: interp.workflowId } : {}),
     ...(save?.storedEvents != null ? { storedEvents: save.storedEvents } : {}),
     ...(save?.artifacts ? { artifactsSaved: save.artifacts.saved } : {}),
-    ...(save?.audio ? { audio: save.audio.state } : {})
+    ...(save?.audio ? { audio: save.audio.state } : {}),
+    // Missing metadata or zero artifacts never proves that no screenshot was taken.
+    screenshotCapture: meta.screenshotCapture === 'disabled_privacy' ? 'disabled_privacy' : 'unknown'
   }
 }
