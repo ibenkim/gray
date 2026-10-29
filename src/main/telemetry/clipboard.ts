@@ -13,7 +13,7 @@ export type ClipboardChange = {
 }
 
 export type ClipboardWatcherOptions = {
-  /** Hashes Ghost itself wrote — ignore so we don't echo our own clipboard. */
+  /** Hashes Gray itself wrote — ignore so we don't echo our own clipboard. */
   ignoreHashes?: Set<string>
   readText?: () => string
   readFormats?: () => string[]

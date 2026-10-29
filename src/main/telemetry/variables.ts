@@ -31,7 +31,7 @@ export function extractWorkflowVariables(
     const title = e.data?.documentTitle || e.data?.windowTitle
     const app = e.data?.appName
     if (!title || !app) continue
-    if (/^(ghost|electron|yuh)$/i.test(app)) continue
+    if (/^(gray|electron)$/i.test(app)) continue
     const key = `${app.toLowerCase()}|${title.toLowerCase()}`
     const prev = docCounts.get(key)
     if (prev) prev.count += 1

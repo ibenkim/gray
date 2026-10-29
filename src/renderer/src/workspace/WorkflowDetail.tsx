@@ -70,15 +70,15 @@ export default function WorkflowDetail({
       setTab('overview')
       return
     }
-    void window.ghostBridge?.runWorkflow?.(workflow.id)
+    void window.grayBridge?.runWorkflow?.(workflow.id)
   }
 
   async function confirmContract() {
     const accepted = { ...workflow, contractAccepted: true }
     onUpdate(() => accepted)
     setShowContract(false)
-    await window.ghostBridge?.upsertWorkflow?.(accepted)
-    void window.ghostBridge?.runWorkflow?.(accepted.id)
+    await window.grayBridge?.upsertWorkflow?.(accepted)
+    void window.grayBridge?.runWorkflow?.(accepted.id)
   }
 
   useEffect(() => {
@@ -113,7 +113,7 @@ export default function WorkflowDetail({
       }
       if (menuOpen && e.altKey && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
         e.preventDefault()
-        void navigator.clipboard?.writeText?.(`ghost://workflow/${workflow.id}`)
+        void navigator.clipboard?.writeText?.(`gray://workflow/${workflow.id}`)
         setMenuOpen(false)
       }
     }
@@ -251,7 +251,7 @@ export default function WorkflowDetail({
               <button
                 className="overflow-item"
                 onClick={() => {
-                  void navigator.clipboard?.writeText?.(`ghost://workflow/${workflow.id}`)
+                  void navigator.clipboard?.writeText?.(`gray://workflow/${workflow.id}`)
                   setMenuOpen(false)
                 }}
               >
@@ -329,7 +329,7 @@ export default function WorkflowDetail({
                     onUpdate((w) => {
                       const nextSteps = updater(w.steps)
                       if (w.sessionId) {
-                        void window.ghostBridge?.automationMarkStale?.(
+                        void window.grayBridge?.automationMarkStale?.(
                           w.sessionId,
                           true,
                           nextSteps.map((s) => ({ index: s.index, title: s.title }))

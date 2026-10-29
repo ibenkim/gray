@@ -92,14 +92,14 @@ export function useWindowDrag(opts: { onTap?: () => void; preventDefault?: boole
     trackerRef.current = new GestureTracker({
       start: (x, y) => {
         const { collapseToPill } = beginDrag()
-        tokenRef.current = window.ghostBridge?.dragStart?.(x, y, { collapseToPill }) ?? null
+        tokenRef.current = window.grayBridge?.dragStart?.(x, y, { collapseToPill }) ?? null
       },
       end: () => {
         const token = tokenRef.current
         tokenRef.current = null
         endDrag()
         // Only this gesture's owner/token can end it in main.
-        void (token ?? Promise.resolve(null)).then((t) => window.ghostBridge?.dragEnd?.(t))
+        void (token ?? Promise.resolve(null)).then((t) => window.grayBridge?.dragEnd?.(t))
       },
       tap: () => onTapRef.current?.()
     })

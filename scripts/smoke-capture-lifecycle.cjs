@@ -407,9 +407,9 @@ async function failureTrial(html) {
   const verdict = async (id, extra) => {
     const save = await savedAudio(id)
     // A repeated finalization with a clean zeroed account must not change the outcome.
-    await js(`window.ghostBridge.telemetryStop({ sessionId: ${JSON.stringify(id)}, audio: { chunksAcknowledged: 0, chunksFailed: 0, timedOut: false, recorderFailed: false } })`)
+    await js(`window.grayBridge.telemetryStop({ sessionId: ${JSON.stringify(id)}, audio: { chunksAcknowledged: 0, chunksFailed: 0, timedOut: false, recorderFailed: false } })`)
     const again = await savedAudio(id)
-    const review = await js(`window.ghostBridge.telemetryPrepareReview(${JSON.stringify(id)})`)
+    const review = await js(`window.grayBridge.telemetryPrepareReview(${JSON.stringify(id)})`)
     const st = await fm()
     return { save, afterRepeat: again, reviewOk: !!(review && review.ok), reviewCode: (review && (review.errorCode || null)) || null,
       liveTracks: st.liveTracks, stopListeners: st.stopListeners, ...extra }
@@ -632,7 +632,7 @@ async function ownerTrial(html) {
     const ix0 = g.ixStarts
     const t0 = Date.now()
     const barrier = telemetry.stopActiveRecording('hide')
-    const resumed = await js(`window.ghostBridge.telemetryResume({ sessionId: ${JSON.stringify(id)} })`)
+    const resumed = await js(`window.grayBridge.telemetryResume({ sessionId: ${JSON.stringify(id)} })`)
     await barrier
     const stopMs = Date.now() - t0
     const w0 = g.winReads
@@ -655,7 +655,7 @@ async function ownerTrial(html) {
     const quitting = telemetry.flushTelemetryOnQuit().then(() => (quitDone = true))
     await sleep(150)
     const quitWaited = !quitDone
-    const startDuringSave = await js('window.ghostBridge.telemetryStart({})')
+    const startDuringSave = await js('window.grayBridge.telemetryStart({})')
     gates.finalSave.release(); gates.finalSave = null
     await quitting
     t.quitDuringSave = { idleButActive, quitWaited, startRefused: !(startDuringSave && startDuringSave.ok), quitMs: Date.now() - t0, newSessions: (await sessionCount()) - before, save: await lastSave(), sessionId: id }
@@ -676,7 +676,7 @@ async function ownerTrial(html) {
     await settle(300)
     const save = await lastSave()
     const w0 = g.winReads, ix0 = g.ixStarts, n0 = await sessionCount()
-    const retry = await js('window.ghostBridge.telemetryStart({})')
+    const retry = await js('window.grayBridge.telemetryStart({})')
     await settle(600)
     t.teardownFailure = { pauseAcknowledgedInUi: pausedUi, teardownFailed: st.teardownFailed, save, windowReadsAfter: g.winReads - w0, replacementStarts: g.ixStarts - ix0, startRefused: !(retry && retry.ok), newSessions: (await sessionCount()) - n0, liveChildren: g.ixLive }
     // Child observed to exit later: capture is available again.
@@ -698,7 +698,7 @@ async function ownerCycles(html, n) {
     out.latencies.push(Date.now() - t0)
     const m = await telemetry.getTelemetryStore().getSessionMeta(id)
     if (m && m.delivery.save.state === 'complete') out.complete++
-    await waitFor(() => js('document.querySelector(".ghost-root") && !document.querySelector(".ghost-root-glass")'), 4000, 'renderer idle')
+    await waitFor(() => js('document.querySelector(".gray-root") && !document.querySelector(".gray-root-glass")'), 4000, 'renderer idle')
     await sleep(100)
   }
   out.latencies.sort((a, b) => a - b)
@@ -731,7 +731,7 @@ async function duplicateRecordCheck(html) {
     sessions: (await sessionCount()) - before,
     phase: phase(),
     getUserMediaCalls: stats.gumCalls != null ? stats.gumCalls : stats.tracks,
-    childHasCaptureBridge: child.isDestroyed() ? null : await child.webContents.executeJavaScript('typeof window.ghostBridge'),
+    childHasCaptureBridge: child.isDestroyed() ? null : await child.webContents.executeJavaScript('typeof window.grayBridge'),
     dropdownClosed: child.isDestroyed() || !child.isVisible()
   }
   await telemetry.stopActiveRecording('quit')

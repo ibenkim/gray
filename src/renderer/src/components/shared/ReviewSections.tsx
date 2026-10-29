@@ -69,7 +69,7 @@ export function RedactionPreview({ sessionId }: { sessionId?: string }) {
   useEffect(() => {
     if (!sessionId) return
     let cancelled = false
-    void window.ghostBridge?.telemetryGetRecording?.(sessionId).then((r) => {
+    void window.grayBridge?.telemetryGetRecording?.(sessionId).then((r) => {
       if (!cancelled) setSummary(r?.recording ?? null)
     })
     return () => {

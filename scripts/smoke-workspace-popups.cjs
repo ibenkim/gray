@@ -157,7 +157,7 @@ const known = {
   telemetryPrepareReview: async () => ({ ok: true, recording: rec, preview }),
   getRun: async () => null
 }
-window.ghostBridge = new Proxy(known, {
+window.grayBridge = new Proxy(known, {
   get(t, k) {
     if (typeof k !== 'string') return undefined
     if (k in t) return t[k]

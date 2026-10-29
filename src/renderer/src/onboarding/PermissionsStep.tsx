@@ -27,12 +27,12 @@ const PERMISSIONS: PermMeta[] = [
     title: 'See your screen',
     allow: 'Allow screen recording',
     why: 'To read which app and window are active while you record. Nothing leaves this Mac except an optional OpenAI call when you Finish.',
-    deniedTitle: 'yuh can’t see your screen yet',
+    deniedTitle: 'gray can’t see your screen yet',
     deniedSub: 'No pressure — you can turn it on in System Settings. Takes ten seconds.',
     settingsPath: [
       'Open System Settings  →  Privacy & Security',
       'Click Screen Recording',
-      'Turn on yuh, then come back'
+      'Turn on gray, then come back'
     ],
     whyLine: 'See your screen — so it can watch which app you’re in while you record'
   },
@@ -42,14 +42,14 @@ const PERMISSIONS: PermMeta[] = [
     title: 'See what you click and type',
     allow: 'Allow accessibility',
     optional: true,
-    why: 'This is what makes a recording usable — the buttons you click, the text you type, and the names of the fields you type it into. Without it a recording only shows which apps you opened, and yuh cannot replay the workflow for you.',
-    deniedTitle: 'yuh can’t see what you do yet',
+    why: 'This is what makes a recording usable — the buttons you click, the text you type, and the names of the fields you type it into. Without it a recording only shows which apps you opened, and gray cannot replay the workflow for you.',
+    deniedTitle: 'gray can’t see what you do yet',
     deniedSub:
       'Until this is on, recordings only capture app switches — not the clicks and typing needed to rebuild a workflow.',
     settingsPath: [
       'Open System Settings  →  Privacy & Security',
       'Click Accessibility',
-      'Turn on yuh, then come back'
+      'Turn on gray, then come back'
     ],
     whyLine: 'See what you click and type — the clicks, text and field names that make a workflow replayable'
   }
@@ -91,13 +91,13 @@ export default function PermissionsStep({
   }, [whyOpen])
 
   async function allow(id: PermissionId) {
-    const next = await window.ghostBridge?.requestPermission?.(id)
+    const next = await window.grayBridge?.requestPermission?.(id)
     setAttempted((a) => ({ ...a, [id]: true }))
     if (next?.[id] !== 'granted') setStillOff(null)
   }
 
   async function checkAgain(id: PermissionId) {
-    const next = await window.ghostBridge?.getPermissions?.()
+    const next = await window.grayBridge?.getPermissions?.()
     if (next?.[id] !== 'granted') {
       setStillOff(id)
       setShakeId(id)
@@ -113,8 +113,8 @@ export default function PermissionsStep({
     return (
       <CompleteCard
         axGranted={permissions.accessibility === 'granted'}
-        onDone={() => window.ghostBridge?.completeOnboarding?.({})}
-        onRecord={() => window.ghostBridge?.completeOnboarding?.({ openRecordPanel: true })}
+        onDone={() => window.grayBridge?.completeOnboarding?.({})}
+        onRecord={() => window.grayBridge?.completeOnboarding?.({ openRecordPanel: true })}
       />
     )
   }
@@ -137,7 +137,7 @@ export default function PermissionsStep({
           {denied
             ? current.deniedTitle
             : requiredCount === 1 && currentIndex === 0
-              ? 'yuh needs one permission'
+              ? 'gray needs one permission'
               : 'A few more permissions'}
         </div>
       </div>
@@ -146,7 +146,7 @@ export default function PermissionsStep({
           ? current.deniedSub
           : current.optional
             ? 'Strongly recommended — recordings capture very little without it.'
-            : 'macOS asks once. yuh only looks when you start recording.'}
+            : 'macOS asks once. gray only looks when you start recording.'}
       </p>
 
       <div className="onb-gap-sm" />
@@ -183,12 +183,12 @@ export default function PermissionsStep({
                   </div>
                 ))}
                 {stillOff === perm.id && (
-                  <div className="onb-still-off">Still off — the toggle next to yuh should be on</div>
+                  <div className="onb-still-off">Still off — the toggle next to gray should be on</div>
                 )}
                 <div className="onb-block-actions">
                   <button
                     className="btn btn-primary btn-md"
-                    onClick={() => window.ghostBridge?.openPermissionSettings?.(perm.id)}
+                    onClick={() => window.grayBridge?.openPermissionSettings?.(perm.id)}
                   >
                     Open System Settings
                   </button>
@@ -196,8 +196,8 @@ export default function PermissionsStep({
                     Check again
                   </button>
                   {perm.id === 'screen' && (
-                    <button className="onb-link" onClick={() => window.ghostBridge?.restartApp?.()}>
-                      Restart yuh
+                    <button className="onb-link" onClick={() => window.grayBridge?.restartApp?.()}>
+                      Restart gray
                     </button>
                   )}
                   {perm.optional && (
@@ -232,7 +232,7 @@ export default function PermissionsStep({
 
       <div className="onb-why-wrap" ref={whyRef}>
         <button className="onb-terms-link" onClick={() => setWhyOpen((o) => !o)}>
-          Why does yuh need this?
+          Why does gray need this?
         </button>
         {whyOpen && (
           <div className="onb-why-popover">
@@ -290,8 +290,8 @@ function CompleteCard({
       </div>
       <p className="onb-sub">
         {axGranted
-          ? 'yuh can watch which app you’re in, what you click and what you type — only when you start recording.'
-          : 'yuh can only see which app you’re in. Turn on Accessibility later to capture clicks and typing, which workflows need to replay.'}
+          ? 'gray can watch which app you’re in, what you click and what you type — only when you start recording.'
+          : 'gray can only see which app you’re in. Turn on Accessibility later to capture clicks and typing, which workflows need to replay.'}
       </p>
 
       <div className="onb-gap-sm" />

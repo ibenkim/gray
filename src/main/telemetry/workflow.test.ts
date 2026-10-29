@@ -41,7 +41,7 @@ const polished: PolishedSession = {
       category: 'session',
       timestamp: '2026-07-29T04:28:43.154Z',
       sourceEventIds: ['tevt_start'],
-      appName: 'ghost'
+      appName: 'gray'
     },
     {
       order: 2,

@@ -1,10 +1,10 @@
 import { WorkflowProvider } from './state/WorkflowContext'
-import GhostShell from './components/GhostShell'
+import GrayShell from './components/GrayShell'
 
 export default function App() {
   return (
     <WorkflowProvider>
-      <GhostShell />
+      <GrayShell />
     </WorkflowProvider>
   )
 }

@@ -68,7 +68,7 @@ export default function WorkflowsHome({
       }
       if (openMenuId && e.altKey && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
         e.preventDefault()
-        void navigator.clipboard?.writeText?.(`ghost://workflow/${openMenuId}`)
+        void navigator.clipboard?.writeText?.(`gray://workflow/${openMenuId}`)
         setOpenMenuId(null)
       }
     }
@@ -130,7 +130,7 @@ export default function WorkflowsHome({
                 ? 'Nothing shared with the team yet'
                 : recordings.length > 0
                   ? 'No workflows yet — your saved recordings are below'
-                  : 'Nothing here yet — yuh is ready when you are'}
+                  : 'Nothing here yet — gray is ready when you are'}
             </div>
           </div>
         </div>
@@ -141,19 +141,19 @@ export default function WorkflowsHome({
             <div className="ws-empty-desc">
               Do the task once, the way you always do.
               <br />
-              yuh learns the steps — then does it for you, on schedule.
+              gray learns the steps — then does it for you, on schedule.
             </div>
             <button
               className="btn btn-primary btn-md"
               onClick={() => {
-                window.ghostBridge?.minimizeWindow?.()
-                window.ghostBridge?.openRecordPanel?.()
+                window.grayBridge?.minimizeWindow?.()
+                window.grayBridge?.openRecordPanel?.()
               }}
             >
               +  Record a workflow
             </button>
             <div className="ws-empty-hint">
-              yuh will also suggest workflows when it notices you repeating things
+              gray will also suggest workflows when it notices you repeating things
             </div>
           </div>
         )}
@@ -189,7 +189,7 @@ export default function WorkflowsHome({
         {!isShared && (
           <button
             className="btn btn-secondary"
-            onClick={() => window.ghostBridge?.openRecordPanel?.()}
+            onClick={() => window.grayBridge?.openRecordPanel?.()}
           >
             + Record a workflow
           </button>
@@ -287,7 +287,7 @@ export default function WorkflowsHome({
                       <button
                         className="overflow-item"
                         onClick={() => {
-                          void navigator.clipboard?.writeText?.(`ghost://workflow/${w.id}`)
+                          void navigator.clipboard?.writeText?.(`gray://workflow/${w.id}`)
                           setOpenMenuId(null)
                         }}
                       >
@@ -341,13 +341,13 @@ export default function WorkflowsHome({
               <div className="suggested-actions">
                 <button
                   className="btn btn-secondary"
-                  onClick={() => window.ghostBridge?.openEditor?.()}
+                  onClick={() => window.grayBridge?.openEditor?.()}
                 >
                   Set it up for me
                 </button>
                 <button
                   className="btn btn-secondary"
-                  onClick={() => window.ghostBridge?.openRecordPanel?.()}
+                  onClick={() => window.grayBridge?.openRecordPanel?.()}
                 >
                   Record it myself
                 </button>

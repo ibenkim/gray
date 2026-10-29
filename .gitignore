@@ -13,3 +13,10 @@ CLAUDE.md
 docs/
 development-data/
 *.tsbuildinfo
+
+# OpenRig per-project runtime files
+.agents/
+.claude/
+.codex/
+.mcp.json
+.openrig/

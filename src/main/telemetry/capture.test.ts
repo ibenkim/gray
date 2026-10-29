@@ -88,14 +88,14 @@ describe('TelemetryRecorder shortcut strategy', () => {
 })
 
 describe('TelemetryRecorder interaction filtering', () => {
-  it('discards typing that happened inside Ghost itself', async () => {
+  it('discards typing that happened inside Gray itself', async () => {
     const provider = new FakeInteractionProvider()
-    const { events } = await startRecorder(provider, { ignoreAppNames: ['ghost', 'Electron'] })
+    const { events } = await startRecorder(provider, { ignoreAppNames: ['gray', 'Electron'] })
 
     provider.emit!({
       type: 'text_input',
-      target: { appName: 'ghost' },
-      data: { appName: 'ghost', typedText: 'my private note' }
+      target: { appName: 'gray' },
+      data: { appName: 'gray', typedText: 'my private note' }
     })
 
     expect(events.some((e) => e.type === 'text_input')).toBe(false)

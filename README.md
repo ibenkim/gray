@@ -1,4 +1,4 @@
-# Ghost
+# Gray
 
 A transparent, always-on-top floating workflow recorder that lives in the bottom-right corner of your screen. Hover the bubble to configure a recording, capture a workflow across apps, review and edit the learned steps, then run it back.
 
@@ -47,7 +47,7 @@ npm run dev
 
 Onboarding asks for **Screen Recording** (required) and optionally **Accessibility** (richer click/focus/selection capture). Recording still works with Screen Recording alone — Accessibility just produces thicker evidence.
 
-While recording, Ghost captures:
+While recording, Gray captures:
 
 - Frontmost app / window / document title (and URL host/path when available)
 - Focused controls, selected list rows, and field length changes (when Accessibility is granted)
@@ -94,7 +94,7 @@ In development, telemetry defaults to file storage even without a `.env`. Confir
 
 ## State machine
 
-Ghost is an explicit state machine. Each state resizes the floating window and renders a different panel:
+Gray is an explicit state machine. Each state resizes the floating window and renders a different panel:
 
 ```
 idle → hover → recording → organizing → editor → running → summary
@@ -123,7 +123,7 @@ gray/
 │   │   ├── auth.ts            # Mocked sign-in (no real OAuth yet)
 │   │   └── telemetry/         # Capture → sanitize → polish → OpenAI
 │   ├── preload/
-│   │   └── index.ts           # IPC bridge as window.ghostBridge
+│   │   └── index.ts           # IPC bridge as window.grayBridge
 │   ├── renderer/
 │   │   └── src/
 │   │       ├── App.tsx
@@ -143,7 +143,7 @@ gray/
 ## How it works
 
 1. **Main process** (`src/main/index.ts`) opens a `frameless`, `transparent`, `alwaysOnTop` window pinned to the bottom-right of the primary display, plus a system tray icon.
-2. `WorkflowContext` drives the state machine. On each state change it calls `window.ghostBridge.setBounds(w, h)`, and the main process resizes the window while keeping it anchored bottom-right.
+2. `WorkflowContext` drives the state machine. On each state change it calls `window.grayBridge.setBounds(w, h)`, and the main process resizes the window while keeping it anchored bottom-right.
 3. **Recording**: `Start Recording` starts main-process telemetry (`src/main/telemetry/`). Sanitized events stream into the Learning ledger; **Finish** polishes the session and extracts a workflow via one OpenAI Responses call. Dev sessions land under `development-data/telemetry/` (gitignored).
 4. The running state still advances steps on a mock interval until agent execution lands.
 

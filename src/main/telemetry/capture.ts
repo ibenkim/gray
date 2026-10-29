@@ -136,7 +136,7 @@ const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
  * keyframes + an interaction provider that supplies clicks, typing and chords.
  *
  * Typed text is captured, but only ever in redacted form and never from secure
- * fields or from Ghost's own windows.
+ * fields or from Gray's own windows.
  */
 export class TelemetryRecorder {
   private sessionId: string | null = null
@@ -414,7 +414,7 @@ export class TelemetryRecorder {
 
       this.recordEvent('session_started', {
         data: {
-          appName: 'ghost',
+          appName: 'gray',
           message: 'Recording started'
         }
       })
@@ -885,7 +885,7 @@ export class TelemetryRecorder {
   }
 
   /**
-   * Whether events from this app must be discarded — Ghost itself, denylisted apps
+   * Whether events from this app must be discarded — Gray itself, denylisted apps
    * (password managers / banking / messaging), outside the one-app scope, or unknown (M3-C).
    */
   private shouldIgnoreApp(appName?: string): boolean {

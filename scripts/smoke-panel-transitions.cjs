@@ -25,7 +25,7 @@
  *
  * M1-HF3-B: every scenario uses the production Record dropdown wiring (controller factory +
  * relay) with the stationary pill. `--scenario=anchored-dropdown` mounts the actual renderer
- * entry (GhostPill, RecordPanel in the #record-dropdown route, production CSS) in both React
+ * entry (GrayPill, RecordPanel in the #record-dropdown route, production CSS) in both React
  * modes beside an underlying synthetic probe window. It counts every native pill
  * frame/visibility operation, traces pill frames, records computed styles and synthetic-window
  * screenshots, injects load/never-ready/crash failures at the native boundary, and samples
@@ -305,7 +305,7 @@ async function childDom() {
       mode: (document.querySelector('.segment-active') || {}).textContent || null,
       apps: document.querySelectorAll('.app-row').length,
       font: getComputedStyle(document.body).fontFamily,
-      ghostBridge: typeof window.ghostBridge,
+      grayBridge: typeof window.grayBridge,
       // HF4: every app row and its name/detail/icon/radio stay inside the row and panel.
       rowCheck: (() => {
         const pr = p ? p.getBoundingClientRect() : null
@@ -382,7 +382,7 @@ function openWorkspace(focus) {
 
 async function dom(win = pill) {
   return win.webContents.executeJavaScript(`(() => {
-    const root = document.querySelector('.ghost-root')
+    const root = document.querySelector('.gray-root')
     const p = document.querySelector('.pill')
     const m = document.querySelector('.morph-panel')
     const card = m && m.firstElementChild
@@ -527,7 +527,7 @@ async function checkIdle(scenario, expectedAnchor) {
   await sleep(700)
   const s = snap()
   const d = await dom()
-  if (!/ghost-root-pill/.test(d.root) || s.ctl.mode !== 'pill') fail(scenario, 'stale_mode', { root: d.root, mode: s.ctl.mode })
+  if (!/gray-root-pill/.test(d.root) || s.ctl.mode !== 'pill') fail(scenario, 'stale_mode', { root: d.root, mode: s.ctl.mode })
   if (!s.visible || s.bounds.x < -10000) fail(scenario, 'hidden_or_parked', s.bounds)
   if (s.bounds.height > T.PILL_H + 4) fail(scenario, 'tall_idle_frame', s.bounds)
   const br = { x: s.bounds.x + s.bounds.width, y: s.bounds.y + s.bounds.height }
@@ -538,7 +538,7 @@ async function checkIdle(scenario, expectedAnchor) {
     fail(scenario, 'clipped_pill', { pill: d.pill, vw: d.vw, vh: d.vh })
   }
   for (const b of s.backdrops) {
-    if (b.visible && b.opacity > 0 && !s.visible) fail(scenario, 'ghost_backdrop', b)
+    if (b.visible && b.opacity > 0 && !s.visible) fail(scenario, 'gray_backdrop', b)
   }
   if (s.ctl.dragging) fail(scenario, 'stuck_gesture', {})
   if (s.pending > 0) fail(scenario, 'unsettled_promise', { pending: s.pending })
@@ -557,7 +557,7 @@ async function checkOpen(scenario) {
   const d = await dom()
   const c = await childDom()
   const ddBounds = ddChild && !ddChild.isDestroyed() ? ddChild.getBounds() : null
-  if (!ddVisible() || !s.ctl.dropdown.open || !/ghost-root-pill/.test(d.root) || !c || !c.panel) {
+  if (!ddVisible() || !s.ctl.dropdown.open || !/gray-root-pill/.test(d.root) || !c || !c.panel) {
     fail(scenario, 'not_open', { root: d.root, open: s.ctl.dropdown.open, visible: ddVisible(), panel: c && c.panel })
   }
   if (s.bounds.height > T.PILL_H + 4 || s.bounds.width > 260) fail(scenario, 'pill_reshaped_on_open', s.bounds)
@@ -572,7 +572,7 @@ async function checkOpen(scenario) {
 async function ensureIdle() {
   for (let i = 0; i < 3; i++) {
     const d = await dom()
-    if (/ghost-root-pill/.test(d.root) && !ddVisible() && pill.getBounds().height <= T.PILL_H + 4) return
+    if (/gray-root-pill/.test(d.root) && !ddVisible() && pill.getBounds().height <= T.PILL_H + 4) return
     if (ddVisible()) await clickPill()
     await sleep(800)
   }
@@ -697,7 +697,7 @@ async function run() {
       expected = { x: pill.getBounds().x + pill.getBounds().width, y: pill.getBounds().y + pill.getBounds().height }
       if (ctl.inspect().dragging) fail(sc, 'stuck_gesture', { cycle: i })
       const d = await dom()
-      if (!/ghost-root-pill/.test(d.root)) fail(sc, 'post_drag_activation', { cycle: i, root: d.root })
+      if (!/gray-root-pill/.test(d.root)) fail(sc, 'post_drag_activation', { cycle: i, root: d.root })
     }
     // Open/close after the drags must come back to the latest drop point, not an older rect.
     await clickPill()
@@ -788,7 +788,7 @@ async function run() {
     await dragPill(25, 0)
     await sleep(500)
     const afterDrag = await dom()
-    const reopened = !/ghost-root-pill/.test(afterDrag.root)
+    const reopened = !/gray-root-pill/.test(afterDrag.root)
     if (reopened) fail(sc, 'post_drag_click_expanded_panel', { root: afterDrag.root })
     report.scenarios[sc] = { failures: failures.length - before, expandedRoot: expanded.root, collapsedRoot: collapsed.root, afterDragRoot: afterDrag.root }
   }
@@ -903,7 +903,7 @@ async function bundleRenderer(mode) {
     logLevel: 'silent'
   })
   const html = path.join(outdir, 'index.html')
-  fs.writeFileSync(html, '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><title>Ghost</title><link rel="stylesheet" href="main.css"></head><body><div id="root"></div><script src="main.js"></script></body></html>')
+  fs.writeFileSync(html, '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><title>Gray</title><link rel="stylesheet" href="main.css"></head><body><div id="root"></div><script src="main.js"></script></body></html>')
   const js = fs.readFileSync(path.join(outdir, 'main.js'), 'utf8')
   return {
     html,
@@ -1000,7 +1000,7 @@ async function runLifecycle() {
   await createPill(anchor)
   await sleep(1200)
   pill.focus()
-  steps.mount = { initialPillSync: since(0, isPillSync), bridge: await pill.webContents.executeJavaScript('typeof window.ghostBridge.openDropdown'), firstAck: await pill.webContents.executeJavaScript('window.ghostBridge.setBounds(94, 24, "pill", {}).then((a) => Object.keys(a).sort().join(","))') }
+  steps.mount = { initialPillSync: since(0, isPillSync), bridge: await pill.webContents.executeJavaScript('typeof window.grayBridge.openDropdown'), firstAck: await pill.webContents.executeJavaScript('window.grayBridge.setBounds(94, 24, "pill", {}).then((a) => Object.keys(a).sort().join(","))') }
   if (steps.mount.initialPillSync < 1 || steps.mount.bridge !== 'function') fail(sc, 'mount', steps.mount)
   await checkIdle(sc, anchor)
   // A synthetic app window that takes focus for outside-dismissal (never always-on-top).
@@ -1048,7 +1048,7 @@ async function runLifecycle() {
     const i = ipcLog.length
     await dragPill(-37, -11)
     const afterDrag = await rootClass()
-    if (!/ghost-root-pill/.test(afterDrag)) fail(sc, 'post_drag_activation', { root: afterDrag })
+    if (!/gray-root-pill/.test(afterDrag)) fail(sc, 'post_drag_activation', { root: afterDrag })
     const dropped = { x: pill.getBounds().x + pill.getBounds().width, y: pill.getBounds().y + pill.getBounds().height }
     steps.drag = { opensFromDrag: since(i, isOpenReq), next: await clickOpens(sc, 'after-drag') }
     await closesTo(sc, clickPill, dropped)
@@ -1089,8 +1089,8 @@ async function runLifecycle() {
         const p = document.querySelector('.pill')
         const r = p && p.getBoundingClientRect()
         const cs = p && getComputedStyle(p)
-        const rootVis = getComputedStyle(document.querySelector('.ghost-root')).visibility
-        window.__frames.push({ t: Date.now(), root: document.querySelector('.ghost-root').className, vis: document.visibilityState,
+        const rootVis = getComputedStyle(document.querySelector('.gray-root')).visibility
+        window.__frames.push({ t: Date.now(), root: document.querySelector('.gray-root').className, vis: document.visibilityState,
           sx: window.screenX, sy: window.screenY, iw: innerWidth, ih: innerHeight, pill: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
           shown: !!cs && rootVis === 'visible' && cs.visibility === 'visible' && Number(cs.opacity) === 1, filter: cs ? cs.filter : null })
         if (window.__frames.length < 400) requestAnimationFrame(tick)
@@ -1114,16 +1114,16 @@ async function runLifecycle() {
       return last ? last.visible && last.b.x > -10000 : true
     }
     // A misplaced frame: a painted, on-screen pill whose bottom-right is off the anchor.
-    const bad = frames.filter((f) => f.pill && f.vis === 'visible' && visibleAt(f.t) && !/ghost-root-parking/.test(f.root) &&
+    const bad = frames.filter((f) => f.pill && f.vis === 'visible' && visibleAt(f.t) && !/gray-root-parking/.test(f.root) &&
       (Math.abs(f.sx + f.pill.x + f.pill.w - expect.x) > 2 || Math.abs(f.sy + f.pill.y + f.pill.h - expect.y) > 2))
     // Native: visible pill-sized window not at the anchor (macOS painting size before origin).
     const badNative = nat.filter((n) => n.visible && n.b.x > -10000 && n.b.height <= T.PILL_H + 4 &&
       (Math.abs(n.b.x + n.b.width - expect.x) > 2 || Math.abs(n.b.y + n.b.height - expect.y) > 2))
     // Idle content painted while the window is not yet the final pill rect (parked, or still
     // glass-sized): any such frame is what a coalesced macOS hide/resize/show can put on
-    // screen as a pill at the panel's corner. Hidden (.ghost-root-parking) frames are safe.
+    // screen as a pill at the panel's corner. Hidden (.gray-root-parking) frames are safe.
     const fin = pill.getBounds()
-    const reshape = frames.filter((f) => f.pill && /ghost-root-pill/.test(f.root) && !/ghost-root-parking/.test(f.root) &&
+    const reshape = frames.filter((f) => f.pill && /gray-root-pill/.test(f.root) && !/gray-root-parking/.test(f.root) &&
       (f.sx !== fin.x || f.sy !== fin.y || f.iw !== fin.width || f.ih !== fin.height))
     if (reshape.length) fail(sc, 'content_during_reshape', { name, first: reshape[0], count: reshape.length })
     // macOS animates hide: any native hide/show during a close can leave a fading pill at
@@ -1135,7 +1135,7 @@ async function runLifecycle() {
     await checkIdle(sc, expect)
     fs.writeFileSync(path.join(fxReal, 'trace-' + name + '.json'), JSON.stringify({ expect, frames, nat }, null, 1))
     // M1-HF3: the stationary pill is never hidden, filtered, moved or resized by a close.
-    const hidden = frames.filter((f) => !f.pill || !f.shown || /ghost-root-parking/.test(f.root))
+    const hidden = frames.filter((f) => !f.pill || !f.shown || /gray-root-parking/.test(f.root))
     const filtered = frames.filter((f) => f.filter && f.filter !== 'none')
     const reshaped = nat.filter((n) => n.ev === 'move' || n.ev === 'resize' || n.b.x !== fin.x || n.b.y !== fin.y || n.b.width !== fin.width || n.b.height !== fin.height)
     const hiddenTs = hidden.map((f) => f.t)
@@ -1306,7 +1306,7 @@ async function runLifecycle() {
   app.exit(failures.length ? 1 : 0)
 }
 
-// ── M1-HF3-B anchored dropdown: actual renderer, GhostPill/RecordPanel and production CSS ──
+// ── M1-HF3-B anchored dropdown: actual renderer, GrayPill/RecordPanel and production CSS ──
 
 /**
  * CPU/working set of this app's own processes, sampled once a second via app.getAppMetrics().
@@ -1365,7 +1365,7 @@ async function runAnchoredDropdown() {
   report.identity = {
     ...identity, rendererMode: RENDERER_MODE, reactDom: bundle.reactDom, strictMode: bundle.strictMode, sampleSeconds: SAMPLE_SECONDS,
     executable: process.execPath.replace(ROOT, '.'), mainBuild: src('out/main/index.js'),
-    sources: Object.fromEntries(['src/renderer/src/components/RecordDropdown.tsx', 'src/renderer/src/components/panels/RecordPanel.tsx', 'src/renderer/src/components/GhostPill.tsx', 'src/renderer/src/components/GhostShell.tsx', 'src/renderer/src/state/WorkflowContext.tsx', 'src/renderer/src/styles/globals.css', 'src/renderer/src/styles/components.css', 'src/renderer/src/main.tsx', 'src/preload/index.ts'].map((f) => [f.replace('src/', ''), src(f)]))
+    sources: Object.fromEntries(['src/renderer/src/components/RecordDropdown.tsx', 'src/renderer/src/components/panels/RecordPanel.tsx', 'src/renderer/src/components/GrayPill.tsx', 'src/renderer/src/components/GrayShell.tsx', 'src/renderer/src/state/WorkflowContext.tsx', 'src/renderer/src/styles/globals.css', 'src/renderer/src/styles/components.css', 'src/renderer/src/main.tsx', 'src/preload/index.ts'].map((f) => [f.replace('src/', ''), src(f)]))
   }
   if (bundle.reactDom !== (RENDERER_MODE === 'development' ? 'react-dom.development' : 'react-dom.production.min')) {
     refuse('bundled React runtime ' + bundle.reactDom + ' does not match --renderer-mode=' + RENDERER_MODE)
@@ -1422,7 +1422,7 @@ async function runAnchoredDropdown() {
       const tick = () => {
         if (!window.__tracing) return
         const p = document.querySelector('.pill')
-        const root = document.querySelector('.ghost-root')
+        const root = document.querySelector('.gray-root')
         const r = p && p.getBoundingClientRect()
         const cs = p && getComputedStyle(p)
         if (window.__frames.length < 20000) window.__frames.push({ t: Date.now(), x: r ? r.x : null, y: r ? r.y : null, w: r ? r.width : 0, h: r ? r.height : 0,
@@ -1561,7 +1561,7 @@ async function runAnchoredDropdown() {
     if (!shown) fail(sc, 'first_open_not_shown', {})
     if (g.dx !== expected.dx || g.dy !== expected.dy) fail(sc, 'dropdown_misplaced', { g, expected })
     if (!c || !c.panel || Math.abs(c.panel.h - g.height) > 1) fail(sc, 'dropdown_not_fitted_to_panel', { panel: c && c.panel, window: g })
-    if (c && c.ghostBridge !== 'undefined') fail(sc, 'child_has_full_bridge', { ghostBridge: c.ghostBridge })
+    if (c && c.grayBridge !== 'undefined') fail(sc, 'child_has_full_bridge', { grayBridge: c.grayBridge })
     steps.firstOpen = { ...r, firstOpenMs, stages, placement: ctl.inspect().dropdown.placement, dropdown: g, dropdownFocused: ddChild.isFocused(), child: c, childOptions: dd.lastOptions }
   }
   const childId0 = await identityOf(ddChild)
@@ -1715,7 +1715,7 @@ async function runAnchoredDropdown() {
     ddChild.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
     const closed = await waitFor(async () => !ddVisible() && !isOpen())
     await sleep(150)
-    steps.escape = { closed, ...(await traceStop('escape')), pillStateIdle: /ghost-root-pill/.test((await dom()).root) }
+    steps.escape = { closed, ...(await traceStop('escape')), pillStateIdle: /gray-root-pill/.test((await dom()).root) }
     if (!closed) fail(sc, 'escape_did_not_close', {})
   }
   // ── G. Internal focus transfer keeps it open ──
@@ -1739,7 +1739,7 @@ async function runAnchoredDropdown() {
     probe.focus()
     const closed = await waitFor(async () => !ddVisible() && !isOpen(), 1500)
     await sleep(200)
-    steps.outsideFocus = { closed, probeFocused: probe.isFocused(), pillVisible: pill.isVisible(), pillUiIdle: !/hover/.test(await pill.webContents.executeJavaScript('document.querySelector(".ghost-root").className')), ...(await traceStop('outside-focus')) }
+    steps.outsideFocus = { closed, probeFocused: probe.isFocused(), pillVisible: pill.isVisible(), pillUiIdle: !/hover/.test(await pill.webContents.executeJavaScript('document.querySelector(".gray-root").className')), ...(await traceStop('outside-focus')) }
     if (!closed) fail(sc, 'outside_focus_did_not_close', {})
     const c0 = await probeClicks()
     const pb = probe.getBounds()
@@ -1832,13 +1832,13 @@ async function runAnchoredDropdown() {
     await waitFor(async () => crashed.isDestroyed(), 3000)
     await sleep(300)
     f.crash = { childDestroyed: crashed.isDestroyed(), open: isOpen(), pillAlive: !pill.isDestroyed() && pill.isVisible(), pillUi: (await dom()).root }
-    if (!f.crash.childDestroyed || f.crash.open || !f.crash.pillAlive || !/ghost-root-pill/.test(f.crash.pillUi)) fail(sc, 'child_crash', f.crash)
+    if (!f.crash.childDestroyed || f.crash.open || !f.crash.pillAlive || !/gray-root-pill/.test(f.crash.pillUi)) fail(sc, 'child_crash', f.crash)
     // Load failure injected at the native load boundary (nonexistent file).
     const realHtml = rendererHtml
     rendererHtml = path.join(fxReal, 'missing-' + Date.now() + '.html')
     await pillClick()
     await sleep(1500)
-    f.loadFailure = { open: isOpen(), visible: ddVisible(), live: dd.live.size, notice: /ghost-root-pill/.test((await dom()).root) ? 'pill' : (await dom()).root, noticeText: await pill.webContents.executeJavaScript('document.body.innerText.slice(0, 200)') }
+    f.loadFailure = { open: isOpen(), visible: ddVisible(), live: dd.live.size, notice: /gray-root-pill/.test((await dom()).root) ? 'pill' : (await dom()).root, noticeText: await pill.webContents.executeJavaScript('document.body.innerText.slice(0, 200)') }
     if (f.loadFailure.open || f.loadFailure.visible || f.loadFailure.live) fail(sc, 'load_failure', f.loadFailure)
     // Never-ready: a page that loads but never renders the dropdown (no readiness message).
     rendererHtml = path.join(fxReal, 'blank.html')

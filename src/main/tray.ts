@@ -68,16 +68,16 @@ function rebuildMenu(): void {
     : []
   const template: Electron.MenuItemConstructorOptions[] =
     trayMode === 'onboarding'
-      ? [...status, { label: 'Quit Ghost', click: () => app.quit() }]
+      ? [...status, { label: 'Quit Gray', click: () => app.quit() }]
       : [
           ...status,
           { label: 'Show pill', click: () => trayHandlers?.showPill() },
           { label: 'Open Library', click: () => trayHandlers?.openLibrary() },
           { type: 'separator' },
-          { label: 'Quit Ghost', click: () => app.quit() }
+          { label: 'Quit Gray', click: () => app.quit() }
         ]
   tray.setContextMenu(Menu.buildFromTemplate(template))
-  tray.setToolTip(label ? `Ghost — ${label}` : 'Ghost')
+  tray.setToolTip(label ? `Gray — ${label}` : 'Gray')
 }
 
 export function setTrayRecording(phase: RecordingPhase): void {
@@ -99,7 +99,7 @@ export function createTray(handlers: TrayHandlers, mode: TrayMode = 'normal'): T
   }
 
   tray = new Tray(resolveTrayIcon())
-  tray.setToolTip('Ghost')
+  tray.setToolTip('Gray')
   tray.setIgnoreDoubleClickEvents(true)
   rebuildMenu()
 

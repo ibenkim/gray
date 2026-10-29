@@ -128,7 +128,7 @@ export type AutomationRunEvent =
       resolution?: { tier1: number; tier2: number }
     }
 
-const ghostBridge = {
+const grayBridge = {
   /** Resize the pill window; resolves a generation-stamped acknowledgement. */
   setBounds: (
     w: number,
@@ -536,7 +536,7 @@ if (isRecordDropdown) {
 } else if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('ghostBridge', ghostBridge)
+    contextBridge.exposeInMainWorld('grayBridge', grayBridge)
   } catch (error) {
     console.error(error)
   }
@@ -544,5 +544,5 @@ if (isRecordDropdown) {
   // @ts-ignore (non-isolated fallback for dev)
   window.electron = electronAPI
   // @ts-ignore
-  window.ghostBridge = ghostBridge
+  window.grayBridge = grayBridge
 }

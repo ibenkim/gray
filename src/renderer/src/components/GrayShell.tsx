@@ -1,13 +1,13 @@
 import { useEffect } from 'react'
 import { useWorkflow } from '../state/WorkflowContext'
-import GhostPill from './GhostPill'
+import GrayPill from './GrayPill'
 import LearningPanel from './panels/LearningPanel'
 import EditorPanel from './panels/EditorPanel'
 import RunningPanel from './panels/RunningPanel'
 import SummaryPanel from './panels/SummaryPanel'
 import Toast from './shared/Toast'
 
-export default function GhostShell() {
+export default function GrayShell() {
   const {
     state,
     watchExpanded,
@@ -59,10 +59,10 @@ export default function GhostShell() {
     (state === 'running' && !runCollapsed)
 
   const rootClass = [
-    'ghost-root',
-    pillMode ? 'ghost-root-pill' : '',
-    state === 'summary' ? 'ghost-root-summary' : '',
-    panelFlush ? 'ghost-root-panel' : ''
+    'gray-root',
+    pillMode ? 'gray-root-pill' : '',
+    state === 'summary' ? 'gray-root-summary' : '',
+    panelFlush ? 'gray-root-panel' : ''
   ]
     .filter(Boolean)
     .join(' ')
@@ -115,7 +115,7 @@ export default function GhostShell() {
           </div>
         )}
       </div>
-      {!expandedPanel && <GhostPill />}
+      {!expandedPanel && <GrayPill />}
     </div>
   )
 }

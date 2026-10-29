@@ -450,14 +450,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const computeStake = useCallback(async () => {
     setPermStakeTitle('Screen recording was turned off')
-    const snap = await window.ghostBridge?.getSnapshot?.()
+    const snap = await window.grayBridge?.getSnapshot?.()
     const scheduled = (snap?.workflows ?? [])
       .filter((w) => w.status === 'on' && w.trigger.cadence)
       .map((w) => ({ w, when: nextRun(w.trigger) }))
       .filter((x): x is { w: Workflow; when: Date } => x.when != null)
       .sort((a, b) => a.when.getTime() - b.when.getTime())
     if (scheduled.length === 0) {
-      setPermStake('yuh can’t record or run workflows until this is back on.')
+      setPermStake('gray can’t record or run workflows until this is back on.')
       return
     }
     const { w, when } = scheduled[0]
@@ -466,17 +466,17 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       hour: 'numeric',
       minute: '2-digit'
     })
-    setPermStake(`${w.name} is scheduled for ${time}. yuh can’t run it until this is back on.`)
+    setPermStake(`${w.name} is scheduled for ${time}. gray can’t run it until this is back on.`)
   }, [])
 
   useEffect(() => {
     let cancelled = false
-    window.ghostBridge?.getPermissions?.().then((p) => {
+    window.grayBridge?.getPermissions?.().then((p) => {
       if (cancelled || !p) return
       permissionsRef.current = p
       setPermissions(p)
     })
-    const off = window.ghostBridge?.onPermissionsChanged?.((p) => {
+    const off = window.grayBridge?.onPermissionsChanged?.((p) => {
       const prev = permissionsRef.current
       permissionsRef.current = p
       setPermissions(p)
@@ -508,22 +508,22 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const permToastVisible = toastArmed && state !== 'running'
 
   const fixPermission = useCallback(() => {
-    window.ghostBridge?.openPermissionSettings?.('screen')
+    window.grayBridge?.openPermissionSettings?.('screen')
   }, [])
 
   const openScreenRecovery = useCallback(() => {
-    window.ghostBridge?.openPermissionSettings?.('screen')
+    window.grayBridge?.openPermissionSettings?.('screen')
   }, [])
 
   const dismissPermToast = useCallback(() => {
     setToastArmed(false)
-    window.ghostBridge?.setPermissionToastDismissedAt?.(new Date().toISOString())
+    window.grayBridge?.setPermissionToastDismissedAt?.(new Date().toISOString())
   }, [])
 
   // ── Hydrate last-used record settings from the shared store ──
   useEffect(() => {
     let cancelled = false
-    window.ghostBridge?.getSnapshot?.().then((snap) => {
+    window.grayBridge?.getSnapshot?.().then((snap) => {
       if (cancelled || !snap) return
       setRecordModeState(snap.recordSettings.recordMode)
       setSelectedAppIdState(snap.recordSettings.selectedAppId)
@@ -538,7 +538,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const persistRecordSettings = useCallback(
     (next: { recordMode: RecordMode; narrate: boolean; selectedAppId: string }) => {
       if (!settingsReadyRef.current) return
-      window.ghostBridge?.setRecordSettings?.(next)
+      window.grayBridge?.setRecordSettings?.(next)
     },
     []
   )
@@ -569,16 +569,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Keep main's context-menu variant in sync ──
   useEffect(() => {
-    window.ghostBridge?.setPillAppState?.(state)
+    window.grayBridge?.setPillAppState?.(state)
   }, [state])
 
   // ── Editor / summary ink-20 scrim (main hides it when pill is not frontmost) ──
   useEffect(() => {
     const show =
       (state === 'editor' && !editorCollapsed) || state === 'summary'
-    window.ghostBridge?.setEditorScrim?.(show)
+    window.grayBridge?.setEditorScrim?.(show)
     return () => {
-      window.ghostBridge?.setEditorScrim?.(false)
+      window.grayBridge?.setEditorScrim?.(false)
     }
   }, [state, editorCollapsed])
 
@@ -594,8 +594,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const openSavedInLibrary = useCallback(() => {
     const id = savedConfirm?.workflowId
     setSavedConfirm(null)
-    if (id) window.ghostBridge?.openWorkspace?.(id)
-    else window.ghostBridge?.openWorkspace?.()
+    if (id) window.grayBridge?.openWorkspace?.(id)
+    else window.grayBridge?.openWorkspace?.()
   }, [savedConfirm])
 
   // ── Sync window bounds with state ──
@@ -620,7 +620,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       idle: idleSize,
       hover: pillOnly,
       recording: watchExpanded
-        ? // Hug ledger + side/bottom shadow pad; top pad is 0 via .ghost-root-panel.
+        ? // Hug ledger + side/bottom shadow pad; top pad is 0 via .gray-root-panel.
           { w: 321, h: 336, mode: 'panel' }
         : { w: 161, h: 24, mode: 'pill' },
       organizing: { w: 94, h: 24, mode: 'pill' },
@@ -645,7 +645,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     lastBoundsKeyRef.current = key
     const durationMs = 0
     const pillDrive = false
-    void window.ghostBridge?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
+    void window.grayBridge?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
   }, [
     state,
     watchExpanded,
@@ -666,7 +666,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Streaming ledger from real telemetry events ──
   useEffect(() => {
-    const off = window.ghostBridge?.onTelemetryEvent?.((event: TelemetryEvent) => {
+    const off = window.grayBridge?.onTelemetryEvent?.((event: TelemetryEvent) => {
       if (stateRef.current !== 'recording') return
       if (recordPaused) return
       const line = formatWatchEntry(event)
@@ -711,7 +711,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       summaryOutcome,
       runElapsedRef.current
     )
-    window.ghostBridge?.saveRun?.(record)
+    window.grayBridge?.saveRun?.(record)
   }, [state, summaryOutcome])
 
   const hasQuestionHold = runSteps.some(
@@ -732,7 +732,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     )
     if (!held) {
       if (holdMirroredRef.current) {
-        window.ghostBridge?.clearActivityHold?.(active.id)
+        window.grayBridge?.clearActivityHold?.(active.id)
         holdMirroredRef.current = null
       }
       return
@@ -740,7 +740,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const key = `${held.id}:${held.status}`
     if (holdMirroredRef.current === key) return
     holdMirroredRef.current = key
-    window.ghostBridge?.upsertActivityHold?.({
+    window.grayBridge?.upsertActivityHold?.({
       runId: active.id,
       workflowId: active.workflowId,
       name: workflow.name,
@@ -763,7 +763,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       const active = activeRunRef.current
       if (active) {
         active.stopReason = `Stopped — needed help at step ${held.index}`
-        window.ghostBridge?.upsertActivityHold?.({
+        window.grayBridge?.upsertActivityHold?.({
           runId: active.id,
           workflowId: active.workflowId,
           name: workflow.name,
@@ -839,7 +839,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   // Automation runner → ledger
   useEffect(() => {
     if (state !== 'running' || !automationRunRef.current) return
-    const off = window.ghostBridge?.onAutomationRunEvent?.((event) => {
+    const off = window.grayBridge?.onAutomationRunEvent?.((event) => {
       if (activeRunRef.current && event.runId !== activeRunRef.current.id) {
         // Allow main-assigned runId to replace the provisional id.
         if (event.type === 'stepStarted' || event.type === 'finished') {
@@ -944,9 +944,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     })
     if (automationRunRef.current) {
       if (optionId === 'skip') {
-        void window.ghostBridge?.automationRunSkipStep?.()
+        void window.grayBridge?.automationRunSkipStep?.()
       } else {
-        void window.ghostBridge?.automationRunAnswer?.({
+        void window.grayBridge?.automationRunAnswer?.({
           value: custom?.trim() || optionId,
           variableKey: automationVarKeyRef.current
         })
@@ -966,7 +966,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         }
         return next
       })
-      void window.ghostBridge?.automationRunSkipStep?.()
+      void window.grayBridge?.automationRunSkipStep?.()
       return
     }
     setRunSteps((steps) => {
@@ -1009,7 +1009,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           )
         )
         if (automationRunRef.current) {
-          void window.ghostBridge?.automationRunRetryStep?.()
+          void window.grayBridge?.automationRunRetryStep?.()
         }
         return
       }
@@ -1030,7 +1030,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         return next
       })
       if (automationRunRef.current) {
-        void window.ghostBridge?.automationRunTakeOver?.()
+        void window.grayBridge?.automationRunTakeOver?.()
       }
       setRunPaused(true)
     },
@@ -1064,7 +1064,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const startNarrationCapture = useCallback(async (sessionId: string) => {
-    const bridge = window.ghostBridge
+    const bridge = window.grayBridge
     if (!bridge?.narrationStart || !bridge.narrationAppend) return
     const attempt: NarrationAttempt = {
       sessionId,
@@ -1152,12 +1152,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const runHoverOpen = useCallback(async (owned: () => boolean): Promise<boolean> => {
     if (stateRef.current !== 'idle') return false
     setSavedConfirm(null)
-    const ack = await window.ghostBridge?.openDropdown?.()
+    const ack = await window.grayBridge?.openDropdown?.()
     if (!ack?.current) return false
     if (!owned()) {
       // This driver lifetime ended (remount/reload) while main was opening: do not leave a
       // dropdown showing that no current pill state owns.
-      if (ack.open) void window.ghostBridge?.closeDropdown?.()
+      if (ack.open) void window.grayBridge?.closeDropdown?.()
       return false
     }
     if (!ack.open) {
@@ -1166,7 +1166,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       return false
     }
     if (stateRef.current !== 'idle') {
-      void window.ghostBridge?.closeDropdown?.()
+      void window.grayBridge?.closeDropdown?.()
       return false
     }
     if (ack.generation < dropdownClosedGenRef.current) {
@@ -1183,7 +1183,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const runHoverClose = useCallback(async (owned: () => boolean): Promise<boolean> => {
     if (stateRef.current !== 'hover') return false
-    await window.ghostBridge?.closeDropdown?.()
+    await window.grayBridge?.closeDropdown?.()
     if (!owned()) return false
     flushSync(() => setState((s) => (s === 'hover' ? 'idle' : s)))
     return true
@@ -1214,7 +1214,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   // Main closed the dropdown (outside focus, Escape in the child, child failure): follow it.
   // A close older than the latest acknowledged open is stale and ignored.
   useEffect(() => {
-    return window.ghostBridge?.onDropdownClosed?.((event) => {
+    return window.grayBridge?.onDropdownClosed?.((event) => {
       // Recorded before any state check: an open may still be awaiting its reply.
       dropdownClosedGenRef.current = Math.max(dropdownClosedGenRef.current, event.generation)
       if (event.generation <= dropdownGenRef.current) return
@@ -1250,7 +1250,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const startRecording = useCallback(async () => {
     // Guard: cannot start twice.
-    const status = await window.ghostBridge?.getTelemetryStatus?.()
+    const status = await window.grayBridge?.getTelemetryStatus?.()
     if (status?.recording) return
 
     runInFlightRef.current = false
@@ -1258,7 +1258,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     resetRecording()
 
     const wantNarrate = narrate && micGranted
-    const result = await window.ghostBridge?.telemetryStart?.({
+    const result = await window.grayBridge?.telemetryStart?.({
       recordMode,
       selectedAppId,
       narrate: wantNarrate
@@ -1288,7 +1288,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const sessionId = telemetrySessionRef.current
     if (sessionId) {
       try {
-        await window.ghostBridge?.telemetryStop?.({ sessionId, discard: true })
+        await window.grayBridge?.telemetryStop?.({ sessionId, discard: true })
       } catch {
         /* ignore */
       }
@@ -1303,12 +1303,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setState('organizing')
     setRecordingNotice(null)
     const sessionId = telemetrySessionRef.current
-    let result: Awaited<ReturnType<NonNullable<typeof window.ghostBridge>['telemetryStop']>> | undefined
+    let result: Awaited<ReturnType<NonNullable<typeof window.grayBridge>['telemetryStop']>> | undefined
     try {
       // Joins a pause-time end: the same account, never a later zeroed one.
       const audio = await endNarration()
       const owned = narrationRef.current?.sessionId === sessionId ? audio : undefined
-      result = await window.ghostBridge?.telemetryStop?.({
+      result = await window.grayBridge?.telemetryStop?.({
         sessionId: sessionId ?? undefined,
         audio: owned
       })
@@ -1337,7 +1337,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     try {
       const sessionId = telemetrySessionRef.current ?? undefined
       if (recordPaused) {
-        const result = await window.ghostBridge?.telemetryResume?.({ sessionId })
+        const result = await window.grayBridge?.telemetryResume?.({ sessionId })
         if (result?.ok) setRecordPaused(false)
         return
       }
@@ -1346,7 +1346,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       const narrated = !!attempt && attempt.sessionId === sessionId
       const firstEnd = narrated && !attempt.end
       const audio = narrated ? await endNarration() : undefined
-      const result = await window.ghostBridge?.telemetryPause?.({ sessionId, audio })
+      const result = await window.grayBridge?.telemetryPause?.({ sessionId, audio })
       if (!result?.ok) return
       setRecordPaused(true)
       if (firstEnd) {
@@ -1369,7 +1369,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const dropdownRevRef = useRef(0)
   const dropdownBusy = dropdownStarting || (state !== 'idle' && state !== 'hover')
   useEffect(() => {
-    window.ghostBridge?.sendDropdownSnapshot?.({
+    window.grayBridge?.sendDropdownSnapshot?.({
       revision: ++dropdownRevRef.current,
       recordMode,
       selectedAppId,
@@ -1387,7 +1387,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const prev = dropdownPrevStateRef.current
     dropdownPrevStateRef.current = state
-    if (prev === 'hover' && state !== 'hover' && state !== 'idle') void window.ghostBridge?.closeDropdown?.()
+    if (prev === 'hover' && state !== 'hover' && state !== 'idle') void window.grayBridge?.closeDropdown?.()
   }, [state])
 
   const dropdownActionsRef = useRef({ setRecordMode, setSelectedAppId, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted })
@@ -1402,7 +1402,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       dropdownStartRef.current = true
       setDropdownStarting(true)
       try {
-        await window.ghostBridge?.closeDropdown?.()
+        await window.grayBridge?.closeDropdown?.()
         flushSync(() => setState((s) => (s === 'hover' ? 'idle' : s)))
         hoverDriverRef.current?.request('closed')
         await a.startRecording()
@@ -1411,7 +1411,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setDropdownStarting(false)
       }
     }
-    return window.ghostBridge?.onDropdownCommand?.((cmd) => {
+    return window.grayBridge?.onDropdownCommand?.((cmd) => {
       const a = dropdownActionsRef.current
       switch (cmd.type) {
         case 'setRecordMode':
@@ -1427,7 +1427,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           a.openScreenRecovery()
           return
         case 'openMicSettings':
-          window.ghostBridge?.openPermissionSettings?.('microphone')
+          window.grayBridge?.openPermissionSettings?.('microphone')
           return
         case 'start':
           void startFromDropdown()
@@ -1438,7 +1438,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // Main's stop barrier (hide, logout, permission loss, quit) asks this owner to Stop.
   useEffect(() => {
-    return window.ghostBridge?.onTelemetryStopRequested?.((req) => {
+    return window.grayBridge?.onTelemetryStopRequested?.((req) => {
       if (stateRef.current === 'recording' && telemetrySessionRef.current === req.sessionId) {
         void finishRecording()
       }
@@ -1448,7 +1448,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   // Main-owned status is authoritative: mirror pause, and after a reload show the
   // previous session's save instead of offering a second recording.
   useEffect(() => {
-    type Status = Awaited<ReturnType<NonNullable<typeof window.ghostBridge>['getTelemetryStatus']>>
+    type Status = Awaited<ReturnType<NonNullable<typeof window.grayBridge>['getTelemetryStatus']>>
     const apply = (status: Status | undefined) => {
       if (!status?.phase) return
       const mine = !!status.sessionId && status.sessionId === telemetrySessionRef.current
@@ -1489,8 +1489,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         else if (!busy && stateRef.current === 'organizing') setState('idle')
       }
     }
-    void window.ghostBridge?.getTelemetryStatus?.().then(apply)
-    return window.ghostBridge?.onTelemetryStatus?.(apply)
+    void window.grayBridge?.getTelemetryStatus?.().then(apply)
+    return window.grayBridge?.onTelemetryStatus?.(apply)
   }, [resetRecording])
 
   const dismissRecordingNotice = useCallback(() => {
@@ -1502,14 +1502,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     if (!notice?.sessionId || !notice.action) return
     const sessionId = notice.sessionId
     if (notice.action === 'retrySave') {
-      void window.ghostBridge?.telemetryRetrySave?.(sessionId).then((r) => {
+      void window.grayBridge?.telemetryRetrySave?.(sessionId).then((r) => {
         setRecordingNotice(noticeForStopResult(r, sessionId))
       })
       return
     }
     // Review Upload / Library both open the saved recording in the workspace.
     setRecordingNotice(null)
-    void window.ghostBridge?.openWorkspace?.({ sessionId })
+    void window.grayBridge?.openWorkspace?.({ sessionId })
   }, [recordingNotice])
 
   const cancelEditor = useCallback(() => {
@@ -1542,7 +1542,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setState('running')
 
     if (useAutomation && wf.sessionId) {
-      void window.ghostBridge
+      void window.grayBridge
         ?.automationRunStart?.({
           sessionId: wf.sessionId,
           recompileIfNeeded: !!wf.automationStale,
@@ -1585,26 +1585,26 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setEditorCollapsed(false)
         setState('running')
         if (automationRunRef.current) {
-          void window.ghostBridge?.automationRunResume?.()
+          void window.grayBridge?.automationRunResume?.()
         }
         return
       }
       // Preflight: automation needs Accessibility; mock runs need Screen.
       if (wf.sessionId) {
         if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
-          window.ghostBridge?.openPermissionSettings?.('accessibility')
+          window.grayBridge?.openPermissionSettings?.('accessibility')
           setToastArmed(true)
           void computeStake()
           return
         }
       } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
-        window.ghostBridge?.openPermissionSettings?.('screen')
+        window.grayBridge?.openPermissionSettings?.('screen')
         setToastArmed(true)
         void computeStake()
         return
       }
       // Run saves into history first, then runs.
-      window.ghostBridge?.upsertWorkflow?.(wf)
+      window.grayBridge?.upsertWorkflow?.(wf)
       beginRun(wf)
     },
     [beginRun, computeStake, workflow]
@@ -1612,7 +1612,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const saveWorkflow = useCallback(() => {
     runInFlightRef.current = false
-    window.ghostBridge?.upsertWorkflow?.(workflow)
+    window.grayBridge?.upsertWorkflow?.(workflow)
     setSavedConfirm({ workflowId: workflow.id })
     setState('idle')
   }, [workflow])
@@ -1621,7 +1621,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     runInFlightRef.current = true
     setRunPaused(true)
     if (automationRunRef.current) {
-      void window.ghostBridge?.automationRunPause?.()
+      void window.grayBridge?.automationRunPause?.()
     }
     setEditorCollapsed(false)
     setState('editor')
@@ -1631,8 +1631,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setRunPaused((p) => {
       const next = !p
       if (automationRunRef.current) {
-        if (next) void window.ghostBridge?.automationRunPause?.()
-        else void window.ghostBridge?.automationRunResume?.()
+        if (next) void window.grayBridge?.automationRunPause?.()
+        else void window.grayBridge?.automationRunResume?.()
       }
       return next
     })
@@ -1641,7 +1641,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const stopRunning = useCallback(() => {
     runInFlightRef.current = false
     if (automationRunRef.current) {
-      void window.ghostBridge?.automationRunStop?.()
+      void window.grayBridge?.automationRunStop?.()
       automationRunRef.current = false
     }
     if (activeRunRef.current) activeRunRef.current.stopReason = undefined
@@ -1661,7 +1661,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     runPersistedRef.current = false
     if (activeRunRef.current) activeRunRef.current.stopReason = undefined
     automationRunRef.current = false
-    void window.ghostBridge?.automationRunStop?.()
+    void window.grayBridge?.automationRunStop?.()
     runWorkflow()
   }, [runWorkflow, workflow.id, workflow.sessionId])
 
@@ -1681,37 +1681,37 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   // ── Commands from the workspace window / global hotkey ──
   useEffect(() => {
-    const offRecord = window.ghostBridge?.onOpenRecordPanel?.(() => {
+    const offRecord = window.grayBridge?.onOpenRecordPanel?.(() => {
       openHover()
     })
-    const offRun = window.ghostBridge?.onRunWorkflow?.(async (workflowId) => {
+    const offRun = window.grayBridge?.onRunWorkflow?.(async (workflowId) => {
       runInFlightRef.current = false
-      const fromStore = await window.ghostBridge?.getWorkflow?.(workflowId)
+      const fromStore = await window.grayBridge?.getWorkflow?.(workflowId)
       if (!fromStore) {
         console.warn(`[pill] runWorkflow: workflow ${workflowId} not in store`)
         return
       }
       if (fromStore.sessionId) {
         if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
-          window.ghostBridge?.openPermissionSettings?.('accessibility')
+          window.grayBridge?.openPermissionSettings?.('accessibility')
           setToastArmed(true)
           void computeStake()
           return
         }
       } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
-        window.ghostBridge?.openPermissionSettings?.('screen')
+        window.grayBridge?.openPermissionSettings?.('screen')
         setToastArmed(true)
         void computeStake()
         return
       }
       beginRun(fromStore)
     })
-    const offEditor = window.ghostBridge?.onOpenEditor?.(() => {
+    const offEditor = window.grayBridge?.onOpenEditor?.(() => {
       setWorkflow(createMockDraft(newId('draft')))
       setEditorCollapsed(false)
       setState('editor')
     })
-    const offReveal = window.ghostBridge?.onRevealRunning?.(() => {
+    const offReveal = window.grayBridge?.onRevealRunning?.(() => {
       if (stateRef.current === 'running') {
         setRunCollapsed(false)
       }

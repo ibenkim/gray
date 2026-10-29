@@ -92,20 +92,20 @@ const WORKSPACE_W = WORKSPACE_CONTENT_W + WORKSPACE_SHADOW_PAD * 2
 const WORKSPACE_H = WORKSPACE_CONTENT_H + WORKSPACE_SHADOW_PAD * 2
 
 // ── Custom URL scheme (magic-link + invite-link return paths) ──
-// Single-instance so a second `ghost://` launch routes into the running app.
+// Single-instance so a second `gray://` launch routes into the running app.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', (_e, argv) => {
-    const url = argv.find((a) => a.startsWith('ghost://'))
+    const url = argv.find((a) => a.startsWith('gray://'))
     if (url) handleDeepLink(url)
     onboardingWindow?.focus()
   })
 }
 if (is.dev && process.platform === 'win32') {
-  app.setAsDefaultProtocolClient('ghost', process.execPath, [join(__dirname, '..', '..')])
+  app.setAsDefaultProtocolClient('gray', process.execPath, [join(__dirname, '..', '..')])
 } else {
-  app.setAsDefaultProtocolClient('ghost')
+  app.setAsDefaultProtocolClient('gray')
 }
 app.on('open-url', (event, url) => {
   event.preventDefault()
@@ -585,7 +585,7 @@ function handleDeepLink(rawUrl: string) {
   const path = url.pathname.replace(/^\/+/, '')
 
   if (host === 'auth' && path === 'magic') {
-    const email = url.searchParams.get('email') || 'harry@yuh.app'
+    const email = url.searchParams.get('email') || 'harry@gray.so'
     const token = url.searchParams.get('token') || ''
     setSession(sessionForEmail(email))
     if (getSnapshot().onboardingStep === 'welcome') setOnboardingStep('team')
@@ -759,7 +759,7 @@ function registerOnboardingIpc() {
     // Simulate the emailed link arriving: fire the same deep-link path shortly.
     setTimeout(() => {
       handleDeepLink(
-        `ghost://auth/magic?email=${encodeURIComponent(email)}&token=${newId('mtok')}`
+        `gray://auth/magic?email=${encodeURIComponent(email)}&token=${newId('mtok')}`
       )
     }, 1500)
     return { ok: true }
@@ -817,7 +817,7 @@ function registerOnboardingIpc() {
 }
 
 app.whenReady().then(async () => {
-  electronApp.setAppUserModelId('com.ghost')
+  electronApp.setAppUserModelId('com.gray')
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

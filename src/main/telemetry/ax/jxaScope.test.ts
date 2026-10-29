@@ -161,8 +161,8 @@ function sensor(scope: unknown, front: App) {
 }
 
 const CHROME: App = { name: 'Google Chrome', bundleId: 'com.google.Chrome' }
-const ONE_APP_CHROME = { self: ['ghost', 'electron', 'yuh'], deny: ['1password', 'messages'], allow: ['google chrome', 'chrome', 'chromium'] }
-const FULL_SCREEN = { self: ['ghost', 'electron', 'yuh'], deny: ['1password', 'messages'], allow: null }
+const ONE_APP_CHROME = { self: ['gray', 'electron'], deny: ['1password', 'messages'], allow: ['google chrome', 'chrome', 'chromium'] }
+const FULL_SCREEN = { self: ['gray', 'electron'], deny: ['1password', 'messages'], allow: null }
 
 /** One sample, one key, one click, one scroll in the front app; what the sensor read and emitted. */
 function exercise(scope: unknown, front: App, elementApp: string | null = null) {

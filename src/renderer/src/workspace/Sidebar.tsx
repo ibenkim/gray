@@ -39,13 +39,13 @@ export default function Sidebar({
         <button
           className="light light-close"
           onMouseDown={(e) => e.stopPropagation()}
-          onClick={() => window.ghostBridge?.closeWindow?.()}
+          onClick={() => window.grayBridge?.closeWindow?.()}
           title="Close"
         />
         <button
           className="light light-min"
           onMouseDown={(e) => e.stopPropagation()}
-          onClick={() => window.ghostBridge?.minimizeWindow?.()}
+          onClick={() => window.grayBridge?.minimizeWindow?.()}
           title="Minimize"
         />
         <span className="light light-zoom" />
@@ -90,7 +90,7 @@ export default function Sidebar({
               className="team-menu-item"
               onClick={() => {
                 setMenuOpen(false)
-                void window.ghostBridge?.logout?.()
+                void window.grayBridge?.logout?.()
               }}
             >
               Log out

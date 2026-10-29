@@ -92,7 +92,7 @@ Directories are recreated on the next recording (or app start when the store ini
 - Explicit allowlist in `src/shared/telemetry/sanitize.ts` (`VALUE_ALLOWLIST`) for fields whose sanitized values may be stored.
 - Data is sanitized at capture and again on ingest/polish.
 - No pointer/hover streams and no continuous screen video. Sparse keyframes (active window, ≤1/s, JPEG ~70%) are stored as relative paths only and are **not** uploaded to OpenAI in this phase.
-- Events originating from Ghost's own windows are dropped before they are recorded, so typing into the app itself is never captured.
+- Events originating from Gray's own windows are dropped before they are recorded, so typing into the app itself is never captured.
 
 ### Typing capture
 

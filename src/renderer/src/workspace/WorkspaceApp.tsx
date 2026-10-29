@@ -62,10 +62,10 @@ export default function WorkspaceApp() {
 
   useEffect(() => {
     let cancelled = false
-    window.ghostBridge?.getSnapshot?.().then((snap) => {
+    window.grayBridge?.getSnapshot?.().then((snap) => {
       if (!cancelled && snap) applySnapshot(snap)
     })
-    const off = window.ghostBridge?.onStoreChanged?.(applySnapshot)
+    const off = window.grayBridge?.onStoreChanged?.(applySnapshot)
     return () => {
       cancelled = true
       off?.()
@@ -75,10 +75,10 @@ export default function WorkspaceApp() {
   // Recordings: load on open, then follow main's state-change notifications (no polling).
   useEffect(() => {
     let cancelled = false
-    void window.ghostBridge?.telemetryListRecordings?.().then((list) => {
+    void window.grayBridge?.telemetryListRecordings?.().then((list) => {
       if (!cancelled && list) setRecordings(list)
     })
-    const off = window.ghostBridge?.onRecordingChanged?.((summary) => {
+    const off = window.grayBridge?.onRecordingChanged?.((summary) => {
       setRecordings((prev) => {
         const rest = prev.filter((r) => r.sessionId !== summary.sessionId)
         return [summary, ...rest].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
@@ -92,11 +92,11 @@ export default function WorkspaceApp() {
 
   /** Open a completed interpretation as a Library draft, reusing its stable id. */
   async function openInterpretation(sessionId: string) {
-    const r = await window.ghostBridge?.telemetryOpenResult?.(sessionId)
+    const r = await window.grayBridge?.telemetryOpenResult?.(sessionId)
     if (!r?.ok || !r.workflow) return
     // Upsert only when missing so local edits to an opened draft are kept.
     if (!workflows.some((w) => w.id === r.workflow!.id)) {
-      await window.ghostBridge?.upsertWorkflow?.(r.workflow)
+      await window.grayBridge?.upsertWorkflow?.(r.workflow)
     }
     setReviewSessionId(null)
     setDetailId(r.workflow.id)
@@ -112,7 +112,7 @@ export default function WorkspaceApp() {
         setDetailId(null)
         setFocusRunId(null)
         setReviewSessionId(focus.sessionId)
-        const list = await window.ghostBridge?.telemetryListRecordings?.()
+        const list = await window.grayBridge?.telemetryListRecordings?.()
         if (list) setRecordings(list)
         return
       }
@@ -120,7 +120,7 @@ export default function WorkspaceApp() {
       if (focus.runId) {
         let workflowId = focus.workflowId
         if (!workflowId) {
-          const run = await window.ghostBridge?.getRun?.(focus.runId)
+          const run = await window.grayBridge?.getRun?.(focus.runId)
           workflowId = run?.workflowId
         }
         if (workflowId) setDetailId(workflowId)
@@ -133,8 +133,8 @@ export default function WorkspaceApp() {
       }
     }
 
-    const offFocus = window.ghostBridge?.onFocusWorkspace?.(applyFocus)
-    const offLegacy = window.ghostBridge?.onFocusWorkflow?.((workflowId) => {
+    const offFocus = window.grayBridge?.onFocusWorkspace?.(applyFocus)
+    const offLegacy = window.grayBridge?.onFocusWorkflow?.((workflowId) => {
       void applyFocus({ workflowId })
     })
     return () => {
@@ -169,7 +169,7 @@ export default function WorkspaceApp() {
   const detail = detailId ? workflows.find((w) => w.id === detailId) ?? null : null
 
   async function persistWorkflow(next: Workflow) {
-    await window.ghostBridge?.upsertWorkflow?.(next)
+    await window.grayBridge?.upsertWorkflow?.(next)
   }
 
   async function updateWorkflow(id: string, updater: (w: Workflow) => Workflow) {
@@ -192,12 +192,12 @@ export default function WorkspaceApp() {
   }
 
   async function skipOccurrence(entryId: string) {
-    await window.ghostBridge?.skipActivity?.(entryId)
+    await window.grayBridge?.skipActivity?.(entryId)
   }
 
   async function discardSuggestion() {
     if (!suggestion) return
-    await window.ghostBridge?.discardSuggestion?.(suggestion.id)
+    await window.grayBridge?.discardSuggestion?.(suggestion.id)
   }
 
   async function duplicateWorkflow(id: string) {
@@ -229,7 +229,7 @@ export default function WorkspaceApp() {
   }
 
   async function deleteWorkflow(id: string) {
-    await window.ghostBridge?.deleteWorkflow?.(id)
+    await window.grayBridge?.deleteWorkflow?.(id)
     setDetailId(null)
     setFocusRunId(null)
   }
@@ -357,7 +357,7 @@ export default function WorkspaceApp() {
                 setFocusRunId(runId)
               }}
               onSkip={skipOccurrence}
-              onAnswerHold={() => window.ghostBridge?.revealRunning?.()}
+              onAnswerHold={() => window.grayBridge?.revealRunning?.()}
             />
           )}
         </div>

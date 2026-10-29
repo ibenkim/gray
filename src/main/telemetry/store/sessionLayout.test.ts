@@ -14,7 +14,7 @@ describe('FileTelemetryStore session layout', () => {
   })
 
   it('writes new sessions under sessions/{id}/', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'ghost-sess-'))
+    dir = mkdtempSync(join(tmpdir(), 'gray-sess-'))
     const store = new FileTelemetryStore(dir, { isPackaged: false, isDev: true })
     await store.createSession({ sessionId: 'tsess_new' })
 
@@ -46,7 +46,7 @@ describe('FileTelemetryStore session layout', () => {
   })
 
   it('reads legacy flat paths as fallback', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'ghost-legacy-'))
+    dir = mkdtempSync(join(tmpdir(), 'gray-legacy-'))
     mkdirSync(join(dir, 'meta'), { recursive: true })
     mkdirSync(join(dir, 'normalized'), { recursive: true })
     mkdirSync(join(dir, 'narration'), { recursive: true })
@@ -122,7 +122,7 @@ describe('FileTelemetryStore automation path (session layout)', () => {
   })
 
   it('persists automation.json under the session directory', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'ghost-auto-sess-'))
+    dir = mkdtempSync(join(tmpdir(), 'gray-auto-sess-'))
     const store = new FileTelemetryStore(dir, { isPackaged: false, isDev: true })
     await store.createSession({ sessionId: 'tsess_file' })
     await store.saveAutomationScript(

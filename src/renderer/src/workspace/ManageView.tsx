@@ -46,11 +46,11 @@ export default function ManageView({
       setNameDraft(team.name)
       return
     }
-    await window.ghostBridge?.teamRename?.(next)
+    await window.grayBridge?.teamRename?.(next)
   }
 
   async function sendInvite() {
-    const res = await window.ghostBridge?.teamInvite?.(email)
+    const res = await window.grayBridge?.teamInvite?.(email)
     if (res?.error) {
       setEmailError(true)
       return
@@ -181,7 +181,7 @@ export default function ManageView({
           onConfirm={() => {
             const id = removeTarget.id
             setRemoveTarget(null)
-            void window.ghostBridge?.teamRemoveMember?.(id)
+            void window.grayBridge?.teamRemoveMember?.(id)
           }}
         >
           <p className="delete-dialog-target">{removeTarget.name}</p>
@@ -239,13 +239,13 @@ function InvitedRow({ invite, canManage }: { invite: Invite; canManage: boolean 
         <>
           <button
             className="manage-invite-resend"
-            onClick={() => void window.ghostBridge?.teamResendInvite?.(invite.id)}
+            onClick={() => void window.grayBridge?.teamResendInvite?.(invite.id)}
           >
             Resend
           </button>
           <button
             className="manage-invite-revoke"
-            onClick={() => void window.ghostBridge?.teamRevokeInvite?.(invite.id)}
+            onClick={() => void window.grayBridge?.teamRevokeInvite?.(invite.id)}
           >
             Revoke
           </button>

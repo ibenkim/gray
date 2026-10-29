@@ -29,21 +29,21 @@ export default function OnboardingApp() {
 
   useEffect(() => {
     let cancelled = false
-    window.ghostBridge?.getSnapshot?.().then((snap) => {
+    window.grayBridge?.getSnapshot?.().then((snap) => {
       if (cancelled || !snap) return
       setStep(snap.onboardingStep)
       setSession(snap.session)
     })
-    window.ghostBridge?.getPermissions?.().then((p) => {
+    window.grayBridge?.getPermissions?.().then((p) => {
       if (!cancelled && p) setPermissions(p)
     })
 
-    const offStore = window.ghostBridge?.onStoreChanged?.((snap) => {
+    const offStore = window.grayBridge?.onStoreChanged?.((snap) => {
       setStep(snap.onboardingStep)
       setSession(snap.session)
     })
-    const offPerms = window.ghostBridge?.onPermissionsChanged?.((p) => setPermissions(p))
-    const offLink = window.ghostBridge?.onDeepLink?.((link) => {
+    const offPerms = window.grayBridge?.onPermissionsChanged?.((p) => setPermissions(p))
+    const offLink = window.grayBridge?.onDeepLink?.((link) => {
       // Arrived via an invite link: pre-fill Join. Magic / Google links advance
       // the step in main, which propagates back through the store subscription.
       if (link.kind === 'invite') setPendingInvite(link.code)
@@ -69,7 +69,7 @@ export default function OnboardingApp() {
       if (!el) return
       const w = Math.ceil(el.offsetWidth) + ONB_SHADOW_PAD * 2
       const h = Math.ceil(el.offsetHeight) + ONB_SHADOW_PAD * 2
-      window.ghostBridge?.setOnboardingSize?.(w, h)
+      window.grayBridge?.setOnboardingSize?.(w, h)
     }
 
     report()
@@ -85,7 +85,7 @@ export default function OnboardingApp() {
         <TeamStep
           session={session}
           pendingInvite={pendingInvite}
-          onBack={() => window.ghostBridge?.setOnboardingStep?.('welcome')}
+          onBack={() => window.grayBridge?.setOnboardingStep?.('welcome')}
         />
       )}
       {(step === 'permissions' || step === 'complete') && (

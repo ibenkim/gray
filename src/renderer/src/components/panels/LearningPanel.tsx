@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useWorkflow } from '../../state/WorkflowContext'
-import { PauseButton, ChevronDown } from '../GhostPill'
+import { PauseButton, ChevronDown } from '../GrayPill'
 import MicIcon from '../ui/MicIcon'
 import AppChip from '../shared/AppChip'
 import { useWindowDrag } from '../../hooks/useWindowDrag'

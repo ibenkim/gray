@@ -3,7 +3,7 @@ import { useWorkflow } from '../../state/WorkflowContext'
 import type { RunStep } from '../../state/types'
 import AppChip from '../shared/AppChip'
 import RunCard from '../shared/RunCard'
-import { PauseButton, ChevronDown } from '../GhostPill'
+import { PauseButton, ChevronDown } from '../GrayPill'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 import RailCell from '../shared/RailCell'
 
@@ -72,7 +72,7 @@ export default function RunningPanel() {
           <div className="run-card run-card-question">
             <div className="run-card-title">Paused — needs permission</div>
             <div className="run-card-message">
-              A permission yuh needs was turned off mid-run. Turn it back on and the run resumes
+              A permission gray needs was turned off mid-run. Turn it back on and the run resumes
               automatically.
             </div>
             <div className="fix-options">

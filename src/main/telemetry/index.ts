@@ -892,7 +892,7 @@ export function registerTelemetryIpc(): void {
           ownerEmail: auth.email ?? opts.ownerEmail,
           ignoreAppNames: Array.isArray(opts.ignoreAppNames)
             ? opts.ignoreAppNames
-            : ['ghost', 'Electron', 'yuh'],
+            : ['gray', 'Electron'],
           beforeSources: async (sessionId) => {
             o.sessionId = sessionId
             if (opts.narrate) await beginNarrationCapture(sessionId)

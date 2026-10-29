@@ -9,7 +9,7 @@ import {
   RunContractPanel,
   WorkflowSummary
 } from '../shared/ReviewSections'
-import { ChevronDown } from '../GhostPill'
+import { ChevronDown } from '../GrayPill'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 
 /**
@@ -163,7 +163,7 @@ export default function EditorPanel() {
                   setWorkflow((w) => {
                     const nextSteps = updater(w.steps)
                     if (w.sessionId) {
-                      void window.ghostBridge?.automationMarkStale?.(
+                      void window.grayBridge?.automationMarkStale?.(
                         w.sessionId,
                         true,
                         nextSteps.map((s) => ({ index: s.index, title: s.title }))

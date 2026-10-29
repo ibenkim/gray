@@ -1,5 +1,5 @@
 {
-  "name": "ghost",
+  "name": "gray",
   "version": "0.1.0",
   "description": "A transparent floating AI assistant that lives in the bottom-right corner of your screen.",
   "main": "out/main/index.js",

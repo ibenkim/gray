@@ -58,7 +58,7 @@ describe('FileTelemetryStore automation', () => {
   })
 
   it('persists automation/<sessionId>.json', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'ghost-auto-'))
+    dir = mkdtempSync(join(tmpdir(), 'gray-auto-'))
     const store = new FileTelemetryStore(dir, { isPackaged: false, isDev: true })
     await store.ensureReady()
     await store.createSession({ sessionId: 'tsess_file' })

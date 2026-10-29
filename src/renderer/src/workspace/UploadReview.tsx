@@ -280,7 +280,7 @@ export default function UploadReview({
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
-    const bridge = window.ghostBridge
+    const bridge = window.grayBridge
     setError(null)
     const current = await bridge?.telemetryGetRecording?.(sessionId)
     const rec = current?.recording ?? null
@@ -297,7 +297,7 @@ export default function UploadReview({
 
   useEffect(() => {
     void load()
-    const off = window.ghostBridge?.onRecordingChanged?.((s) => {
+    const off = window.grayBridge?.onRecordingChanged?.((s) => {
       if (s.sessionId === sessionId) setSummary(s)
     })
     return () => off?.()
@@ -307,7 +307,7 @@ export default function UploadReview({
     if (!preview) return
     setBusy(true)
     setError(null)
-    const r = await window.ghostBridge?.telemetryApproveInterpretation?.({
+    const r = await window.grayBridge?.telemetryApproveInterpretation?.({
       sessionId,
       revision: preview.revision,
       digest: preview.digest,
@@ -323,13 +323,13 @@ export default function UploadReview({
   }
 
   async function keepLocal() {
-    await window.ghostBridge?.telemetryCancelReview?.(sessionId)
+    await window.grayBridge?.telemetryCancelReview?.(sessionId)
     onClose()
   }
 
   async function retrySave() {
     setBusy(true)
-    const r = await window.ghostBridge?.telemetryRetrySave?.(sessionId)
+    const r = await window.grayBridge?.telemetryRetrySave?.(sessionId)
     setBusy(false)
     if (r?.recording) setSummary(r.recording)
     if (r?.ok) void load()

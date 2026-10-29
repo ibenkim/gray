@@ -7,7 +7,7 @@ import type { Session } from '../shared/types'
  * opening a fake Google OAuth URL looks like phishing to Gatekeeper / users.
  */
 
-const MOCK_ACCOUNT = { email: 'harry@yuh.app', displayName: 'Harry' }
+const MOCK_ACCOUNT = { email: 'harry@gray.so', displayName: 'Harry' }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))

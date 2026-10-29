@@ -101,7 +101,7 @@ export type AppScope = { self: string[]; deny: string[]; allow: string[] | null 
 export function appScope(opts: { recordMode?: string; selectedAppId?: string; ignoreAppNames?: string[] }): AppScope {
   const selected = opts.recordMode === 'one-app' && opts.selectedAppId ? opts.selectedAppId.toLowerCase() : null
   return {
-    self: (opts.ignoreAppNames ?? ['ghost', 'Electron', 'yuh']).map((n) => n.toLowerCase()),
+    self: (opts.ignoreAppNames ?? ['gray', 'Electron']).map((n) => n.toLowerCase()),
     deny: APP_DENYLIST,
     allow: selected ? (APP_ALIASES[selected] ?? [selected]) : null
   }

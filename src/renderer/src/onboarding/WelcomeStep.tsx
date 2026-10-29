@@ -18,7 +18,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
     setError(null)
     setBusy(true)
     try {
-      const result = await window.ghostBridge?.authGoogle?.()
+      const result = await window.grayBridge?.authGoogle?.()
       if (!result) setError('Couldn’t sign in — try again')
     } catch {
       setError('Couldn’t sign in — try again')
@@ -30,7 +30,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
   async function sendMagicLink() {
     if (!email.trim()) return
     setError(null)
-    const res = await window.ghostBridge?.authSendMagicLink?.(email.trim())
+    const res = await window.grayBridge?.authSendMagicLink?.(email.trim())
     if (res?.ok) setMode('sent')
     else setError('That doesn’t look like an email — check and try again')
   }
@@ -39,7 +39,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
     <div className="onb-card">
       <div className="onb-card-drag" onMouseDown={onDragMouseDown}>
         <div className="onb-eyebrow">WELCOME</div>
-        <div className="onb-title">Meet yuh</div>
+        <div className="onb-title">Meet gray</div>
       </div>
       <p className="onb-sub">
         Show it a task once. It learns the steps,
@@ -94,7 +94,7 @@ export default function WelcomeStep({ session }: { session: Session }) {
       <div className="onb-terms type-meta">
         <button
           className="onb-terms-link"
-          onClick={() => window.ghostBridge?.openExternalUrl?.(TERMS_URL)}
+          onClick={() => window.grayBridge?.openExternalUrl?.(TERMS_URL)}
         >
           By continuing you agree to the Terms & Privacy Policy
         </button>

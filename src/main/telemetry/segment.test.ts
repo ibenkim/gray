@@ -23,7 +23,7 @@ describe('segmentActions', () => {
         order: 1,
         text: 'Started recording',
         category: 'session',
-        appName: 'ghost'
+        appName: 'gray'
       }),
       action({
         order: 2,

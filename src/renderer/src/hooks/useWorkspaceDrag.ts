@@ -21,13 +21,13 @@ export function useWorkspaceDrag() {
       const dy = e.clientY - pressStart.current.y
       if (dx * dx + dy * dy < 16) return
       dragging.current = true
-      window.ghostBridge?.dragStart?.(e.clientX, e.clientY, { collapseToPill: false })
+      window.grayBridge?.dragStart?.(e.clientX, e.clientY, { collapseToPill: false })
     }
     function onUp() {
       pressStart.current = null
       if (!dragging.current) return
       dragging.current = false
-      window.ghostBridge?.dragEnd?.()
+      window.grayBridge?.dragEnd?.()
     }
     function onNativeDragStart(e: DragEvent) {
       e.preventDefault()

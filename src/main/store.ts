@@ -29,7 +29,7 @@ let snapshot: StoreSnapshot = createSeedSnapshot()
 let persistTimer: ReturnType<typeof setTimeout> | null = null
 
 function storePath(): string {
-  return join(app.getPath('userData'), 'ghost-data.json')
+  return join(app.getPath('userData'), 'gray-data.json')
 }
 
 function normalizeWorkflow(raw: unknown): Workflow | null {

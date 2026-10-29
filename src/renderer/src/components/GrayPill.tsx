@@ -7,7 +7,7 @@ import { PlayPauseControl } from './shared/Marks'
  * The pill IS the character — a paper capsule whose content changes with state.
  * Rendered only in collapsed states; expanded panels replace it.
  */
-export default function GhostPill() {
+export default function GrayPill() {
   const {
     state,
     savedConfirm,
@@ -44,7 +44,7 @@ export default function GhostPill() {
   function handleContextMenu(e: React.MouseEvent) {
     e.preventDefault()
     if (state === 'hover') closeHover()
-    window.ghostBridge?.showContextMenu?.()
+    window.grayBridge?.showContextMenu?.()
   }
 
   const sharedProps = {

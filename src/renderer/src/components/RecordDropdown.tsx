@@ -16,7 +16,7 @@ let seq = 0
 /**
  * The Record dropdown window (M1-HF3). Renders the real RecordPanel from the pill's snapshot
  * and sends explicit commands back; the pill remains the only form, recording and narration
- * owner. No provider, capture or ghostBridge exists in this window.
+ * owner. No provider, capture or grayBridge exists in this window.
  */
 export default function RecordDropdown() {
   const bridge = window.grayDropdown

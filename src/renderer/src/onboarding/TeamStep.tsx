@@ -26,7 +26,7 @@ export default function TeamStep({
     if (!pendingInvite) return
     setChoice('join')
     setCode(pendingInvite)
-    window.ghostBridge?.teamPreview?.(pendingInvite).then((res) => {
+    window.grayBridge?.teamPreview?.(pendingInvite).then((res) => {
       if (res?.ok && res.team) setInvitePreview(res.team)
     })
   }, [pendingInvite])
@@ -35,10 +35,10 @@ export default function TeamStep({
     setBusy(true)
     try {
       if (choice === 'create') {
-        await window.ghostBridge?.teamCreate?.()
+        await window.grayBridge?.teamCreate?.()
         return
       }
-      const res = await window.ghostBridge?.teamJoin?.(code)
+      const res = await window.grayBridge?.teamJoin?.(code)
       if (!res?.ok) {
         setInvalid(true)
         return

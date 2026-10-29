@@ -134,7 +134,7 @@ export default function SummaryPanel() {
         <button
           className="btn btn-quiet"
           onClick={() =>
-            window.ghostBridge?.openWorkspace?.(
+            window.grayBridge?.openWorkspace?.(
               lastRunId
                 ? { workflowId: workflow.id, runId: lastRunId }
                 : { workflowId: workflow.id }

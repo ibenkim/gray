@@ -133,7 +133,7 @@ declare global {
       dragEnd: (token: number | null) => Promise<boolean>
       onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => () => void
     }
-    ghostBridge: {
+    grayBridge: {
       openDropdown: () => Promise<DropdownAck>
       closeDropdown: () => Promise<DropdownAck | null>
       sendDropdownSnapshot: (snapshot: RecordDropdownSnapshot) => void
