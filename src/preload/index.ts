@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import { BUILD, type BuildStamp } from '../shared/build'
 import type {
   DeepLink,
   DropdownAck,
@@ -128,7 +129,12 @@ export type AutomationRunEvent =
       resolution?: { tier1: number; tier2: number }
     }
 
+// M4: this preload's own build stamp; main logs whether it matches main's.
+ipcRenderer.send('build:report', 'preload', BUILD)
+
 const grayBridge = {
+  /** The renderer reports its own build stamp (M4). */
+  reportBuild: (stamp: BuildStamp): void => ipcRenderer.send('build:report', 'renderer', stamp),
   /** Resize the pill window; resolves a generation-stamped acknowledgement. */
   setBounds: (
     w: number,

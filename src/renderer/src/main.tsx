@@ -11,8 +11,12 @@ import './styles/globals.css'
 import './styles/components.css'
 import './styles/workspace.css'
 import './styles/onboarding.css'
+import { reportBuild } from './reportBuild'
 
 const hash = window.location.hash
+
+// M4: the renderer's own build stamp, logged by main against its own.
+reportBuild(window.grayBridge)
 
 function Root() {
   if (hash === '#workspace') return <WorkspaceApp />

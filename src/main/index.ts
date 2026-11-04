@@ -1,5 +1,5 @@
 import { config as loadDotenv } from 'dotenv'
-import { app, shell, BrowserWindow, ipcMain, screen, Menu, globalShortcut } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, screen, Menu, globalShortcut, Notification } from 'electron'
 import { join, resolve } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
@@ -38,6 +38,7 @@ import {
   teamFromInvite
 } from './team'
 import { newId } from '../shared/id'
+import { buildLabel, registerBuildReports, runtimeIdentity } from './buildInfo'
 import type { DeepLink, PermissionsState, WorkspaceFocus } from '../shared/types'
 import {
   createRecordDropdownWiring,
@@ -91,15 +92,28 @@ const WORKSPACE_SHADOW_PAD = 36
 const WORKSPACE_W = WORKSPACE_CONTENT_W + WORKSPACE_SHADOW_PAD * 2
 const WORKSPACE_H = WORKSPACE_CONTENT_H + WORKSPACE_SHADOW_PAD * 2
 
+// M4: an isolated data folder for development and synthetic runs; ignored when packaged.
+// Set before the single-instance lock, which is per userData.
+if (!app.isPackaged && process.env['GRAY_USER_DATA_DIR']) {
+  app.setPath('userData', resolve(process.env['GRAY_USER_DATA_DIR']))
+}
+
 // ── Custom URL scheme (magic-link + invite-link return paths) ──
 // Single-instance so a second `gray://` launch routes into the running app.
 if (!app.requestSingleInstanceLock()) {
-  app.quit()
+  console.log('[gray] Gray is already running with this data folder; focusing it instead of starting this build')
+  // exit, not quit: quit is asynchronous and would still run the ready handler (store, telemetry).
+  app.exit(0)
 } else {
   app.on('second-instance', (_e, argv) => {
     const url = argv.find((a) => a.startsWith('gray://'))
     if (url) handleDeepLink(url)
     onboardingWindow?.focus()
+    // M4: a relaunch did not start a new build; say which one is still running.
+    if (!url && Notification.isSupported()) {
+      new Notification({ title: 'Gray is already running', body: buildLabel() }).show()
+    }
+    console.log(`[gray] second launch focused the running instance (pid ${process.pid}, ${buildLabel()})`)
   })
 }
 if (is.dev && process.platform === 'win32') {
@@ -818,6 +832,13 @@ function registerOnboardingIpc() {
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.gray')
+  // M4 diagnostics never block startup.
+  try {
+    console.log(runtimeIdentity())
+    registerBuildReports()
+  } catch (err) {
+    console.error('[gray] build identity unavailable', err instanceof Error ? err.message : 'error')
+  }
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

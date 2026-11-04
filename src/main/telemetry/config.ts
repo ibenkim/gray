@@ -1,6 +1,6 @@
 import { config as loadDotenv } from 'dotenv'
 import { app } from 'electron'
-import { isAbsolute, resolve } from 'path'
+import { isAbsolute, join, resolve } from 'path'
 import { normalizeOpenAiApiKey } from './openaiKey'
 
 export type TelemetryStorageKind = 'file' | 'none'
@@ -48,7 +48,11 @@ export function loadTelemetryConfig(): TelemetryConfig {
   const isPackaged = app.isPackaged
   const isDev = !isPackaged
   const storage = parseStorage(process.env.TELEMETRY_STORAGE, isDev)
-  const rawDir = process.env.TELEMETRY_DEV_DIR || './development-data/telemetry'
+  // M4: an isolated profile keeps its recordings inside it, never in the shared folder.
+  const isolated = isDev && process.env.GRAY_USER_DATA_DIR
+  const rawDir = isolated
+    ? join(resolve(isolated), 'telemetry')
+    : process.env.TELEMETRY_DEV_DIR || './development-data/telemetry'
   const devDir = isAbsolute(rawDir) ? rawDir : resolve(process.cwd(), rawDir)
 
   return {

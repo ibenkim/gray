@@ -42,6 +42,15 @@ npm run dev
 | `npm test` | Run unit tests (Vitest) |
 | `npm run typecheck` | TypeScript project build check |
 | `npm run build` | Compile main / preload / renderer to `out/` |
+| `npm start` | Build, then launch the built app (never runs stale `out/`) |
+
+### Which build is running?
+
+Every build is stamped with its commit, a `+dirty` marker for uncommitted changes, its build time and the package version. The tray menu's first line shows it (e.g. `Gray 0.1.0 · bb6969e+dirty · dev`), and the main process logs one startup line with the loaded main/preload/renderer paths, the data folder and the process ID.
+
+- `npm run dev`: renderer edits hot-reload; **main and preload changes need a restart** (stop and run `npm run dev` again). Auto-restart is deferred until it is proven safe mid-recording.
+- Launching Gray while it is already running does not start the new build: the running one is focused and a notification names its build. Quit it from the tray first.
+- `GRAY_USER_DATA_DIR=/some/folder npm run dev` uses a separate data folder (settings, login, unsent telemetry) for experiments and tests; ignored by packaged builds. It also lets a second copy run alongside your normal one.
 
 ## Permissions and privacy
 

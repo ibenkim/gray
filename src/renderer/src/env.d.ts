@@ -134,6 +134,7 @@ declare global {
       onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => () => void
     }
     grayBridge: {
+      reportBuild?: (stamp: import('../../shared/build').BuildStamp) => void
       openDropdown: () => Promise<DropdownAck>
       closeDropdown: () => Promise<DropdownAck | null>
       sendDropdownSnapshot: (snapshot: RecordDropdownSnapshot) => void

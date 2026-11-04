@@ -1,6 +1,7 @@
 import { app, Menu, Tray, nativeImage } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { buildLabel } from './buildInfo'
 
 /** Fallback when the file isn't found (embedded 32×32 template circle). */
 const TRAY_PNG_BASE64 =
@@ -63,9 +64,12 @@ const PHASE_LABEL: Partial<Record<RecordingPhase, string>> = {
 function rebuildMenu(): void {
   if (!tray) return
   const label = PHASE_LABEL[recordingPhase]
-  const status: Electron.MenuItemConstructorOptions[] = label
-    ? [{ label, enabled: false }, { type: 'separator' }]
-    : []
+  // M4: which build is running, always first.
+  const status: Electron.MenuItemConstructorOptions[] = [
+    { label: buildLabel(), enabled: false },
+    ...(label ? [{ label, enabled: false }] : []),
+    { type: 'separator' }
+  ]
   const template: Electron.MenuItemConstructorOptions[] =
     trayMode === 'onboarding'
       ? [...status, { label: 'Quit Gray', click: () => app.quit() }]
