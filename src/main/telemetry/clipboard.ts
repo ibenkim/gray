@@ -1,5 +1,4 @@
 import { createHash } from 'crypto'
-import { clipboard } from 'electron'
 import type { ClipboardContentType, ClipboardData } from '../../shared/telemetry/schema'
 import { sanitizeTypedText, sanitizeUrl } from '../../shared/telemetry/sanitize'
 
@@ -15,44 +14,21 @@ export type ClipboardChange = {
 export type ClipboardWatcherOptions = {
   /** Hashes Gray itself wrote — ignore so we don't echo our own clipboard. */
   ignoreHashes?: Set<string>
-  readText?: () => string
-  readFormats?: () => string[]
-  now?: () => number
 }
 
 /**
- * Reads the clipboard only when asked (M3-B): the recorder calls `readNow` after an observed
- * in-scope copy/cut chord. No timer, no read at Start/Resume, no raw plaintext kept. Never
- * registers global shortcuts, so Cmd+C/V keep working in the target app.
+ * Classifies a verified copy (M3-B). The main process never reads the clipboard: the
+ * accessibility sensor reads it once, after an in-scope Cmd/Ctrl+C|X that changed the
+ * pasteboard exactly once (see `checkCopy` in ax/jxaScript.ts). No raw plaintext is kept.
  */
 export class ClipboardWatcher {
   private lastHash: string | null = null
   private readonly ignoreHashes: Set<string>
-  private readonly readText: () => string
-  private readonly readFormats: () => string[]
-  /** Most recent non-sensitive clipboard snapshot for paste inference. */
-  private latest: { at: number; clipboard: ClipboardData } | null = null
+  /** Most recent recorded copy and the pasteboard changeCount it was read at. */
+  private latest: { at: number; clipboard: ClipboardData; pasteboard?: number } | null = null
 
   constructor(opts: ClipboardWatcherOptions = {}) {
     this.ignoreHashes = opts.ignoreHashes ?? new Set()
-    this.readText =
-      opts.readText ??
-      (() => {
-        try {
-          return clipboard.readText() || ''
-        } catch {
-          return ''
-        }
-      })
-    this.readFormats =
-      opts.readFormats ??
-      (() => {
-        try {
-          return clipboard.availableFormats()
-        } catch {
-          return []
-        }
-      })
   }
 
   /** Forget the previous session's copy (de-duplication and paste matching start clean). */
@@ -61,30 +37,29 @@ export class ClipboardWatcher {
     this.lastHash = null
   }
 
-  /** One read after an observed in-scope copy; null when unchanged, sensitive or empty. */
-  readNow(): ClipboardChange | null {
-    return this.process(this.readText(), this.readFormats())
+  /**
+   * The last recorded copy, only while the pasteboard still holds it: `pasteboard` is the
+   * current changeCount, so content copied elsewhere since (or never verified) matches nothing.
+   */
+  getLatest(pasteboard?: number): { at: number; clipboard: ClipboardData } | null {
+    const latest = this.latest
+    if (!latest || latest.pasteboard === undefined || latest.pasteboard !== pasteboard) return null
+    return latest
   }
 
-  getLatest(): { at: number; clipboard: ClipboardData } | null {
-    return this.latest
+  /** One verified copy; null when unchanged, sensitive or empty. */
+  ingestText(text: string, formats: string[] = ['text/plain'], pasteboard?: number): ClipboardChange | null {
+    return this.process(text, formats, pasteboard)
   }
 
-  /** Test/helper: process a text snapshot without Electron. */
-  ingestText(text: string, formats: string[] = ['text/plain']): ClipboardChange | null {
-    return this.process(text, formats)
-  }
-
-  private process(text: string, formats: string[]): ClipboardChange | null {
+  private process(text: string, formats: string[], pasteboard?: number): ClipboardChange | null {
     const trimmed = text ?? ''
     const contentHash = hashContent(trimmed, formats)
     if (contentHash === this.lastHash) return null
     this.lastHash = contentHash
 
     if (this.ignoreHashes.has(contentHash)) return null
-    if (!trimmed && !formats.some((f) => f.includes('image') || f.includes('file'))) {
-      return null
-    }
+    if (!trimmed && !['image', 'file'].includes(classifyContent('', formats))) return null
     if (looksSensitive(trimmed)) return null
 
     const contentType = classifyContent(trimmed, formats)
@@ -112,7 +87,7 @@ export class ClipboardWatcher {
       text: persistedText
     }
 
-    this.latest = { at: Date.now(), clipboard: clipboardData }
+    this.latest = { at: Date.now(), clipboard: clipboardData, pasteboard }
     return { clipboard: clipboardData }
   }
 }
@@ -127,7 +102,7 @@ export function hashContent(text: string, formats: string[] = []): string {
 }
 
 export function classifyContent(text: string, formats: string[]): ClipboardContentType {
-  if (formats.some((f) => /image\//i.test(f))) return 'image'
+  if (formats.some((f) => /image\/|^public\.(png|tiff|jpeg|heic)$/i.test(f))) return 'image'
   if (formats.some((f) => /file/i.test(f) || /public\.file/i.test(f))) return 'file'
   const t = text.trim()
   if (!t) return formats.length ? 'other' : 'text'

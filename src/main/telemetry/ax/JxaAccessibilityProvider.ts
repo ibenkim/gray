@@ -35,6 +35,7 @@ export type JxaSample = {
   bounds?: JxaElementBounds | null
   dialogs?: string[]
   errorState?: string | null
+  pb?: number | null
 }
 
 /**
@@ -65,6 +66,7 @@ export type JxaKeyEvent = {
   secure?: boolean
   app?: string | null
   appBundleId?: string | null
+  pb?: number | null
 }
 
 export type JxaClickEvent = {
@@ -239,6 +241,16 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   private lastValueLen: { contextKey: string; length: number } | null = null
   /** When key events are flowing, ignore valueTail to avoid double-counting. */
   private lastKeyEventAt = 0
+  private pasteboard: number | undefined
+
+  pasteboardCount(): number | undefined {
+    return this.pasteboard
+  }
+
+  /** Track the sensor's pasteboard changeCount; an unknown count matches nothing. */
+  private notePasteboard(pb: unknown): void {
+    this.pasteboard = typeof pb === 'number' && Number.isFinite(pb) ? pb : undefined
+  }
 
   constructor(opts: { isAccessibilityTrusted?: () => boolean } = {}) {
     this.isAccessibilityTrusted = opts.isAccessibilityTrusted ?? (() => true)
@@ -266,6 +278,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   }
 
   start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope): void {
+    this.pasteboard = undefined
     if (this.disabled || process.platform !== 'darwin') {
       this.enabled = false
       return
@@ -432,7 +445,12 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         return
       case 'key':
         this.faults = 0
+        this.notePasteboard(parsed.pb)
         this.handleKey(parsed as unknown as JxaKeyEvent)
+        return
+      case 'copy':
+        this.faults = 0
+        this.handleCopy(parsed)
         return
       case 'click':
         this.faults = 0
@@ -471,6 +489,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           return
         }
         this.faults = 0
+        this.notePasteboard(sample.pb)
         this.emitFromSample(sample)
       }
     }
@@ -777,6 +796,24 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       startedAt: Date.now()
     }
     return this.typing
+  }
+
+  /** A copy the sensor verified (one pasteboard change by the in-scope chord app). */
+  handleCopy(line: Record<string, unknown>): void {
+    if (!this.onEvent || typeof line.pb !== 'number') return
+    this.notePasteboard(line.pb)
+    const appName = sanitizeLabel(typeof line.app === 'string' ? line.app : undefined)
+    if (!appName) return
+    const appBundleId = sanitizeLabel(typeof line.appBundleId === 'string' ? line.appBundleId : undefined)
+    const types = Array.isArray(line.types) ? line.types.filter((t): t is string => typeof t === 'string') : []
+    // The focused element is only meaningful if the AX context is the copying app's.
+    const el: { elementLabel?: string; elementRole?: string } = this.context.appName === appName ? this.context : {}
+    this.onEvent({
+      type: 'clipboard_changed',
+      target: { appName, appBundleId, accessibleLabel: el.elementLabel },
+      data: { appName, appBundleId, elementRole: el.elementRole, elementLabel: el.elementLabel },
+      copy: { text: typeof line.text === 'string' ? line.text : null, types, pasteboard: line.pb }
+    })
   }
 
   /** Exposed for tests — handle one observed key press. */

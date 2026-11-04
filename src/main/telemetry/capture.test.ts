@@ -45,6 +45,10 @@ class FakeInteractionProvider implements InteractionProvider {
   flush(): void {
     this.flushed += 1
   }
+  pasteboard: number | undefined
+  pasteboardCount(): number | undefined {
+    return this.pasteboard
+  }
 }
 
 async function startRecorder(
@@ -160,8 +164,9 @@ describe('TelemetryRecorder paste detection', () => {
     recorder.onEvent((e) => events.push(e))
     await recorder.startRecording()
 
-    // Seed a clipboard entry the paste can be matched against.
-    recorder['clipboard'].ingestText('https://figma.com/file/abc')
+    // Seed a verified copy the paste can be matched against (pasteboard still holds it).
+    recorder['clipboard'].ingestText('https://figma.com/file/abc', ['text/plain'], 3)
+    provider.pasteboard = 3
 
     provider.emit!({
       type: 'keyboard_shortcut',

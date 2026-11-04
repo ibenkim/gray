@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { JXA_SENSOR_SCRIPT } from './jxaScript'
 
 /**
@@ -14,9 +14,14 @@ const CMD = 1 << 20
 
 class Exit extends Error {}
 
-function sensor(scope: unknown, front: App) {
+function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = []) {
   const env = {
     front,
+    /** Pasteboard: changeCount is metadata; stringForType/types are content reads. */
+    pb: 7,
+    board: { text: 'synthetic pasteboard' as string | null, types: ['public.utf8-plain-text'] },
+    pbReads: 0,
+    onRead: null as null | (() => void),
     /** App owning the element under the pointer (null = unresolvable). */
     elementApp: null as string | null,
     alive: true,
@@ -36,6 +41,23 @@ function sensor(scope: unknown, front: App) {
     NSFileHandle: { fileHandleWithStandardOutput: { writeData: (t: string) => env.lines.push(JSON.parse(t)) } },
     NSString: { alloc: { initWithUTF8String: (t: string) => ({ dataUsingEncoding: () => t.trim() }) } },
     IsSecureEventInputEnabled: () => false,
+    NSPasteboardTypeString: 'public.utf8-plain-text',
+    NSPasteboard: {
+      generalPasteboard: {
+        get changeCount() {
+          return env.pb
+        },
+        stringForType: () => {
+          env.pbReads += 1
+          env.onRead?.()
+          return env.board.text === null ? null : { js: env.board.text }
+        },
+        get types() {
+          env.pbReads += 1
+          return { count: env.board.types.length, objectAtIndex: (i: number) => ({ js: env.board.types[i] }) }
+        }
+      }
+    },
     NSWorkspace: {
       sharedWorkspace: {
         get frontmostApplication() {
@@ -84,8 +106,10 @@ function sensor(scope: unknown, front: App) {
     NSRunLoop: {
       currentRunLoop: {
         runUntilDate: () => {
-          // The loop runs `loopBudget` pumps, then the parent "exits" and the sensor stops.
-          if (--env.loopBudget < 0) env.alive = false
+          // Scripted steps run one per pump; then `loopBudget` pumps, then the parent "exits".
+          const step = steps.shift()
+          if (step) step(api)
+          else if (--env.loopBudget < 0) env.alive = false
         }
       }
     }
@@ -123,15 +147,9 @@ function sensor(scope: unknown, front: App) {
       ]
     }
   })
-  try {
-    new Function('$', 'ObjC', 'Ref', 'Application', JXA_SENSOR_SCRIPT)($, ObjC, Ref, Application)
-  } catch (e) {
-    if (!(e instanceof Exit)) throw e
-  }
-  env.alive = true
   const fire = (mask: number, evt: unknown) => env.handlers.filter((x) => x.mask & mask).forEach((x) => x.fn(evt))
   let charReads = 0
-  return {
+  const api = {
     env,
     get charReads() {
       return charReads
@@ -156,9 +174,30 @@ function sensor(scope: unknown, front: App) {
     },
     scroll() {
       fire(MASK.scroll, { scrollingDeltaX: 0, scrollingDeltaY: 3, CGEvent: {} })
+    },
+    /** Cmd+C (keyCode 8) or Cmd+X (7) in the front app. */
+    copy(cut = false) {
+      fire(MASK.key, {
+        keyCode: cut ? 7 : 8,
+        modifierFlags: CMD,
+        isARepeat: false,
+        characters: { js: cut ? 'x' : 'c' },
+        charactersIgnoringModifiers: { js: cut ? 'x' : 'c' }
+      })
+    },
+    copies() {
+      return env.lines.filter((l) => l.k === 'copy')
     }
   }
+  try {
+    new Function('$', 'ObjC', 'Ref', 'Application', JXA_SENSOR_SCRIPT)($, ObjC, Ref, Application)
+  } catch (e) {
+    if (!(e instanceof Exit)) throw e
+  }
+  env.alive = true
+  return api
 }
+type Sensor = ReturnType<typeof sensor>
 
 const CHROME: App = { name: 'Google Chrome', bundleId: 'com.google.Chrome' }
 const ONE_APP_CHROME = { self: ['gray', 'electron'], deny: ['1password', 'messages'], allow: ['google chrome', 'chrome', 'chromium'] }
@@ -199,8 +238,18 @@ describe('M3-C sensor scope (actual JXA sensor source, synthetic bridge)', () =>
     const r = exercise(ONE_APP_CHROME, CHROME, 'Google Chrome')
     expect(r.kinds).toEqual(['ax', 'key', 'click', 'scroll'])
     expect(r.reads).toBeGreaterThan(5)
-    const full = exercise(FULL_SCREEN, { name: 'Figma', bundleId: 'com.figma.Desktop' })
+    const full = exercise(FULL_SCREEN, { name: 'Figma', bundleId: 'com.figma.Desktop' }, 'Figma')
     expect(full.kinds).toEqual(['ax', 'key', 'click', 'scroll'])
+  })
+
+  it('an unresolvable pointer owner is unknown and denied (R2)', () => {
+    const known = exercise(ONE_APP_CHROME, CHROME, 'Google Chrome')
+    const unknown = exercise(ONE_APP_CHROME, CHROME, null)
+    const keyOnly = exercise(ONE_APP_CHROME, CHROME, 'Slack')
+    expect(unknown.kinds).toEqual(['ax', 'key'])
+    // Same reads as a pointer over an excluded app: the sample and key only, no element content.
+    expect(unknown.reads).toBe(keyOnly.reads)
+    expect(known.reads).toBeGreaterThan(unknown.reads)
   })
 
   it('switching away mid-entry stops reads', () => {
@@ -232,6 +281,85 @@ describe('M3-C sensor scope (actual JXA sensor source, synthetic bridge)', () =>
         const sensorAllows = s.env.lines.some((l) => l.k === 'key')
         expect([opts, name, sensorAllows]).toEqual([opts, name, appInScope(scope, name || undefined)])
       }
+    }
+  })
+})
+
+describe('M3-B copy provenance (actual JXA sensor source, synthetic pasteboard)', () => {
+  const write = (text: string) => (x: Sensor) => {
+    x.env.pb += 1
+    x.env.board.text = text
+  }
+
+  it('reads the pasteboard once after one change by the in-scope chord app', () => {
+    const s = sensor(ONE_APP_CHROME, CHROME, [(x) => x.copy(), write('synthetic chrome copy'), (x) => x.copy(true), write('synthetic chrome cut')])
+    expect(s.copies().map((l) => [l.app, l.text, l.pb])).toEqual([
+      ['Google Chrome', 'synthetic chrome copy', 8],
+      ['Google Chrome', 'synthetic chrome cut', 9]
+    ])
+    expect(s.env.pbReads).toBe(4) // string + types, once per verified copy
+    expect(s.env.lines.filter((l) => l.k === 'key').every((l) => typeof l.pb === 'number')).toBe(true)
+  })
+
+  it('discards copies whose source is not established (R1)', () => {
+    const slack = { name: 'Slack', bundleId: 'com.tinyspeck.slackmacgap' }
+    const cases = {
+      // Cmd+C in Chrome, then excluded Slack replaces the clipboard before the change is seen.
+      switchedThenWritten: sensor(ONE_APP_CHROME, CHROME, [(x) => x.copy(), (x) => { x.env.front = slack }, write('synthetic excluded Slack copy')]),
+      // Two writers before the check: provenance unknown.
+      twoChanges: sensor(FULL_SCREEN, CHROME, [(x) => x.copy(), (x) => { x.env.pb += 2; x.env.board.text = 'synthetic figma copy' }]),
+      // The clipboard changes while it is being read.
+      changedDuringRead: sensor(ONE_APP_CHROME, CHROME, [(x) => { x.env.onRead = () => { x.env.pb += 1 } ; x.copy() }, write('synthetic racing copy')]),
+      // Copy in an out-of-scope app: no pending copy at all.
+      outOfScope: sensor(ONE_APP_CHROME, slack, [(x) => x.copy(), write('synthetic slack copy')])
+    }
+    for (const [name, s] of Object.entries(cases)) expect([name, s.copies()]).toEqual([name, []])
+    expect(cases.switchedThenWritten.env.pbReads).toBe(0)
+    expect(cases.twoChanges.env.pbReads).toBe(0)
+    expect(cases.outOfScope.env.pbReads).toBe(0)
+  })
+
+  it('leaving the chord app, even for one pump, cancels the pending copy (re-review R1)', () => {
+    const slack = { name: 'Slack', bundleId: 'com.tinyspeck.slackmacgap' }
+    const s = sensor(ONE_APP_CHROME, CHROME, [
+      (x) => x.copy(), // no selection: unchanged count
+      (x) => { x.env.front = slack }, // an excluded app is observed in front
+      (x) => { x.env.pb += 1; x.env.board.text = 'synthetic excluded Slack copy' },
+      (x) => { x.env.front = CHROME } // back in Chrome before the change is checked again
+    ])
+    expect(s.copies()).toEqual([])
+    expect(s.env.pbReads).toBe(0)
+  })
+
+  it('a change first seen after the settle window is not attributed (re-review R1)', () => {
+    let now = 1_000_000
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const s = sensor(ONE_APP_CHROME, CHROME, [
+        (x) => x.copy(),
+        (x) => { now += 600; x.env.pb += 1; x.env.board.text = 'synthetic late write' }
+      ])
+      expect(s.copies()).toEqual([])
+      expect(s.env.pbReads).toBe(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('a no-op copy never reports pre-existing or later content (R1)', () => {
+    let now = 1_000_000
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const s = sensor(ONE_APP_CHROME, CHROME, [
+        (x) => x.copy(), // nothing selected: the pasteboard does not change
+        () => { now += 600 }, // settle window passes
+        () => {},
+        write('synthetic later background write')
+      ])
+      expect(s.copies()).toEqual([])
+      expect(s.env.pbReads).toBe(0)
+    } finally {
+      spy.mockRestore()
     }
   })
 })

@@ -194,9 +194,9 @@ async function workload(owner: FakeOwner, opts: { pause: boolean }): Promise<{ s
     // Clicks with each crop geometry variant (target crops), plus pre/post action triggers.
     BOUNDS.forEach((b, i) => click(round * 10 + i, b))
     h.clip.text = `synthetic clipboard ${h.clip.changes++}`
-    // M3-B: the clipboard is read only after an observed in-scope copy chord.
-    h.ix.cb?.({ type: 'keyboard_shortcut', data: { appName: 'SyntheticAppA', shortcut: 'Cmd+C' } })
-    await sleep(1300) // window polls (app changes), clipboard ticks, settle timers
+    // M3-B: a copy the sensor verified (the main process never reads the clipboard itself).
+    h.ix.cb?.({ type: 'clipboard_changed', data: { appName: 'SyntheticAppA' }, copy: { text: h.clip.text, types: ['public.utf8-plain-text'], pasteboard: h.clip.changes } })
+    await sleep(1300) // window polls (app changes)
   }
   if (opts.pause) {
     expect((await call(owner, 'telemetry:sessionPause', { sessionId })).ok).toBe(true)

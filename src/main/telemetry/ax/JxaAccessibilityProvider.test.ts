@@ -112,6 +112,23 @@ describe('JxaAccessibilityProvider', () => {
     expect(events.filter((e) => e.type === 'focus_changed')).toHaveLength(1)
   })
 
+  it('forwards a verified copy and tracks the pasteboard changeCount (M3-B)', () => {
+    const provider = new JxaAccessibilityProvider()
+    const events: InteractionPartial[] = []
+    provider['onEvent'] = (p) => events.push(p)
+    provider.handleLine(JSON.stringify({ k: 'key', code: 9, base: 'v', cmd: true, app: 'Notes', pb: 4 }))
+    expect(provider.pasteboardCount()).toBe(4)
+    provider.handleLine(JSON.stringify({ k: 'copy', app: 'Notes', pb: 5, text: 'synthetic copy', types: ['public.utf8-plain-text'] }))
+    provider.handleLine(JSON.stringify({ k: 'copy', pb: 6, text: 'synthetic unknown-app copy', types: [] }))
+    expect(provider.pasteboardCount()).toBe(6)
+    const copies = events.filter((e) => e.type === 'clipboard_changed')
+    expect(copies).toHaveLength(1)
+    expect(copies[0]).toMatchObject({ data: { appName: 'Notes' }, copy: { text: 'synthetic copy', pasteboard: 5 } })
+    // An unknown count invalidates the last one (re-review R4): nothing can match it.
+    provider.handleLine(JSON.stringify({ k: 'key', code: 9, base: 'v', cmd: true, app: 'Notes', pb: null }))
+    expect(provider.pasteboardCount()).toBeUndefined()
+  })
+
   it('tolerates transient faults and only disables after repeated ones', () => {
     const { provider } = harness()
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})

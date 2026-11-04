@@ -179,7 +179,7 @@ vi.mock('./capture', async (importOriginal) => {
 vi.mock('./clipboard', () => ({
   ClipboardWatcher: class {
     reset() {}
-    readNow() {
+    ingestText() {
       return null
     }
     getLatest() {

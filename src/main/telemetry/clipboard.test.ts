@@ -58,10 +58,7 @@ describe('clipboard helpers', () => {
 
 describe('ClipboardWatcher', () => {
   it('emits clipboard_changed with host/path/query and redacted text under threshold', () => {
-    const watcher = new ClipboardWatcher({
-      readText: () => '',
-      readFormats: () => []
-    })
+    const watcher = new ClipboardWatcher()
 
     const first = watcher.ingestText('https://www.figma.com/design/xyz?node-id=1', [
       'text/plain'
@@ -82,32 +79,23 @@ describe('ClipboardWatcher', () => {
     expect(second).toBeNull()
   })
 
-  it('reads only when asked (M3-B): no timer, one read per call, de-duplicated, no raw value', () => {
+  it('classifies a verified copy only (M3-B): no timer, de-duplicated, no raw value, stale copies never match', () => {
     vi.useFakeTimers()
     try {
-      let reads = 0
-      let text = 'synthetic copied text'
-      const watcher = new ClipboardWatcher({
-        readText: () => {
-          reads += 1
-          return text
-        },
-        readFormats: () => ['text/plain']
-      })
+      const watcher = new ClipboardWatcher()
       expect(vi.getTimerCount()).toBe(0)
-      vi.advanceTimersByTime(5000)
-      expect(reads).toBe(0)
-      const first = watcher.readNow()
-      expect(reads).toBe(1)
+      const first = watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 8)
       expect(first).toEqual({ clipboard: expect.objectContaining({ contentType: 'text', text: 'synthetic copied text' }) })
       expect(Object.keys(first!)).toEqual(['clipboard'])
-      expect(watcher.readNow()).toBeNull() // unchanged content
-      text = 'password=synthetic'
-      expect(watcher.readNow()).toBeNull() // sensitive content is never recorded
+      expect(watcher.getLatest(8)?.clipboard.text).toBe('synthetic copied text')
+      expect(watcher.getLatest(9)).toBeNull() // the pasteboard changed since: no match
+      expect(watcher.getLatest(undefined)).toBeNull() // unknown pasteboard state: no match
+      expect(watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 9)).toBeNull() // unchanged content
+      expect(watcher.ingestText('password=synthetic', ['public.utf8-plain-text'], 10)).toBeNull() // sensitive
+      expect(watcher.ingestText('', ['public.png'], 11)?.clipboard.contentType).toBe('image')
       watcher.reset()
-      text = 'synthetic copied text'
-      expect(watcher.readNow()).not.toBeNull() // a new session starts clean
-      expect(reads).toBe(4)
+      expect(watcher.getLatest(11)).toBeNull()
+      expect(watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 12)).not.toBeNull() // a new session starts clean
       expect(vi.getTimerCount()).toBe(0)
     } finally {
       vi.useRealTimers()

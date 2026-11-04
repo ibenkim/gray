@@ -56,7 +56,7 @@ app.setName('gray-capture-smoke')
 // Chromium's inner sandbox cannot start nested in sandbox-exec (which denies network here).
 app.commandLine.appendSwitch('no-sandbox')
 app.commandLine.appendSwitch('disable-gpu-sandbox')
-for (const [k, sub] of [['userData', 'userData'], ['sessionData', 'sessionData'], ['logs', 'logs'], ['crashDumps', 'crash']]) {
+for (const [k, sub] of [['appData', 'appData'], ['userData', 'userData'], ['sessionData', 'sessionData'], ['logs', 'logs'], ['crashDumps', 'crash']]) {
   const dir = path.join(fxReal, sub)
   fs.mkdirSync(dir, { recursive: true })
   app.setPath(k, dir)
@@ -83,7 +83,7 @@ const MAIN_FAKES = {
       if (g.stopFails) { g.pendingTeardown = true; throw new Error('synthetic: sensor did not exit') }
       g.ixLive = Math.max(0, g.ixLive - 1) }
     flush() {} }`,
-  clipboard: `export class ClipboardWatcher { reset() {} readNow() { return null } getLatest() { return null } }
+  clipboard: `export class ClipboardWatcher { reset() {} ingestText() { return null } getLatest() { return null } }
     export function inferPaste() { return { matched: false } }`,
   activeWin: `export default async function activeWin() {
     globalThis.__captureSmoke.winReads++

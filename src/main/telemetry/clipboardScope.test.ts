@@ -7,15 +7,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 /**
  * M3-B — clipboard scope on the actual production composition: real initTelemetry,
  * TelemetryRecorder, ClipboardWatcher and FileTelemetryStore. Fakes only at the native
- * boundary: Electron's clipboard (every read counted), active-window reads and the
- * accessibility child (the test emits its chords). All content is synthetic; network denied.
+ * boundary: Electron's clipboard (every read counted — main must never read it), active-window
+ * reads and the accessibility child (the test emits what the sensor would: chords, verified
+ * copies and the pasteboard changeCount). All content is synthetic; network denied.
  */
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   devDir: '',
   clip: { text: '', reads: 0 },
-  ix: { cb: null as null | ((p: unknown) => void) }
+  ix: { cb: null as null | ((p: unknown) => void), pb: 0 }
 }))
 
 vi.mock('electron', () => ({
@@ -56,6 +57,9 @@ vi.mock('./ax/JxaAccessibilityProvider', () => ({
     async stop() {
       h.ix.cb = null
     }
+    pasteboardCount() {
+      return h.ix.pb
+    }
   }
 }))
 
@@ -75,9 +79,18 @@ function events(sessionId: string): Array<{ type: string; target?: { appName?: s
   const p = join(h.devDir, 'sessions', sessionId, 'events.jsonl')
   return existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).event) : []
 }
-/** A copy/cut chord as the interaction provider reports it (its own app identity). */
-function chord(shortcut: string, appName?: string) {
-  h.ix.cb?.({ type: 'keyboard_shortcut', target: appName ? { appName } : undefined, data: { ...(appName ? { appName } : {}), shortcut } })
+/** What the sensor emits for a copy it verified (one pasteboard change by `appName`). */
+function verifiedCopy(text: string, appName?: string) {
+  h.ix.pb += 1
+  h.ix.cb?.({
+    type: 'clipboard_changed',
+    target: appName ? { appName } : undefined,
+    data: appName ? { appName } : {},
+    copy: { text, types: ['public.utf8-plain-text'], pasteboard: h.ix.pb }
+  })
+}
+function paste(appName = 'Google Chrome') {
+  h.ix.cb?.({ type: 'keyboard_shortcut', target: { appName }, data: { appName, shortcut: 'Cmd+V' } })
 }
 
 beforeEach(async () => {
@@ -86,6 +99,7 @@ beforeEach(async () => {
   h.devDir = mkdtempSync(join(tmpdir(), 'gray-m3b-clipboard-'))
   Object.assign(h.clip, { text: '', reads: 0 })
   h.ix.cb = null
+  h.ix.pb = 0
   mod = await import('./index')
   await mod.initTelemetry()
   mod.registerTelemetryIpc()
@@ -94,95 +108,56 @@ beforeEach(async () => {
 describe('M3-B clipboard scope (actual production composition)', () => {
   it('clipboard is read only after an in-scope copy', async () => {
     const owner = new FakeOwner()
-    const reads: Record<string, number> = {}
-    const phase = async (name: string, fn: () => unknown | Promise<unknown>, wait = 450) => {
-      const r0 = h.clip.reads
-      await fn()
-      await sleep(wait)
-      reads[name] = h.clip.reads - r0
-    }
     h.clip.text = 'synthetic pre-session clipboard'
-    let sessionId = ''
-    await phase('start', async () => {
-      const res = await call(owner, 'telemetry:sessionStart', { recordMode: 'one-app', selectedAppId: 'chrome', narrate: false })
-      expect(res.ok).toBe(true)
-      sessionId = res.status.sessionId
-      await vi.waitFor(() => expect(h.ix.cb).not.toBeNull())
-    })
-    await phase('idle', () => {
-      h.clip.text = 'synthetic idle change'
-    }, 1200)
-    await phase('denylisted', () => {
-      h.clip.text = 'synthetic denylisted copy'
-      chord('Cmd+C', '1Password')
-    })
-    await phase('unknownApp', () => {
-      h.clip.text = 'synthetic unknown-app copy'
-      chord('Cmd+C')
-    })
-    await phase('outOfScope', () => {
-      h.clip.text = 'synthetic out-of-scope copy'
-      chord('Cmd+C', 'Slack')
-    })
-    await phase('pausedAndResume', async () => {
-      expect((await call(owner, 'telemetry:sessionPause', { sessionId })).ok).toBe(true)
-      h.clip.text = 'synthetic paused copy'
-      chord('Cmd+C', 'Google Chrome')
-      await sleep(300)
-      expect((await call(owner, 'telemetry:sessionResume', { sessionId })).ok).toBe(true)
-    })
-    await phase('inScope', async () => {
-      h.clip.text = 'synthetic in-scope copy'
-      chord('Cmd+C', 'Google Chrome')
-      await sleep(450)
-      chord('Cmd+C', 'Google Chrome') // repeat of the same content: no second event
-      await sleep(450)
-      h.clip.text = 'synthetic in-scope cut'
-      chord('Cmd+X', 'Google Chrome')
-    })
-    const r0 = h.clip.reads
-    h.clip.text = 'synthetic copy pending at Stop'
-    chord('Cmd+C', 'Google Chrome')
-    const t0 = Date.now()
-    expect((await call(owner, 'telemetry:sessionStop', { sessionId })).ok).toBe(true)
-    const stopMs = Date.now() - t0
-    await sleep(450)
-    reads.pendingAtStop = h.clip.reads - r0
+    const start = await call(owner, 'telemetry:sessionStart', { recordMode: 'one-app', selectedAppId: 'chrome', narrate: false })
+    expect(start.ok).toBe(true)
+    const sessionId = start.status.sessionId
+    await vi.waitFor(() => expect(h.ix.cb).not.toBeNull())
+    await sleep(1200) // idle: nothing may be read
 
-    const raw = (mod.getTelemetryRecorder() as unknown as { getClipboardSessionValues?: () => Map<string, string> }).getClipboardSessionValues?.()
+    verifiedCopy('synthetic denylisted copy', '1Password')
+    verifiedCopy('synthetic unknown-app copy')
+    verifiedCopy('synthetic out-of-scope copy', 'Slack')
+    expect((await call(owner, 'telemetry:sessionPause', { sessionId })).ok).toBe(true)
+    verifiedCopy('synthetic paused copy', 'Google Chrome')
+    expect((await call(owner, 'telemetry:sessionResume', { sessionId })).ok).toBe(true)
+    await sleep(200)
+
+    verifiedCopy('synthetic in-scope copy', 'Google Chrome')
+    paste() // pasteboard still holds that copy: matched
+    h.ix.pb += 1 // an excluded app copies (the sensor emits nothing for it)
+    paste() // must not claim the earlier in-scope text
+    verifiedCopy('synthetic in-scope cut', 'Google Chrome')
+    await call(owner, 'telemetry:sessionStop', { sessionId })
+    verifiedCopy('synthetic copy after Stop', 'Google Chrome')
+    await sleep(200)
+
     const ev = events(sessionId)
-    const clips = ev.filter((e) => e.type === 'clipboard_changed')
     const measured = {
-      reads,
-      clipboardEvents: clips.map((e) => ({ app: e.data?.appName ?? e.target?.appName ?? null, text: e.data?.clipboard?.text ?? null })),
-      rawRetained: raw ? raw.size : 0,
-      nonHollow: { events: ev.length, appSwitch: ev.filter((e) => e.type === 'app_switch').length, shortcuts: ev.filter((e) => e.type === 'keyboard_shortcut').length },
-      stopMs
+      electronReads: h.clip.reads,
+      clipboardEvents: ev.filter((e) => e.type === 'clipboard_changed').map((e) => ({ app: e.data?.appName ?? e.target?.appName ?? null, text: e.data?.clipboard?.text ?? null })),
+      pastes: ev.filter((e) => e.type === 'paste_detected').map((e) => e.data?.clipboard?.text ?? null),
+      nonHollow: { events: ev.length, appSwitch: ev.filter((e) => e.type === 'app_switch').length }
     }
     console.log('M3B-MEASURE ' + JSON.stringify(measured))
 
-    // Non-hollow: the session recorded ordinary events and the chords themselves.
     expect(measured.nonHollow.appSwitch).toBeGreaterThan(0)
-    expect(measured.nonHollow.shortcuts).toBeGreaterThan(3)
-    // Reads only for in-scope copy/cut chords during the active generation.
-    expect(reads).toMatchObject({ start: 0, idle: 0, denylisted: 0, unknownApp: 0, outOfScope: 0, pausedAndResume: 0, pendingAtStop: 0 })
-    expect(reads.inScope).toBe(3)
+    expect(measured.electronReads).toBe(0)
     expect(measured.clipboardEvents).toEqual([
       { app: 'Google Chrome', text: 'synthetic in-scope copy' },
       { app: 'Google Chrome', text: 'synthetic in-scope cut' }
     ])
-    expect(measured.rawRetained).toBe(0)
+    // R4: the second paste followed an unobserved copy, so it carries no clipboard content.
+    expect(measured.pastes).toEqual(['synthetic in-scope copy'])
+    expect(ev.filter((e) => e.type === 'keyboard_shortcut' && e.data?.shortcut === 'Cmd+V')).toHaveLength(1)
+    expect(JSON.stringify(ev)).not.toContain('synthetic pre-session')
 
-    // A second session starts clean: no read at Start, one in-scope copy recorded.
-    const r1 = h.clip.reads
+    // A second session starts clean: the previous copy matches no paste; a new copy records.
     const second = await call(owner, 'telemetry:sessionStart', { recordMode: 'one-app', selectedAppId: 'chrome', narrate: false })
     await vi.waitFor(() => expect(h.ix.cb).not.toBeNull())
-    await sleep(300)
-    expect(h.clip.reads - r1).toBe(0)
-    h.clip.text = 'synthetic second recording copy'
-    chord('Cmd+C', 'Google Chrome')
-    await sleep(450)
+    verifiedCopy('synthetic second recording copy', 'Google Chrome')
     await call(owner, 'telemetry:sessionStop', { sessionId: second.status.sessionId })
     expect(events(second.status.sessionId).filter((e) => e.type === 'clipboard_changed').map((e) => e.data?.clipboard?.text)).toEqual(['synthetic second recording copy'])
+    expect(h.clip.reads).toBe(0)
   }, 30000)
 })

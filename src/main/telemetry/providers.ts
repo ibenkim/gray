@@ -35,6 +35,8 @@ export interface InteractionProvider {
    * the OS will actually deliver input events until its child process reports back.
    */
   onCapabilityChange?(cb: (info: { capturesKeys: boolean }) => void): void
+  /** Latest pasteboard changeCount the source observed (M3-B paste matching); metadata only. */
+  pasteboardCount?(): number | undefined
 }
 
 export type InteractionPartial = {
@@ -55,9 +57,12 @@ export type InteractionPartial = {
     | 'file_dialog'
     | 'download'
     | 'marker'
+    | 'clipboard_changed'
   >
   target?: TelemetryTarget
   data?: TelemetryEvent['data']
+  /** `clipboard_changed` only: a copy the source verified (never persisted raw). */
+  copy?: { text: string | null; types: string[]; pasteboard: number }
 }
 
 /** Hard denylist — password managers, banking, messaging (capture-spec §5). */

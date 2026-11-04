@@ -5,11 +5,12 @@
  * never be used here: under `osascript -l JavaScript` it writes to stderr, so the
  * host would never receive a single line.
  *
- * Line kinds:
+ * Line kinds (pb = NSPasteboard changeCount, metadata only):
  *   {k:'ready', trusted, monitors}   — handshake + capability report
  *   {k:'ax', …, valueTail?}          — focused element / window sample (on change)
  *   {k:'key', code, chars, base, …}  — a physical key press
  *   {k:'click', x, y, role, label, …}— a mouse press with its Accessibility target
+ *   {k:'copy', app, pb, text, types} — clipboard after a verified in-scope Cmd/Ctrl+C|X
  *   {k:'stats', keys, clicks}        — monitor callback counters (debug heartbeat)
  *
  * Non-secure text fields include `valueTail` (last ≤160 chars of AXValue) so the
@@ -117,6 +118,50 @@ function frontApp() {
   }
 }
 
+/* ── pasteboard (M3-B): changeCount is metadata; content is read only for a verified copy ── */
+function pasteboardCount() {
+  try { return Number($.NSPasteboard.generalPasteboard.changeCount); } catch (e) { return null; }
+}
+
+/*
+ * A copy is attributed to the chord's app only when the pasteboard changes exactly once while
+ * that app stays frontmost and in scope; no change (no-op copy), several writers, an app switch
+ * or a change during the read discards it. Content is read once, here, never on a timer.
+ * ponytail: macOS exposes no pasteboard writer, so a background app writing during a no-op copy
+ * is still attributed to the front app.
+ */
+var COPY_SETTLE_MS = 500;
+var COPY_TEXT_MAX = 20000;
+var pendingCopy = null;
+
+function checkCopy() {
+  if (!pendingCopy) return;
+  var front = frontApp();
+  /* Expired, or the chord's app left the front even briefly: provenance is lost. */
+  if (Date.now() > pendingCopy.deadline || front.name !== pendingCopy.app || !appAllowed(front.name)) {
+    pendingCopy = null;
+    return;
+  }
+  var pb = pasteboardCount();
+  if (pb === pendingCopy.pb) return;
+  var copy = pendingCopy;
+  pendingCopy = null;
+  if (pb !== copy.pb + 1 || secureInputActive()) return;
+  var text = null;
+  var types = [];
+  try {
+    var board = $.NSPasteboard.generalPasteboard;
+    var s = board.stringForType($.NSPasteboardTypeString);
+    if (s) text = String(s.js).slice(0, COPY_TEXT_MAX);
+    var t = board.types;
+    for (var i = 0; t && i < t.count; i++) types.push(String(t.objectAtIndex(i).js));
+  } catch (e) {
+    return;
+  }
+  if (pasteboardCount() !== pb) return;
+  emit({ k: 'copy', app: copy.app, appBundleId: copy.bundleId, pb: pb, text: text, types: types });
+}
+
 /* ── Accessibility C API: resolves the element under the pointer ── */
 var CF_UTF8 = 0x08000100;
 var systemWideEl = null;
@@ -211,16 +256,16 @@ function elementAppName(el) {
 }
 
 /**
- * The in-scope element under the pointer, or null. The front app must be in scope, and so
- * must the element's own app when it resolves (a background window can be another app's).
- * ponytail: an unresolvable element owner falls back to the front-app check alone.
+ * The in-scope element under the pointer, or null. The front app and the element's own app
+ * (a background window can be another app's) must both be in scope; an unresolvable owner is
+ * unknown and therefore denied.
  */
 function scopedElementAt(pt, front) {
   if (!pt || !appAllowed(front.name)) return null;
   var el = elementAtPoint(pt.x, pt.y);
   if (!el) return null;
   var owner = elementAppName(el);
-  if (owner && !appAllowed(owner)) return null;
+  if (!owner || !appAllowed(owner)) return null;
   return el;
 }
 
@@ -540,7 +585,8 @@ function sample() {
       secure: secure,
       bounds: focused ? frameOfSe(focused) : null,
       dialogs: dialogs,
-      errorState: errorState
+      errorState: errorState,
+      pb: pasteboardCount()
     };
   } catch (err) {
     return { k: 'ax', error: String(err) };
@@ -563,7 +609,8 @@ function keyOf(s) {
     (s.selectedLabels || []).join('|'),
     (s.elementPath || []).join('>'),
     (s.dialogs || []).join('|'),
-    s.errorState || ''
+    s.errorState || '',
+    String(s.pb)
   ].join('\\x1f');
 }
 
@@ -628,8 +675,17 @@ function onKey(evt) {
       repeat: evt.isARepeat ? true : false,
       secure: secure,
       app: front.name,
-      appBundleId: front.bundleId
+      appBundleId: front.bundleId,
+      pb: pasteboardCount()
     });
+    var chord = (flags & ($.NSEventModifierFlagCommand | $.NSEventModifierFlagControl)) !== 0;
+    var b0 = base ? base.toLowerCase() : '';
+    if (chord && !secure && (b0 === 'c' || b0 === 'x')) {
+      var pb0 = pasteboardCount();
+      if (pb0 !== null) {
+        pendingCopy = { pb: pb0, app: front.name, bundleId: front.bundleId, deadline: Date.now() + COPY_SETTLE_MS };
+      }
+    }
     scheduleSample(140);
   } catch (err) {
     emit({ k: 'fault', where: 'key' });
@@ -905,6 +961,7 @@ while (true) {
 
   exitIfOrphaned();
   pollMouseButtons();
+  checkCopy();
 
   var now = Date.now();
   if (pendingSampleAt && now >= pendingSampleAt) {

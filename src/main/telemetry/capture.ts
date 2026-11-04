@@ -108,8 +108,6 @@ type ActiveWinResult = {
 }
 
 const POLL_MS = 800
-/** Pasteboard settle time after an observed copy/cut chord before the single read (M3-B). */
-const COPY_SETTLE_MS = 150
 /** Admitted async source work (window polls, screenshots) owned until Stop drains it. */
 const MAX_ADMITTED_JOBS = 16
 
@@ -172,8 +170,6 @@ export class TelemetryRecorder {
     appName?: string
   } | null = null
   private pendingClipboardPairId: string | null = null
-  /** Generation with a copy-triggered clipboard read in flight (one at a time). */
-  private copyPending: number | null = null
   private opts: CaptureOptions = {}
   private onEventListeners = new Set<(event: TelemetryEvent) => void>()
   private onStatusListeners = new Set<(status: RecordingStatus) => void>()
@@ -661,37 +657,28 @@ export class TelemetryRecorder {
   }
 
   /**
-   * M3-B: read the clipboard once, after an observed copy/cut chord from a known, in-scope
-   * app, and only while this generation is still recording (Pause/Stop/owner loss end it).
-   * The event is attributed to the chord's own app, never a stale focus target.
+   * M3-B: record a copy the sensor verified (one pasteboard change by the chord's in-scope
+   * app). The main process never reads the clipboard; only the classified event is kept.
    */
-  private async readCopiedClipboard(
-    gen: number,
-    chord: { appName: string; target?: InteractionPartial['target'] }
-  ): Promise<void> {
-    try {
-      // Let the target app finish writing the pasteboard before the single read.
-      await new Promise((resolve) => setTimeout(resolve, COPY_SETTLE_MS))
-      if (!this.admits(gen)) return
-      const change = this.clipboard.readNow()
-      if (!change || !this.admits(gen)) return
-      const pairId = newId('clip')
-      this.pendingClipboardPairId = pairId
-      this.recordEvent('clipboard_changed', {
-        target: { ...chord.target, appName: chord.appName },
-        data: {
-          clipboard: { ...change.clipboard, pairId },
-          clipboardPairId: pairId,
-          elementLabel: chord.target?.accessibleLabel,
-          elementRole: chord.target?.role,
-          appName: chord.appName
-        }
-      })
-      this.interaction.poke?.()
-      this.admit(() => this.captureKeyframe('clipboard'))
-    } finally {
-      if (this.copyPending === gen) this.copyPending = null
-    }
+  private recordCopy(appName: string, partial: InteractionPartial): void {
+    const copy = partial.copy
+    if (!copy) return
+    const change = this.clipboard.ingestText(copy.text ?? '', copy.types, copy.pasteboard)
+    if (!change) return
+    const pairId = newId('clip')
+    this.pendingClipboardPairId = pairId
+    this.recordEvent('clipboard_changed', {
+      target: { ...partial.target, appName },
+      data: {
+        clipboard: { ...change.clipboard, pairId },
+        clipboardPairId: pairId,
+        elementLabel: partial.data?.elementLabel,
+        elementRole: partial.data?.elementRole,
+        appName
+      }
+    })
+    this.interaction.poke?.()
+    this.admit(() => this.captureKeyframe('clipboard'))
   }
 
   private async pollActiveWindow(gen: number): Promise<void> {
@@ -1005,6 +992,13 @@ export class TelemetryRecorder {
     if (!this.admits(gen)) return
     if (this.shouldIgnoreApp(partial.data?.appName ?? partial.target?.appName)) return
 
+    // M3-B: copies arrive verified from the sensor; unknown app identity is never recorded.
+    if (partial.type === 'clipboard_changed') {
+      const appName = partial.data?.appName ?? partial.target?.appName
+      if (appName) this.recordCopy(appName, partial)
+      return
+    }
+
     if (partial.type === 'focus_changed') {
       this.lastFocusTarget = {
         role: partial.data?.elementRole ?? partial.target?.role,
@@ -1045,8 +1039,9 @@ export class TelemetryRecorder {
     }
 
     // An observed paste chord is direct evidence — no length heuristics needed.
+    // A copy matches only while the pasteboard still holds it (same changeCount).
     if (partial.type === 'keyboard_shortcut' && isPasteChord(partial.data?.shortcut)) {
-      const latest = this.clipboard.getLatest()
+      const latest = this.clipboard.getLatest(this.interaction.pasteboardCount?.())
       if (latest) {
         const pairId = this.pendingClipboardPairId ?? latest.clipboard.pairId
         this.recordEvent('paste_detected', {
@@ -1066,7 +1061,7 @@ export class TelemetryRecorder {
     if (partial.type === 'focus_changed' || partial.type === 'field_completed') {
       const len = data?.field?.valueLength
       if (typeof len === 'number') {
-        const latest = this.clipboard.getLatest()
+        const latest = this.clipboard.getLatest(this.interaction.pasteboardCount?.())
         if (
           latest &&
           this.lastFieldLength != null &&
@@ -1095,16 +1090,6 @@ export class TelemetryRecorder {
           }
         }
         this.lastFieldLength = len
-      }
-    }
-
-    // M3-B: an observed copy/cut in a known, in-scope app is the only clipboard read trigger.
-    // Unknown app identity means no read; repeated chords share one pending read.
-    if (partial.type === 'keyboard_shortcut' && isCopyChord(partial.data?.shortcut)) {
-      const appName = partial.data?.appName ?? partial.target?.appName
-      if (appName && !this.shouldIgnoreApp(appName) && this.copyPending !== gen) {
-        this.copyPending = gen
-        this.admit(() => this.readCopiedClipboard(gen, { appName, target: partial.target }))
       }
     }
 
@@ -1145,12 +1130,6 @@ export class TelemetryRecorder {
       })
     }
   }
-}
-
-/** Cmd/Ctrl+C or +X (copy/cut), the only clipboard read triggers (M3-B). */
-function isCopyChord(shortcut?: string): boolean {
-  if (!shortcut) return false
-  return /^(?:Cmd|Ctrl)\+[CX]$/i.test(shortcut)
 }
 
 /** Cmd+V / Ctrl+V, including Shift+Cmd+V ("paste and match style"). */

@@ -129,7 +129,7 @@ vi.mock('./ax/JxaAccessibilityProvider', () => ({
 vi.mock('./clipboard', () => ({
   ClipboardWatcher: class {
     reset() {}
-    readNow() {
+    ingestText() {
       return null
     }
     getLatest() {
