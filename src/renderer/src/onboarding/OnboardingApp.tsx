@@ -25,6 +25,7 @@ export default function OnboardingApp() {
   const [session, setSession] = useState<Session>(null)
   const [permissions, setPermissions] = useState<PermissionsState>(UNKNOWN_PERMS)
   const [pendingInvite, setPendingInvite] = useState<string | null>(null)
+  const [micSkipped, setMicSkipped] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function OnboardingApp() {
       if (cancelled || !snap) return
       setStep(snap.onboardingStep)
       setSession(snap.session)
+      setMicSkipped(snap.micSkipped)
     })
     window.grayBridge?.getPermissions?.().then((p) => {
       if (!cancelled && p) setPermissions(p)
@@ -41,6 +43,7 @@ export default function OnboardingApp() {
     const offStore = window.grayBridge?.onStoreChanged?.((snap) => {
       setStep(snap.onboardingStep)
       setSession(snap.session)
+      setMicSkipped(snap.micSkipped)
     })
     const offPerms = window.grayBridge?.onPermissionsChanged?.((p) => setPermissions(p))
     const offLink = window.grayBridge?.onDeepLink?.((link) => {
@@ -58,25 +61,42 @@ export default function OnboardingApp() {
   }, [])
 
   // Hug the live card so shadow has room and step height changes resize the window.
+  // A step can swap its card element (checklist → complete card) without any prop changing,
+  // so a MutationObserver re-targets the ResizeObserver at whichever card is live.
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
-    const card = root.querySelector('.onb-card') as HTMLElement | null
-    if (!card) return
+    let watched: HTMLElement | null = null
+    let last = ''
 
     function report() {
       const el = rootRef.current?.querySelector('.onb-card') as HTMLElement | null
       if (!el) return
       const w = Math.ceil(el.offsetWidth) + ONB_SHADOW_PAD * 2
       const h = Math.ceil(el.offsetHeight) + ONB_SHADOW_PAD * 2
+      const key = `${w}x${h}`
+      if (key === last) return
+      last = key
       window.grayBridge?.setOnboardingSize?.(w, h)
     }
 
-    report()
-    const observer = new ResizeObserver(report)
-    observer.observe(card)
-    return () => observer.disconnect()
-  }, [step, permissions, pendingInvite, session])
+    const resize = new ResizeObserver(report)
+    function retarget() {
+      const card = root?.querySelector('.onb-card') as HTMLElement | null
+      if (card === watched) return
+      if (watched) resize.unobserve(watched)
+      watched = card
+      if (card) resize.observe(card)
+      report()
+    }
+    retarget()
+    const mutations = new MutationObserver(retarget)
+    mutations.observe(root, { childList: true })
+    return () => {
+      mutations.disconnect()
+      resize.disconnect()
+    }
+  }, [])
 
   return (
     <div className="onb-root" ref={rootRef}>
@@ -89,7 +109,7 @@ export default function OnboardingApp() {
         />
       )}
       {(step === 'permissions' || step === 'complete') && (
-        <PermissionsStep permissions={permissions} />
+        <PermissionsStep permissions={permissions} micSkipped={micSkipped} />
       )}
     </div>
   )

@@ -28,7 +28,7 @@ export type Trigger = {
 
 /** An app referenced by a step, rendered as an inline chip (icon + name). */
 export type StepApp = {
-  id: 'figma' | 'chrome' | 'slack' | 'finder' | 'mail'
+  id: 'figma' | 'chrome' | 'slack' | 'notion' | 'finder' | 'mail'
   name: string
 }
 
@@ -50,6 +50,8 @@ export type FixOption = {
  */
 export type FixStep = {
   prompt: string
+  /** What Gray saw while recording, e.g. "You selected October 5–11 while recording." */
+  context?: string
   options: FixOption[]
   selectedOptionId: string
   customValue?: string
@@ -318,6 +320,8 @@ export type RecordDropdownSnapshot = {
   revision: number
   recordMode: 'one-app' | 'full-screen'
   selectedAppId: string
+  /** "Select apps" is multi-select; `selectedAppId` is the first of these. */
+  selectedAppIds: string[]
   narrate: boolean
   apps: Array<{ id: string; name: string; detail: string }>
   screenGranted: boolean
@@ -329,6 +333,7 @@ export type RecordDropdownSnapshot = {
 export type RecordDropdownCommand =
   | { id: string; type: 'setRecordMode'; value: 'one-app' | 'full-screen' }
   | { id: string; type: 'selectApp'; value: string }
+  | { id: string; type: 'toggleApp'; value: string }
   | { id: string; type: 'setNarrate'; value: boolean }
   | { id: string; type: 'start' }
   | { id: string; type: 'openScreenSettings' }
@@ -398,7 +403,10 @@ export type RecordMode = 'one-app' | 'full-screen'
 export type RecordSettings = {
   recordMode: RecordMode
   narrate: boolean
+  /** The first of `selectedAppIds`; stores written before multi-select only have this. */
   selectedAppId: string
+  /** Every app a "Select apps" recording may read (at least one). */
+  selectedAppIds?: string[]
 }
 
 export type PillPosition = {

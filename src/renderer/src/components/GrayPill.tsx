@@ -1,11 +1,11 @@
 import { useWorkflow } from '../state/WorkflowContext'
 import { useWindowDrag } from '../hooks/useWindowDrag'
 import StatusPill from './shared/StatusPill'
-import { PlayPauseControl } from './shared/Marks'
+import { pillKindFor } from './pillLayout'
 
 /**
- * The pill IS the character — a paper capsule whose content changes with state.
- * Rendered only in collapsed states; expanded panels replace it.
+ * The pill stays on screen in every state; panels open above it. A tap toggles whatever the
+ * pill owns right now (record dropdown, ledger, editor, run panel); a drag moves the window.
  */
 export default function GrayPill() {
   const {
@@ -18,139 +18,89 @@ export default function GrayPill() {
     elapsedLabel,
     recordPaused,
     toggleRecordPause,
+    watchExpanded,
     setWatchExpanded,
+    editorCollapsed,
     setEditorCollapsed,
     runPaused,
     toggleRunPause,
     runElapsedLabel,
+    runCollapsed,
     setRunCollapsed,
     hasQuestionHold,
     hasErrorHold,
     permissionPaused,
-    permissionHold
+    permissionHold,
+    summaryOutcome
   } = useWorkflow()
+
   // One shared gesture owner (drag vs tap, post-drag click suppression, cancel on blur).
-  const { onMouseDown: handleMouseDown } = useWindowDrag({
+  const { onMouseDown } = useWindowDrag({
     preventDefault: true,
     onTap: () => {
-      if (savedConfirm && state === 'idle') {
+      if (state === 'idle' && savedConfirm) {
         dismissSavedConfirm()
         return
       }
       if (state === 'idle' || state === 'hover') toggleHover()
+      else if (state === 'recording') setWatchExpanded(!watchExpanded)
+      else if (state === 'editor') setEditorCollapsed(!editorCollapsed)
+      else if (state === 'running') setRunCollapsed(!runCollapsed)
     }
   })
 
-  function handleContextMenu(e: React.MouseEvent) {
+  function onContextMenu(e: React.MouseEvent) {
     e.preventDefault()
     if (state === 'hover') closeHover()
     window.grayBridge?.showContextMenu?.()
   }
 
-  const sharedProps = {
-    onMouseDown: handleMouseDown,
-    onContextMenu: handleContextMenu
-  }
+  const kind = pillKindFor({
+    state,
+    recordPaused,
+    hasErrorHold,
+    hasQuestionHold,
+    permissionHold,
+    permissionPaused,
+    savedConfirm: !!savedConfirm,
+    summaryDone: summaryOutcome === 'done'
+  })
 
-  if (state === 'recording') {
+  const common = { onMouseDown, onContextMenu }
+
+  if (kind === 'recording' || kind === 'paused') {
     return (
       <StatusPill
-        kind={recordPaused ? 'paused' : 'reading'}
+        kind={kind}
         paused={recordPaused}
         onTogglePause={toggleRecordPause}
-        label={recordPaused ? 'Paused' : 'Reading…'}
         time={elapsedLabel}
-        onClick={() => setWatchExpanded(true)}
-        {...sharedProps}
+        title={watchExpanded ? 'Hide what Gray has learned' : 'Show what Gray has learned'}
+        {...common}
       />
     )
   }
-
-  if (state === 'organizing') {
-    return (
-      <StatusPill
-        kind="thinking"
-        label={<span className="pill-blink">Saving…</span>}
-        {...sharedProps}
-      />
-    )
-  }
-
-  if (state === 'editor') {
-    return (
-      <StatusPill
-        kind="editing"
-        label="Editing"
-        onClick={() => setEditorCollapsed(false)}
-        {...sharedProps}
-      />
-    )
-  }
-
-  if (state === 'running') {
-    const kind = permissionHold
-      ? 'interpreting'
-      : hasErrorHold
-        ? 'error'
-        : hasQuestionHold
-          ? 'interpreting'
-          : 'running'
+  if (kind === 'running' || kind === 'needs' || kind === 'error') {
     return (
       <StatusPill
         kind={kind}
         paused={runPaused}
-        onTogglePause={toggleRunPause}
+        onTogglePause={kind === 'running' ? toggleRunPause : undefined}
         time={runElapsedLabel}
-        onClick={() => setRunCollapsed(false)}
-        {...sharedProps}
+        {...common}
       />
     )
   }
-
-  if (permissionPaused && (state === 'idle' || state === 'hover')) {
-    return (
-      <StatusPill kind="permission" label="Paused — needs permission" {...sharedProps} />
-    )
-  }
-
-  if (savedConfirm && state === 'idle') {
+  if (kind === 'saved') {
     return (
       <StatusPill
         kind="saved"
-        label="Workflow saved ·"
         actionLabel="Open in Library"
         onAction={openSavedInLibrary}
-        {...sharedProps}
+        {...common}
       />
     )
   }
-
   // Open is not hover: the capsule looks the same while its dropdown is open (M1-HF3).
-  return <StatusPill kind="idle" {...sharedProps} />
-}
-
-export function PauseButton({
-  paused,
-  onToggle
-}: {
-  paused: boolean
-  onToggle: () => void
-}) {
-  return <PlayPauseControl paused={paused} onToggle={onToggle} />
-}
-
-export function ChevronUp() {
-  return (
-    <svg width="9" height="5" viewBox="0 0 9 5" fill="none" stroke="currentColor" strokeWidth="1">
-      <path d="M0.5 4.5 4.5 0.5 8.5 4.5" />
-    </svg>
-  )
-}
-
-export function ChevronDown() {
-  return (
-    <svg width="9" height="5" viewBox="0 0 9 5" fill="none" stroke="currentColor" strokeWidth="1">
-      <path d="M0.5 0.5 4.5 4.5 8.5 0.5" />
-    </svg>
-  )
+  return <StatusPill kind={kind} {...common} />
 }

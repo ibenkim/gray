@@ -4,24 +4,17 @@ import type { RunStep, StepApp } from '../../state/types'
 import AppChip, { AppChipBlank, isAppSlotLabel, withAppSlotBlank } from '../shared/AppChip'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 import RailCell, { type SummaryRailState } from '../shared/RailCell'
+import RichText from '../shared/RichText'
 
 /**
- * 07 — summary recap. Meta: "Done · 6 of 6 · 1:12" / "Stopped · 3 of 6 · 1:12".
- * Row states: done · done-voice · held (rose) · skipped · not-yet.
- * Movable via the shared pill drag path; app chips are editable/deletable.
+ * 07 — summary (Figma: summary-done · Summary / stopped · Run "Summary"). The run card
+ * narrows into this recap in place. Done: gray rows with checks · View log · Done.
+ * Stopped: the step it stopped on carries an isolated accent node on a rose tint; rows it
+ * never reached are dimmed; Run Remaining picks up from there.
  */
 export default function SummaryPanel() {
-  const {
-    workflow,
-    runSteps,
-    setRunSteps,
-    summaryOutcome,
-    summaryMeta,
-    finishSummary,
-    runRemaining,
-    runAgain,
-    lastRunId
-  } = useWorkflow()
+  const { workflow, runSteps, setRunSteps, summaryOutcome, summaryMeta, finishSummary, runRemaining, lastRunId } =
+    useWorkflow()
   const isStopped = summaryOutcome === 'stopped'
   // Hovering "Run remaining" highlights the rows it will act on.
   const [previewRemaining, setPreviewRemaining] = useState(false)
@@ -57,7 +50,6 @@ export default function SummaryPanel() {
       })
       return
     }
-    // Unique-to-app: whole event edit after removing the chip.
     patchStep(step.id, { app: undefined })
     setEditingId(step.id)
     setDraftText(step.status === 'done' ? step.doneLabel : step.label)
@@ -79,87 +71,89 @@ export default function SummaryPanel() {
     else patchStep(step.id, { label: text })
   }
 
+  const heldIndex = runSteps.findIndex(
+    (s) => s.status === 'active' || s.status === 'question' || s.status === 'error'
+  )
+  const stateOf = (step: RunStep, i: number): SummaryRailState =>
+    heldIndex >= 0
+      ? i < heldIndex
+        ? 'complete'
+        : i === heldIndex
+          ? 'stopped'
+          : 'unrun'
+      : step.status === 'pending'
+        ? 'unrun'
+        : 'complete'
+
   return (
-    <div className="summary-panel" onMouseDown={onDragMouseDown}>
+    <div className={`summary-panel ${isStopped ? 'summary-panel-stopped' : ''}`} onMouseDown={onDragMouseDown}>
       <div className="summary-head">
         <div className="summary-title">{workflow.name}</div>
-        <div className="meta">{summaryMeta}</div>
+        <div className="summary-meta">{summaryMeta}</div>
       </div>
 
-      <div className="run-steps scroll">
+      <div className="summary-steps scroll">
         {runSteps.map((step, i) => {
-          const heldIndex = runSteps.findIndex(
-            (s) => s.status === 'active' || s.status === 'question' || s.status === 'error'
-          )
-          const summaryState =
-            heldIndex >= 0
-              ? i < heldIndex
-                ? 'complete'
-                : i === heldIndex
-                  ? 'stopped'
-                  : 'unrun'
-              : step.status === 'pending'
-                ? 'unrun'
-                : 'complete'
+          const summaryState = stateOf(step, i)
+          const prevState = i > 0 ? stateOf(runSteps[i - 1], i - 1) : null
+          const nextState = i < runSteps.length - 1 ? stateOf(runSteps[i + 1], i + 1) : null
           return (
-          <SummaryStepRow
-            key={step.id}
-            step={step}
-            summaryState={summaryState}
-            leading={i > 0 && summaryState !== 'stopped'}
-            trailing={i < runSteps.length - 1 && summaryState !== 'stopped'}
-            expanded={expandedId === step.id}
-            onToggle={() => setExpandedId(expandedId === step.id ? null : step.id)}
-            highlighted={
-              previewRemaining &&
-              (step.status === 'active' ||
-                step.status === 'question' ||
-                step.status === 'error' ||
-                step.status === 'pending')
-            }
-            editing={editingId === step.id}
-            draftText={draftText}
-            onDraftChange={setDraftText}
-            onCommitEdit={() => commitEdit(step)}
-            onCancelEdit={() => setEditingId(null)}
-            onChangeApp={(app) => changeApp(step, app)}
-            onRemoveApp={() => removeApp(step)}
-            onPickSlotApp={(app) => pickSlotApp(step, app)}
-          />
+            <SummaryStepRow
+              key={step.id}
+              index={i}
+              step={step}
+              summaryState={summaryState}
+              leading={prevState === summaryState && summaryState !== 'stopped'}
+              trailing={nextState === summaryState && summaryState !== 'stopped'}
+              expanded={expandedId === step.id}
+              onToggle={() => setExpandedId(expandedId === step.id ? null : step.id)}
+              highlighted={previewRemaining && summaryState !== 'complete'}
+              editing={editingId === step.id}
+              draftText={draftText}
+              onDraftChange={setDraftText}
+              onCommitEdit={() => commitEdit(step)}
+              onCancelEdit={() => setEditingId(null)}
+              onChangeApp={(app) => changeApp(step, app)}
+              onRemoveApp={() => removeApp(step)}
+              onPickSlotApp={(app) => pickSlotApp(step, app)}
+            />
           )
         })}
       </div>
 
-      <div className="ledger-footer window-actions">
-        <button
-          className="btn btn-quiet"
-          onClick={() =>
-            window.grayBridge?.openWorkspace?.(
-              lastRunId
-                ? { workflowId: workflow.id, runId: lastRunId }
-                : { workflowId: workflow.id }
-            )
-          }
-        >
-          View log
-        </button>
+      <div className="summary-footer" onMouseDown={(e) => e.stopPropagation()}>
         <div className="window-actions-right">
-          {isStopped && (
-            <button
-              className="btn btn-secondary"
-              onClick={runRemaining}
-              onMouseEnter={() => setPreviewRemaining(true)}
-              onMouseLeave={() => setPreviewRemaining(false)}
-            >
-              Run remaining
-            </button>
+          {isStopped ? (
+            <>
+              <button className="btn btn-secondary" onClick={finishSummary}>
+                Done
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={runRemaining}
+                onMouseEnter={() => setPreviewRemaining(true)}
+                onMouseLeave={() => setPreviewRemaining(false)}
+              >
+                Run Remaining
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="btn btn-secondary"
+                onClick={() =>
+                  window.grayBridge?.openWorkspace?.(
+                    lastRunId ? { workflowId: workflow.id, runId: lastRunId } : { workflowId: workflow.id }
+                  )
+                }
+              >
+                View log
+              </button>
+              <button className="btn btn-primary" onClick={finishSummary}>
+                Done
+              </button>
+            </>
           )}
-          <button className="btn btn-secondary" onClick={runAgain}>
-            Run again
-          </button>
-          <button className="btn btn-primary" onClick={finishSummary}>
-            Done
-          </button>
         </div>
       </div>
     </div>
@@ -167,6 +161,7 @@ export default function SummaryPanel() {
 }
 
 function SummaryStepRow({
+  index,
   step,
   summaryState,
   leading,
@@ -183,6 +178,7 @@ function SummaryStepRow({
   onRemoveApp,
   onPickSlotApp
 }: {
+  index: number
   step: RunStep
   summaryState: SummaryRailState
   leading: boolean
@@ -201,9 +197,8 @@ function SummaryStepRow({
 }) {
   const isDone = step.status === 'done'
   const isSkipped = step.status === 'skipped'
-  const isHeld =
-    step.status === 'active' || step.status === 'question' || step.status === 'error'
-  const isNotYet = step.status === 'pending'
+  const isHeld = summaryState === 'stopped'
+  const isNotYet = summaryState === 'unrun'
   const isVoice = isDone && !!step.voiceNote
   const displayText = isDone ? step.doneLabel : step.label
   const slotBlank = !step.app && (isAppSlotLabel(step.label) || isAppSlotLabel(step.doneLabel))
@@ -211,24 +206,26 @@ function SummaryStepRow({
 
   return (
     <div>
-      <button
-        className={`run-step summary-row ${isHeld ? 'summary-row-held' : ''} ${
+      <div
+        role="button"
+        tabIndex={0}
+        className={[
+          'summary-row',
+          isHeld ? 'summary-row-held' : '',
+          isNotYet ? 'summary-row-notyet' : '',
           highlighted ? 'summary-row-highlight' : ''
-        } ${isDone || isSkipped ? 'run-step-past' : ''} ${isNotYet ? 'summary-row-notyet' : ''} ${
-          isVoice ? 'summary-row-voice' : ''
-        }`}
-        onClick={() => {
-          if (editing) return
-          onToggle()
+        ].join(' ')}
+        style={{ ['--i' as string]: index }}
+        onClick={() => !editing && onToggle()}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && !editing) {
+            e.preventDefault()
+            onToggle()
+          }
         }}
+        aria-expanded={expanded}
       >
-        <RailCell
-          kind="summary"
-          anchor={isVoice ? 'voice' : 'standard'}
-          state={summaryState}
-          leading={leading}
-          trailing={trailing}
-        />
+        <RailCell kind="summary" anchor="summary" state={summaryState} leading={leading} trailing={trailing} />
         <div className="run-step-body">
           {editing ? (
             <input
@@ -245,74 +242,41 @@ function SummaryStepRow({
               }}
             />
           ) : (
-            <span className={`run-step-label ${isHeld ? 'run-step-label-current' : ''}`}>
-              {textWithoutBlank}
-              {step.app ? (
-                <AppChip
-                  app={step.app}
-                  muted={isDone || isSkipped || isNotYet}
-                  editable
-                  onChangeApp={onChangeApp}
-                  onRemoveApp={onRemoveApp}
-                />
-              ) : slotBlank ? (
-                <AppChipBlank
-                  muted={isDone || isSkipped || isNotYet}
-                  onPick={onPickSlotApp}
-                />
-              ) : null}
-            </span>
+            <div className="run-step-line">
+              <span className="run-step-label">
+                <RichText text={textWithoutBlank} />
+                {step.app ? (
+                  <AppChip app={step.app} muted editable onChangeApp={onChangeApp} onRemoveApp={onRemoveApp} />
+                ) : slotBlank ? (
+                  <AppChipBlank muted onPick={onPickSlotApp} />
+                ) : null}
+              </span>
+              {isDone && (
+                <span className="run-check" aria-label="Done">
+                  <svg width="10" height="8" viewBox="0 0 10 8" fill="none" aria-hidden="true">
+                    <path d="M0.35 3.35L3.35 6.35L9.35 0.35" pathLength={1} />
+                  </svg>
+                </span>
+              )}
+              {isSkipped && <span className="run-skipped-mark">Skipped</span>}
+            </div>
           )}
-          {step.voiceNote && !editing && (
-            <span className="run-voice-quote">
-              {step.voiceNote.text.replace(/[“”"…]/g, '').replace(/^\.{3}/, '')}
-            </span>
+          {step.voiceNote && !editing && isVoice && (
+            <span className="run-voice-quote">{step.voiceNote.text.replace(/[“”"…]/g, '').replace(/^\.{3}/, '')}</span>
           )}
         </div>
-        {isHeld ? (
-          <HeldBars />
-        ) : isSkipped ? (
-          <span className="run-skipped-mark">Skipped</span>
-        ) : (
-          <ChevronExpand open={expanded} muted={isNotYet} />
-        )}
-      </button>
+      </div>
       {expanded && !editing && (
         <div className="summary-detail">
-          {isDone && `Completed in 12s — ${step.doneLabel}.`}
+          {isDone && `Completed — ${step.doneLabel}.`}
           {isSkipped && 'Skipped by you during the run.'}
           {isHeld &&
             (step.status === 'error'
               ? step.error?.message || 'The run needed help at this step.'
               : 'The run stopped while this step was in progress.')}
-          {isNotYet && 'Not reached — will run in full with "Run remaining".'}
+          {isNotYet && 'Not reached — Run Remaining picks up from here.'}
         </div>
       )}
     </div>
-  )
-}
-
-function HeldBars() {
-  return (
-    <svg width="8" height="8" viewBox="0 0 8 8" className="summary-heldbars">
-      <rect x="1" width="2" height="8" rx="1" fill="var(--rose)" />
-      <rect x="5" width="2" height="8" rx="1" fill="var(--rose)" />
-    </svg>
-  )
-}
-
-function ChevronExpand({ open, muted }: { open: boolean; muted: boolean }) {
-  return (
-    <svg
-      width="9"
-      height="6"
-      viewBox="0 0 9 6"
-      fill="none"
-      stroke={muted ? 'rgba(161,161,171,0.5)' : 'rgba(161,161,171,0.9)'}
-      strokeWidth="1"
-      style={{ transform: open ? 'rotate(180deg)' : undefined, flexShrink: 0 }}
-    >
-      <path d="M0.5 1 4.5 5 8.5 1" />
-    </svg>
   )
 }

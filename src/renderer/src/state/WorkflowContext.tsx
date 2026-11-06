@@ -29,6 +29,20 @@ import { formatWatchEntry } from '../../../shared/telemetry/formatWatchEntry'
 import type { TelemetryEvent } from '../../../shared/telemetry/schema'
 import { noticeForStopResult, type RecordingNotice } from '../workspace/UploadReview'
 import { createMockDraft, makeRunSteps, MOCK_APPS } from './mockData'
+import {
+  PILL_H,
+  PILL_MORPH_MS,
+  PILL_WIDTH,
+  SUMMARY_W,
+  SURFACE_EXIT_MS,
+  SURFACE_SIZE,
+  panelWindowSize,
+  pillKindFor,
+  surfaceFor,
+  type SurfaceKind
+} from '../components/pillLayout'
+
+type WindowBounds = { w: number; h: number; mode: 'pill' | 'panel' }
 
 /**
  * Renderer's account of the narration chunks it sent; main verifies it against the sink.
@@ -234,8 +248,13 @@ type WorkflowContextValue = {
   // hover / recording config
   recordMode: RecordMode
   setRecordMode: (m: RecordMode) => void
+  /** The first chosen app (older readers); `selectedAppIds` holds every choice. */
   selectedAppId: string
+  /** "Select apps" is multi-select: every app the recording may read, at least one. */
+  selectedAppIds: string[]
   setSelectedAppId: (id: string) => void
+  /** Add or remove an app; the last chosen app stays chosen. */
+  toggleSelectedApp: (id: string) => void
   narrate: boolean
   setNarrate: (v: boolean) => void
   // recording
@@ -263,6 +282,10 @@ type WorkflowContextValue = {
   /** Returns whether the drag should collapse glass → pill. */
   beginDrag: () => { collapseToPill: boolean }
   endDrag: () => void
+  /** Where the open surface sits relative to the pill (main's placement for this window). */
+  placement: 'above' | 'below'
+  /** The open surface reports its measured content height so the window hugs it. */
+  reportSurfaceHeight: (key: SurfaceKind, height: number) => void
   // running
   runSteps: RunStep[]
   setRunSteps: Dispatch<SetStateAction<RunStep[]>>
@@ -321,6 +344,9 @@ type WorkflowContextValue = {
 }
 
 const WorkflowContext = createContext<WorkflowContextValue | null>(null)
+/** Design-gallery seam: previews render real surfaces against a fixed context value. */
+export { WorkflowContext as WorkflowContextForPreview }
+export type { WorkflowContextValue }
 
 function formatElapsed(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60)
@@ -374,7 +400,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   stateRef.current = state
 
   const [recordMode, setRecordModeState] = useState<RecordMode>('one-app')
-  const [selectedAppId, setSelectedAppIdState] = useState('chrome')
+  const [selectedAppIds, setSelectedAppIdsState] = useState<string[]>(['chrome'])
+  const selectedAppId = selectedAppIds[0] ?? 'chrome'
   const [narrate, setNarrateState] = useState(true)
   const settingsReadyRef = useRef(false)
 
@@ -400,9 +427,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   /** While true, hover must not open — dragging and hovering are exclusive. */
   const draggingRef = useRef(false)
-  const prevStateRef = useRef<AppState>(state)
-  /** Last bounds request sent for the pill (the dropdown never resizes it). */
-  const lastBoundsKeyRef = useRef<string | null>(null)
+  /** Last bounds request sent for the pill window (the dropdown never resizes it). */
+  const lastBoundsRef = useRef<WindowBounds | null>(null)
+  /** A deferred shrink waits for the surface exit / pill morph to finish on screen. */
+  const shrinkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Bumped after a drag so the window re-confirms its size at the dropped position. */
+  const [boundsEpoch, setBoundsEpoch] = useState(0)
+  /** Where main placed the panel relative to the pill (from the bounds acknowledgement). */
+  const [placement, setPlacement] = useState<'above' | 'below'>('above')
+  /** Measured content height of the open surface, keyed so a new surface never inherits it. */
+  const [surfaceMeasure, setSurfaceMeasure] = useState<{ key: SurfaceKind; h: number } | null>(
+    null
+  )
+  const reportSurfaceHeight = useCallback((key: SurfaceKind, h: number) => {
+    setSurfaceMeasure((prev) => (prev && prev.key === key && prev.h === h ? prev : { key, h }))
+  }, [])
   /** Generation of the latest dropdown open acknowledged as current (M1-HF3). */
   const dropdownGenRef = useRef(-1)
   /**
@@ -526,7 +565,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     window.grayBridge?.getSnapshot?.().then((snap) => {
       if (cancelled || !snap) return
       setRecordModeState(snap.recordSettings.recordMode)
-      setSelectedAppIdState(snap.recordSettings.selectedAppId)
+      const saved = snap.recordSettings.selectedAppIds
+      setSelectedAppIdsState(saved?.length ? saved : [snap.recordSettings.selectedAppId])
       setNarrateState(snap.recordSettings.narrate)
       settingsReadyRef.current = true
     })
@@ -536,9 +576,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const persistRecordSettings = useCallback(
-    (next: { recordMode: RecordMode; narrate: boolean; selectedAppId: string }) => {
+    (next: { recordMode: RecordMode; narrate: boolean; selectedAppIds: string[] }) => {
       if (!settingsReadyRef.current) return
-      window.grayBridge?.setRecordSettings?.(next)
+      window.grayBridge?.setRecordSettings?.({
+        recordMode: next.recordMode,
+        narrate: next.narrate,
+        selectedAppId: next.selectedAppIds[0] ?? 'chrome',
+        selectedAppIds: next.selectedAppIds
+      })
     },
     []
   )
@@ -546,25 +591,36 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const setRecordMode = useCallback(
     (m: RecordMode) => {
       setRecordModeState(m)
-      persistRecordSettings({ recordMode: m, narrate, selectedAppId })
+      persistRecordSettings({ recordMode: m, narrate, selectedAppIds })
     },
-    [narrate, persistRecordSettings, selectedAppId]
+    [narrate, persistRecordSettings, selectedAppIds]
   )
 
-  const setSelectedAppId = useCallback(
-    (id: string) => {
-      setSelectedAppIdState(id)
-      persistRecordSettings({ recordMode, narrate, selectedAppId: id })
+  const setSelectedAppIds = useCallback(
+    (ids: string[]) => {
+      setSelectedAppIdsState(ids)
+      persistRecordSettings({ recordMode, narrate, selectedAppIds: ids })
     },
     [narrate, persistRecordSettings, recordMode]
+  )
+
+  const setSelectedAppId = useCallback((id: string) => setSelectedAppIds([id]), [setSelectedAppIds])
+
+  const toggleSelectedApp = useCallback(
+    (id: string) => {
+      if (!selectedAppIds.includes(id)) return setSelectedAppIds([...selectedAppIds, id])
+      // A one-app recording always reads at least one app.
+      if (selectedAppIds.length > 1) setSelectedAppIds(selectedAppIds.filter((x) => x !== id))
+    },
+    [selectedAppIds, setSelectedAppIds]
   )
 
   const setNarrate = useCallback(
     (v: boolean) => {
       setNarrateState(v)
-      persistRecordSettings({ recordMode, narrate: v, selectedAppId })
+      persistRecordSettings({ recordMode, narrate: v, selectedAppIds })
     },
-    [persistRecordSettings, recordMode, selectedAppId]
+    [persistRecordSettings, recordMode, selectedAppIds]
   )
 
   // ── Keep main's context-menu variant in sync ──
@@ -599,53 +655,74 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [savedConfirm])
 
   // ── Sync window bounds with state ──
+  // The window grows at once (the surface or capsule then animates inside it) and shrinks only
+  // after the exit / morph has played, so motion is never clipped by the native frame.
+  const hasQuestionHold = runSteps.some(
+    (s) => s.status === 'question' && s.question?.answerId === null
+  )
+  const hasErrorHold = runSteps.some((s) => s.status === 'error' && !s.error?.takenOver)
   useEffect(() => {
-    type Size = {
-      w: number
-      h: number
-      mode: 'pill' | 'glass' | 'panel'
-      center?: boolean
+    const surface = surfaceFor({
+      state,
+      watchExpanded,
+      editorCollapsed,
+      runCollapsed,
+      toast: (permToastVisible && state !== 'hover') || (!!recordingNotice && state === 'idle')
+    })
+    const kind = pillKindFor({
+      state,
+      recordPaused,
+      hasErrorHold,
+      hasQuestionHold,
+      permissionHold,
+      permissionPaused,
+      savedConfirm: !!savedConfirm,
+      summaryDone: summaryOutcome === 'done'
+    })
+    const pillW = PILL_WIDTH[kind]
+    let target: WindowBounds
+    if (surface) {
+      const cardW = surface === 'run' && state === 'summary' ? SUMMARY_W : SURFACE_SIZE[surface].w
+      const cardH =
+        surfaceMeasure && surfaceMeasure.key === surface ? surfaceMeasure.h : SURFACE_SIZE[surface].h
+      target = { ...panelWindowSize(cardW, cardH, pillW), mode: 'panel' }
+    } else {
+      target = { w: pillW, h: PILL_H, mode: 'pill' }
     }
-    const idleSize: Size = savedConfirm
-      ? { w: 210, h: 24, mode: 'pill' }
-      : permToastVisible || !!recordingNotice
-        ? { w: 410, h: 232, mode: 'panel' }
-        : permissionPaused
-          ? { w: 224, h: 24, mode: 'pill' }
-          : { w: 94, h: 24, mode: 'pill' }
-    // The Record dropdown is its own window (M1-HF3): while it is open the pill keeps its
-    // idle capsule size (toasts hide while it is open).
-    const pillOnly: Size = permissionPaused ? { w: 224, h: 24, mode: 'pill' } : { w: 94, h: 24, mode: 'pill' }
-    const sizes: Record<AppState, Size> = {
-      idle: idleSize,
-      hover: pillOnly,
-      recording: watchExpanded
-        ? // Hug ledger + side/bottom shadow pad; top pad is 0 via .gray-root-panel.
-          { w: 321, h: 336, mode: 'panel' }
-        : { w: 161, h: 24, mode: 'pill' },
-      organizing: { w: 94, h: 24, mode: 'pill' },
-      editor: editorCollapsed
-        ? { w: 125, h: 24, mode: 'pill' }
-        : // 660×521 card + 36 side pads + 36 bottom pad (no top pad).
-          { w: 732, h: 557, mode: 'panel' },
-      running: runCollapsed
-        ? { w: 230, h: 24, mode: 'pill' }
-        : // 436-wide running card + pads; height hugs typical content.
-          { w: 508, h: 436, mode: 'panel' },
-      summary: { w: 432, h: 432, mode: 'panel', center: true }
+
+    const send = (b: WindowBounds) => {
+      lastBoundsRef.current = b
+      void window.grayBridge
+        ?.setBounds?.(b.w, b.h, b.mode, { durationMs: 0, pillDrive: false })
+        ?.then((ack) => {
+          if (ack?.current && b.mode === 'panel') setPlacement(ack.placement)
+        })
     }
-    const { w, h, mode, center } = sizes[state]
-    const prev = prevStateRef.current
-    prevStateRef.current = state
+    const same = (a: WindowBounds, b: WindowBounds) => a.w === b.w && a.h === b.h && a.mode === b.mode
+
+    if (shrinkTimerRef.current) {
+      clearTimeout(shrinkTimerRef.current)
+      shrinkTimerRef.current = null
+    }
+    const prev = lastBoundsRef.current
     // Opening/closing the dropdown or re-running this effect never re-sends the pill's
     // current size: no native frame operation on the stationary pill.
-    const key = `${w}x${h}:${mode}:${center ? 1 : 0}`
-    const quiet = (s: AppState) => s === 'idle' || s === 'hover'
-    if (quiet(prev) && quiet(state) && lastBoundsKeyRef.current === key) return
-    lastBoundsKeyRef.current = key
-    const durationMs = 0
-    const pillDrive = false
-    void window.grayBridge?.setBounds?.(w, h, mode, { durationMs, pillDrive, center })
+    if (prev && same(prev, target)) return
+    if (!prev || (target.w >= prev.w && target.h >= prev.h)) {
+      send(target)
+      return
+    }
+    const interim: WindowBounds = {
+      w: Math.max(prev.w, target.w),
+      h: Math.max(prev.h, target.h),
+      mode: prev.mode === 'panel' || target.mode === 'panel' ? 'panel' : 'pill'
+    }
+    if (!same(interim, prev)) send(interim)
+    const delay = prev.mode === 'panel' ? SURFACE_EXIT_MS : PILL_MORPH_MS
+    shrinkTimerRef.current = setTimeout(() => {
+      shrinkTimerRef.current = null
+      send(target)
+    }, delay)
   }, [
     state,
     watchExpanded,
@@ -654,8 +731,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     savedConfirm,
     permToastVisible,
     permissionPaused,
-    recordingNotice
+    permissionHold,
+    recordingNotice,
+    recordPaused,
+    hasErrorHold,
+    hasQuestionHold,
+    summaryOutcome,
+    surfaceMeasure,
+    boundsEpoch
   ])
+  useEffect(
+    () => () => {
+      if (shrinkTimerRef.current) clearTimeout(shrinkTimerRef.current)
+    },
+    []
+  )
 
   // ── Recording timer ──
   useEffect(() => {
@@ -714,10 +804,6 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     window.grayBridge?.saveRun?.(record)
   }, [state, summaryOutcome])
 
-  const hasQuestionHold = runSteps.some(
-    (s) => s.status === 'question' && s.question?.answerId === null
-  )
-  const hasErrorHold = runSteps.some((s) => s.status === 'error' && !s.error?.takenOver)
   const holdActive = hasQuestionHold || hasErrorHold
 
   // ── Mirror holds into Activity (Phase 3 renders 2.5) ──
@@ -1239,11 +1325,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       (s === 'editor' && !editorCollapsedRef.current) ||
       (s === 'running' && !runCollapsedRef.current) ||
       s === 'summary'
-    return { collapseToPill: !keepOpen }
+    // A pill-only window is already its capsule: never let main resize it to the idle width.
+    const pillOnly = lastBoundsRef.current?.mode !== 'panel'
+    return { collapseToPill: !keepOpen && !pillOnly }
   }, [])
 
   const endDrag = useCallback(() => {
     draggingRef.current = false
+    // Main may have collapsed or re-anchored the frame: re-confirm the size at the drop point.
+    lastBoundsRef.current = null
+    setBoundsEpoch((e) => e + 1)
     // Open/close requested during the drag runs now, from the dropped position.
     hoverDriverRef.current?.kick()
   }, [])
@@ -1261,6 +1352,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const result = await window.grayBridge?.telemetryStart?.({
       recordMode,
       selectedAppId,
+      selectedAppIds,
       narrate: wantNarrate
     })
     if (!result?.ok) {
@@ -1281,7 +1373,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }
     setRecordPaused(false)
     setState('recording')
-  }, [micGranted, narrate, recordMode, resetRecording, selectedAppId, startNarrationCapture])
+  }, [micGranted, narrate, recordMode, resetRecording, selectedAppId, selectedAppIds, startNarrationCapture])
 
   const cancelRecording = useCallback(async () => {
     await endNarration()
@@ -1373,13 +1465,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       revision: ++dropdownRevRef.current,
       recordMode,
       selectedAppId,
+      selectedAppIds,
       narrate,
       apps: MOCK_APPS.map(({ id, name, detail }) => ({ id, name, detail })),
       screenGranted,
       micGranted,
       busy: dropdownBusy
     })
-  }, [recordMode, selectedAppId, narrate, screenGranted, micGranted, dropdownBusy])
+  }, [recordMode, selectedAppId, selectedAppIds, narrate, screenGranted, micGranted, dropdownBusy])
 
   // Leaving the open state for another surface (a run, an editor) closes the child; the
   // ordinary close to idle already did.
@@ -1390,8 +1483,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     if (prev === 'hover' && state !== 'hover' && state !== 'idle') void window.grayBridge?.closeDropdown?.()
   }, [state])
 
-  const dropdownActionsRef = useRef({ setRecordMode, setSelectedAppId, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted })
-  dropdownActionsRef.current = { setRecordMode, setSelectedAppId, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted }
+  const dropdownActionsRef = useRef({ setRecordMode, setSelectedAppId, toggleSelectedApp, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted })
+  dropdownActionsRef.current = { setRecordMode, setSelectedAppId, toggleSelectedApp, setNarrate, startRecording, openScreenRecovery, micGranted, screenGranted }
   useEffect(() => {
     // Commands were validated and de-duplicated in main; check again against current state.
     async function startFromDropdown() {
@@ -1419,6 +1512,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           return
         case 'selectApp':
           if (MOCK_APPS.some((x) => x.id === cmd.value)) a.setSelectedAppId(cmd.value)
+          return
+        case 'toggleApp':
+          if (MOCK_APPS.some((x) => x.id === cmd.value)) a.toggleSelectedApp(cmd.value)
           return
         case 'setNarrate':
           if (a.micGranted && typeof cmd.value === 'boolean') a.setNarrate(cmd.value)
@@ -1729,7 +1825,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     recordMode,
     setRecordMode,
     selectedAppId,
+    selectedAppIds,
     setSelectedAppId,
+    toggleSelectedApp,
     narrate,
     setNarrate,
     elapsedLabel: formatElapsed(elapsed),
@@ -1750,6 +1848,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     dismissSavedConfirm,
     beginDrag,
     endDrag,
+    placement,
+    reportSurfaceHeight,
     runSteps,
     setRunSteps,
     runPaused,
@@ -1807,6 +1907,7 @@ function mapAppName(name?: string): StepApp | undefined {
   if (lower.includes('figma')) return { id: 'figma', name: 'Figma' }
   if (lower.includes('chrome') || lower.includes('chromium')) return { id: 'chrome', name: 'Chrome' }
   if (lower.includes('slack')) return { id: 'slack', name: 'Slack' }
+  if (lower.includes('notion')) return { id: 'notion', name: 'Notion' }
   if (lower.includes('finder')) return { id: 'finder', name: 'Finder' }
   if (lower.includes('mail')) return { id: 'mail', name: 'Mail' }
   return undefined

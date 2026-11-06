@@ -88,8 +88,12 @@ export default function ManageView({
             />
           ) : (
             <>
-              <div className="ws-header-title">Manage Team</div>
-              <div className="ws-header-sub">{memberLabel}</div>
+              <div className="ws-header-title" title={team.name}>
+                Manage Team
+              </div>
+              <div className="ws-header-sub">
+                {team.name} · {memberLabel}
+              </div>
             </>
           )}
         </div>
@@ -125,7 +129,16 @@ export default function ManageView({
             ) : (
               <>
                 <button
-                  className="btn btn-secondary"
+                  className="btn btn-quiet btn-ws btn-regular"
+                  onClick={() => {
+                    setNameDraft(team.name)
+                    setRenaming(true)
+                  }}
+                >
+                  Rename
+                </button>
+                <button
+                  className="btn btn-hairline btn-ws"
                   onClick={() => {
                     setInviting(true)
                     setEmailError(false)
@@ -133,49 +146,44 @@ export default function ManageView({
                 >
                   Invite to Team
                 </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    setNameDraft(team.name)
-                    setRenaming(true)
-                  }}
-                >
-                  Edit
-                </button>
               </>
             )}
           </div>
         )}
       </div>
 
-      <div className="manage-section">
-        <div className="manage-section-label">MEMBERS</div>
-        <div className="ws-rows">
-          {members.map((m) => (
-            <MemberRow
-              key={m.id}
-              member={m}
-              canManage={canManage}
-              onRemove={() => setRemoveTarget(m)}
-            />
-          ))}
-        </div>
-      </div>
-
-      {invites.length > 0 && (
+      <div className="manage-content scroll">
         <div className="manage-section">
-          <div className="manage-section-label">INVITED</div>
+          <div className="manage-section-label">Members</div>
           <div className="ws-rows">
-            {invites.map((invite) => (
-              <InvitedRow key={invite.id} invite={invite} canManage={canManage} />
+            {members.map((m, i) => (
+              <MemberRow
+                key={m.id}
+                index={i}
+                member={m}
+                canManage={canManage}
+                onRemove={() => setRemoveTarget(m)}
+              />
             ))}
           </div>
         </div>
-      )}
+
+        {invites.length > 0 && (
+          <div className="manage-section">
+            <div className="manage-section-label">Invited</div>
+            <div className="ws-rows">
+              {invites.map((invite, i) => (
+                <InvitedRow key={invite.id} index={members.length + i} invite={invite} canManage={canManage} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {removeTarget && canManage && (
         <WorkspaceDialog
-          title="Remove member?"
+          title={`Remove ${removeTarget.name} from the team?`}
+          target={removeTarget.name}
           confirmLabel="Remove member"
           onCancel={() => setRemoveTarget(null)}
           onConfirm={() => {
@@ -184,10 +192,9 @@ export default function ManageView({
             void window.grayBridge?.teamRemoveMember?.(id)
           }}
         >
-          <p className="delete-dialog-target">{removeTarget.name}</p>
           <p>
-            They keep their personal workflows. Workflows they shared stay with the team. Their
-            scheduled team runs stop today.
+            {removeTarget.name.split(' ')[0]} will lose access to this workspace immediately. Their workflows
+            and run history stay here. You’ll need to invite them again to restore access.
           </p>
         </WorkspaceDialog>
       )}
@@ -196,24 +203,32 @@ export default function ManageView({
 }
 
 function MemberRow({
+  index,
   member,
   canManage,
   onRemove
 }: {
+  index: number
   member: Member
   canManage: boolean
   onRemove: () => void
 }) {
   const canRemove = canManage && member.role !== 'owner' && !member.isSelf
   return (
-    <div className={`ws-row manage-member-row ${canRemove ? 'manage-member-removable' : ''}`}>
-      <span className="ws-row-name">{member.name}</span>
+    <div
+      className={`ws-row manage-member-row ${canRemove ? 'manage-member-removable' : ''}`}
+      style={{ ['--i' as string]: index }}
+    >
+      <span className="ws-row-name">
+        <span>{member.name}</span>
+      </span>
       <span className="ws-row-right">
         {member.role === 'owner' && <span className="manage-role-chip">Owner</span>}
         {canRemove && (
           <button
             className="manage-remove-btn"
             title="Remove member"
+            aria-label={`Remove ${member.name}`}
             onClick={(e) => {
               e.stopPropagation()
               onRemove()
@@ -227,13 +242,16 @@ function MemberRow({
   )
 }
 
-function InvitedRow({ invite, canManage }: { invite: Invite; canManage: boolean }) {
+function InvitedRow({ index, invite, canManage }: { index: number; invite: Invite; canManage: boolean }) {
   const expired = isInviteExpired(invite)
   const age = formatInviteAge(invite)
   return (
-    <div className={`ws-row manage-invite-row ${expired ? 'manage-invite-row-expired' : ''}`}>
+    <div
+      className={`ws-row manage-invite-row ${expired ? 'manage-invite-row-expired' : ''}`}
+      style={{ ['--i' as string]: index }}
+    >
       <span className="manage-invite-email">{invite.email}</span>
-      <span className="manage-invite-age">· {age}</span>
+      <span className="manage-invite-age">{age}</span>
       <span className="manage-invite-spacer" />
       {canManage && (
         <>
@@ -256,9 +274,5 @@ function InvitedRow({ invite, canManage }: { invite: Invite; canManage: boolean 
 }
 
 function RemoveX() {
-  return (
-    <svg width="7" height="7" viewBox="0 0 7 7" fill="none" stroke="currentColor" strokeWidth="1">
-      <path d="M0.5 0.5 6.5 6.5M6.5 0.5 0.5 6.5" />
-    </svg>
-  )
+  return <span aria-hidden="true">×</span>
 }

@@ -5,10 +5,11 @@ import { formatSchedule } from '../../../shared/schedule'
 import type { Suggestion, Workflow } from '../state/types'
 import type { RecordingSummary } from '../../../shared/types'
 import AppChip from '../components/shared/AppChip'
+import { IdleMark, RecordDot } from '../components/shared/Marks'
 import { recordingStatusLabel } from './UploadReview'
 
-/** 1.2–1.4 — Workflows home: metric header, rows with On/Off, Suggested card.
- *  Shared page reuses the same row grammar with a "shared by …" chip. */
+/** Workflows home (Figma: Hero · Workspace / home/workflows): count + hours, rows with
+ *  On/Off, and the Suggested card resting at the bottom. Shared reuses the row grammar. */
 export default function WorkflowsHome({
   workflows,
   recordings = [],
@@ -46,6 +47,7 @@ export default function WorkflowsHome({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [nameDraft, setNameDraft] = useState('')
   const [deleteId, setDeleteId] = useState<string | null>(null)
+  const [discarding, setDiscarding] = useState(false)
   /** The open row's More button: the menu is anchored to it in the card's overlay layer. */
   const [menuAnchor, setMenuAnchor] = useState<HTMLButtonElement | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
@@ -56,6 +58,8 @@ export default function WorkflowsHome({
       renameRef.current?.select()
     }
   }, [renamingId])
+
+  useEffect(() => setDiscarding(false), [suggestion?.id])
 
   // Menu shortcuts while a row menu is open (dismissal is the popover's).
   useEffect(() => {
@@ -87,6 +91,11 @@ export default function WorkflowsHome({
     onRename(id, next)
   }
 
+  function discard() {
+    setDiscarding(true)
+    setTimeout(onDiscardSuggestion, 280)
+  }
+
   const deleteTarget = deleteId ? workflows.find((w) => w.id === deleteId) : null
 
   const recordingsSection =
@@ -94,15 +103,16 @@ export default function WorkflowsHome({
       <div className="saved-recordings">
         <div className="suggested-label">Saved recordings</div>
         <div className="ws-rows">
-          {recordings.map((r) => (
+          {recordings.map((r, i) => (
             <div
               className="ws-row"
               key={r.sessionId}
+              style={{ ['--i' as string]: i }}
               onClick={() => onOpenRecording?.(r)}
             >
               <span className="ws-row-name">
-                {formatRecordingDate(r.startedAt)}
-                <span className="ws-row-schedule">  ·  {recordingStatusLabel(r)}</span>
+                <span>{formatRecordingDate(r.startedAt)}</span>
+                <span className="ws-row-schedule">{recordingStatusLabel(r)}</span>
               </span>
               <span className="ws-row-right">
                 <span className="recording-action">
@@ -116,9 +126,8 @@ export default function WorkflowsHome({
       </div>
     ) : null
 
-  // 4.1 first-run — empty Library: ready-state sub-line (no zero metric),
-  // centered record CTA that parks the window and opens the record panel.
-  // Shared empty state is a quieter mirror (no record CTA).
+  // 4.1 first-run — empty Library: a ready-state sub-line (no zero metric) and a record CTA
+  // that parks the window and opens the record panel. Shared is a quieter mirror.
   if (workflows.length === 0 && !suggestion) {
     return (
       <div className="ws-view">
@@ -130,19 +139,16 @@ export default function WorkflowsHome({
                 ? 'Nothing shared with the team yet'
                 : recordings.length > 0
                   ? 'No workflows yet — your saved recordings are below'
-                  : 'Nothing here yet — gray is ready when you are'}
+                  : 'Gray is ready when you are'}
             </div>
           </div>
         </div>
         {recordingsSection}
         {!isShared && recordings.length === 0 && (
           <div className="ws-empty">
+            <IdleMark className="ws-empty-mark" />
             <div className="ws-empty-title">Record your first workflow</div>
-            <div className="ws-empty-desc">
-              Do the task once, the way you always do.
-              <br />
-              gray learns the steps — then does it for you, on schedule.
-            </div>
+            <div className="ws-empty-desc">Do the task once, the way you always do.</div>
             <button
               className="btn btn-primary btn-md"
               onClick={() => {
@@ -150,219 +156,215 @@ export default function WorkflowsHome({
                 window.grayBridge?.openRecordPanel?.()
               }}
             >
-              +  Record a workflow
+              <RecordDot />
+              Record a workflow
             </button>
-            <div className="ws-empty-hint">
-              gray will also suggest workflows when it notices you repeating things
-            </div>
+            <div className="ws-empty-hint">Gray will also suggest workflows when it notices you repeating things</div>
           </div>
         )}
       </div>
     )
   }
 
-  // Owner: "6 workflows · Team of 4 · ≈ 21 h returned this month"
-  // Employee: title count + hours sub-line (unchanged).
-  // Shared: "N shared" count header.
-  const hoursMetric = hoursLine.startsWith('≈') ? hoursLine : `≈ ${hoursLine}`
+  const hoursMetric = hoursLine.startsWith('≈') ? hoursLine : hoursLine.replace(/^0 h/, '0 h')
   const isOwnerHeader = !isShared && ownerTeamSize != null
 
   return (
     <div className="ws-view">
       <div className="ws-header">
         <div>
-          {isShared ? (
-            <div className="ws-header-title">
-              {workflows.length} shared
-            </div>
-          ) : isOwnerHeader ? (
-            <div className="ws-header-title">
-              {workflows.length} workflows · Team of {ownerTeamSize} · {hoursMetric}
-            </div>
-          ) : (
-            <>
-              <div className="ws-header-title">{workflows.length} workflows</div>
-              <div className="ws-header-sub">{hoursLine}</div>
-            </>
-          )}
+          <div className="ws-header-title">
+            {isShared ? `${workflows.length} shared` : `${workflows.length} workflows`}
+          </div>
+          <div className="ws-header-sub">
+            {isShared
+              ? 'Workflows your team can run'
+              : isOwnerHeader
+                ? `Team of ${ownerTeamSize} · ${hoursMetric}`
+                : hoursMetric}
+          </div>
         </div>
         {!isShared && (
-          <button
-            className="btn btn-secondary"
-            onClick={() => window.grayBridge?.openRecordPanel?.()}
-          >
-            + Record a workflow
+          <button className="btn btn-primary btn-ws" onClick={() => window.grayBridge?.openRecordPanel?.()}>
+            Record new
           </button>
         )}
       </div>
 
       <div className="ws-home-body scroll">
         <div className="ws-rows">
-        {workflows.map((w) => {
-          const schedule = w.trigger.cadence ? formatSchedule(w.trigger.cadence) : null
-          const sharedByLabel = w.sharedByName ? `shared by ${w.sharedByName}` : null
-          const menuOpen = openMenuId === w.id
-          return (
-            <div className="ws-row" key={w.id} onClick={() => onOpen(w.id)}>
-              {renamingId === w.id ? (
-                <input
-                  ref={renameRef}
-                  className="ws-rename-input"
-                  value={nameDraft}
-                  onChange={(e) => setNameDraft(e.target.value)}
-                  onBlur={() => commitRename(w.id)}
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitRename(w.id)
-                    if (e.key === 'Escape') {
-                      setNameDraft(w.name)
-                      setRenamingId(null)
-                    }
-                  }}
-                />
-              ) : (
-                <span className={`ws-row-name ${w.status === 'off' ? 'ws-row-name-off' : ''}`} title={w.name}>
-                  {w.name}
-                  {schedule && <span className="ws-row-schedule">  ·  {schedule}</span>}
-                </span>
-              )}
-              <span className="ws-row-right">
-                {isShared && sharedByLabel && (
-                  <span className="manage-role-chip">{sharedByLabel}</span>
+          {workflows.map((w, i) => {
+            const schedule = w.trigger.cadence ? formatSchedule(w.trigger.cadence) : null
+            const sharedByLabel = w.sharedByName ? `shared by ${w.sharedByName}` : null
+            const menuOpen = openMenuId === w.id
+            return (
+              <div
+                className={`ws-row ${menuOpen ? 'ws-row-selected' : ''}`}
+                key={w.id}
+                style={{ ['--i' as string]: i }}
+                onClick={() => onOpen(w.id)}
+              >
+                {renamingId === w.id ? (
+                  <input
+                    ref={renameRef}
+                    className="ws-rename-input"
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onBlur={() => commitRename(w.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(w.id)
+                      if (e.key === 'Escape') {
+                        setNameDraft(w.name)
+                        setRenamingId(null)
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className={`ws-row-name ${w.status === 'off' ? 'ws-row-name-off' : ''}`} title={w.name}>
+                    <span>{w.name}</span>
+                    {schedule && <span className="ws-row-schedule">{schedule}</span>}
+                  </span>
                 )}
-                <button
-                  className={`status-word ${w.status === 'on' ? 'status-on' : 'status-off'}`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onToggleStatus(w.id)
-                  }}
-                >
-                  {w.status === 'on' ? 'On' : 'Off'}
-                </button>
-                <div className="ws-row-overflow" onClick={(e) => e.stopPropagation()}>
+                <span className="ws-row-right">
+                  {isShared && sharedByLabel && <span className="manage-role-chip">{sharedByLabel}</span>}
+                  <div className="ws-row-overflow" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="overflow-btn"
+                      title="More"
+                      aria-label={`More for ${w.name}`}
+                      aria-expanded={menuOpen}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setMenuAnchor(e.currentTarget)
+                        setOpenMenuId(menuOpen ? null : w.id)
+                      }}
+                    >
+                      <OverflowDots />
+                    </button>
+                    {menuOpen && (
+                      <WorkspacePopover anchor={menuAnchor} onClose={() => setOpenMenuId(null)} className="overflow-menu">
+                        <button
+                          className="overflow-item"
+                          onClick={() => {
+                            setOpenMenuId(null)
+                            setNameDraft(w.name)
+                            setRenamingId(w.id)
+                          }}
+                        >
+                          <span>Rename</span>
+                          <span className="overflow-shortcut">⏎</span>
+                        </button>
+                        <button
+                          className="overflow-item"
+                          onClick={() => {
+                            setOpenMenuId(null)
+                            onDuplicate(w.id)
+                          }}
+                        >
+                          <span>Duplicate</span>
+                          <span className="overflow-shortcut">⌘D</span>
+                        </button>
+                        <button className="overflow-item overflow-item-dim" disabled>
+                          Move to folder…
+                        </button>
+                        <button
+                          className="overflow-item"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText?.(`gray://workflow/${w.id}`)
+                            setOpenMenuId(null)
+                          }}
+                        >
+                          <span>Copy share link</span>
+                          <span className="overflow-shortcut">⌥⌘C</span>
+                        </button>
+                        <div className="overflow-divider" />
+                        <button
+                          className="overflow-item"
+                          onClick={() => {
+                            setOpenMenuId(null)
+                            onToggleStatus(w.id)
+                          }}
+                        >
+                          {w.status === 'on' ? 'Turn off' : 'Turn on'}
+                        </button>
+                        <button
+                          className="overflow-item overflow-item-rose"
+                          onClick={() => {
+                            setOpenMenuId(null)
+                            setDeleteId(w.id)
+                          }}
+                        >
+                          Delete…
+                        </button>
+                      </WorkspacePopover>
+                    )}
+                  </div>
                   <button
-                    className="overflow-btn"
-                    title="More"
-                    aria-expanded={menuOpen}
+                    className={`status-word ${w.status === 'on' ? 'status-on' : 'status-off'}`}
+                    aria-pressed={w.status === 'on'}
+                    title={w.status === 'on' ? 'Turn off' : 'Turn on'}
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation()
-                      setMenuAnchor(e.currentTarget)
-                      setOpenMenuId(menuOpen ? null : w.id)
+                      onToggleStatus(w.id)
                     }}
                   >
-                    <OverflowDots />
+                    {w.status === 'on' ? 'On' : 'Off'}
                   </button>
-                  {menuOpen && (
-                    <WorkspacePopover
-                      anchor={menuAnchor}
-                      onClose={() => setOpenMenuId(null)}
-                      className="overflow-menu"
-                    >
-                      <button
-                        className="overflow-item"
-                        onClick={() => {
-                          setOpenMenuId(null)
-                          setNameDraft(w.name)
-                          setRenamingId(w.id)
-                        }}
-                      >
-                        <span>Rename</span>
-                        <span className="overflow-shortcut">⏎</span>
-                      </button>
-                      <button
-                        className="overflow-item"
-                        onClick={() => {
-                          setOpenMenuId(null)
-                          onDuplicate(w.id)
-                        }}
-                      >
-                        <span>Duplicate</span>
-                        <span className="overflow-shortcut">⌘D</span>
-                      </button>
-                      <button className="overflow-item overflow-item-dim" disabled>
-                        Move to folder…
-                      </button>
-                      <button
-                        className="overflow-item"
-                        onClick={() => {
-                          void navigator.clipboard?.writeText?.(`gray://workflow/${w.id}`)
-                          setOpenMenuId(null)
-                        }}
-                      >
-                        <span>Copy share link</span>
-                        <span className="overflow-shortcut">⌥⌘C</span>
-                      </button>
-                      <div className="overflow-divider" />
-                      <button
-                        className="overflow-item"
-                        onClick={() => {
-                          setOpenMenuId(null)
-                          onToggleStatus(w.id)
-                        }}
-                      >
-                        {w.status === 'on' ? 'Turn off' : 'Turn on'}
-                      </button>
-                      <button
-                        className="overflow-item overflow-item-rose"
-                        onClick={() => {
-                          setOpenMenuId(null)
-                          setDeleteId(w.id)
-                        }}
-                      >
-                        Delete…
-                      </button>
-                    </WorkspacePopover>
-                  )}
-                </div>
-                <ChevronRight />
-              </span>
-            </div>
-          )
-        })}
+                  <ChevronRight />
+                </span>
+              </div>
+            )
+          })}
         </div>
 
         {recordingsSection}
 
         {!isShared && suggestion && (
-          <div className="suggested-block">
-            <div className="suggested-label">Suggested</div>
-            <div className="suggested-card">
-              <div className="suggested-title">
-                {suggestion.title}
-                <span className="ws-row-schedule">  ·  {suggestion.schedule}</span>
-              </div>
-              <div className="suggested-desc">
-                {suggestion.descriptionBefore} <AppChip app={suggestion.app} />
-                {suggestion.descriptionAfter}
-              </div>
-              <div className="suggested-noticed">{suggestion.noticedLine}</div>
-              <div className="suggested-actions">
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => window.grayBridge?.openEditor?.()}
-                >
-                  Set it up for me
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => window.grayBridge?.openRecordPanel?.()}
-                >
-                  Record it myself
-                </button>
-                <button className="btn btn-quiet" onClick={onDiscardSuggestion}>
-                  Discard
-                </button>
+          <>
+            <div className="ws-home-spacer" />
+            <div className="suggested-block">
+              <div
+                className={`suggested-card ${discarding ? 'suggested-card-leaving' : ''}`}
+                title={suggestion.noticedLine}
+              >
+                <div className="suggested-title">
+                  {suggestion.title}
+                  <span>{suggestion.schedule}</span>
+                </div>
+                <div className="suggested-desc">
+                  {suggestion.descriptionBefore}
+                  <AppChip app={suggestion.app} />
+                  <SuggestionTail text={suggestion.descriptionAfter} />
+                </div>
+                <div className="suggested-actions">
+                  <button className="btn btn-secondary btn-suggest" onClick={() => window.grayBridge?.openEditor?.()}>
+                    Set it up for me
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-suggest"
+                    onClick={() => window.grayBridge?.openRecordPanel?.()}
+                  >
+                    <RecordDot />
+                    Record it myself
+                  </button>
+                  <button className="btn-discard" onClick={discard}>
+                    Discard
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          </>
         )}
       </div>
 
       {deleteTarget && (
         <WorkspaceDialog
-          title="Delete workflow?"
+          title={`Delete “${deleteTarget.name}”?`}
+          target={deleteTarget.name}
           confirmLabel="Delete workflow"
           returnFocusTo={menuAnchor}
           onCancel={() => setDeleteId(null)}
@@ -371,14 +373,23 @@ export default function WorkflowsHome({
             onDelete(deleteTarget.id)
           }}
         >
-          <p className="delete-dialog-target">“{deleteTarget.name}”</p>
           <p>
-            Scheduled runs stop immediately. Its {deleteTarget.runCount} runs stay in History. This
-            can’t be undone.
+            Automatic runs stop immediately. Its {deleteTarget.runCount} runs stay in History. This can’t be
+            undone.
           </p>
         </WorkspaceDialog>
       )}
     </div>
+  )
+}
+
+/** "…post them to #eng-handoff with a checklist message." — channels read bold. */
+function SuggestionTail({ text }: { text: string }) {
+  const parts = text.split(/(#[\w-]+)/g)
+  return (
+    <>
+      {parts.map((p, i) => (/^#[\w-]+$/.test(p) ? <strong key={i}>{p}</strong> : <span key={i}>{p}</span>))}
+    </>
   )
 }
 
@@ -391,18 +402,20 @@ function formatRecordingDate(iso: string): string {
 
 export function ChevronRight() {
   return (
-    <svg width="4" height="7" viewBox="0 0 4 7" fill="none" stroke="rgba(161,161,171,0.8)" strokeWidth="1">
-      <path d="M0.5 0.5 3.5 3.5 0.5 6.5" />
-    </svg>
+    <span className="ws-chevron" aria-hidden="true">
+      <svg width="4.06" height="6.71" viewBox="0 0 4.06066 6.70711" fill="none">
+        <path d="M0.353554 0.353554L3.35355 3.35355L0.353554 6.35355" stroke="currentColor" />
+      </svg>
+    </span>
   )
 }
 
-function OverflowDots() {
+export function OverflowDots() {
   return (
-    <svg width="11" height="3" viewBox="0 0 11 3" fill="currentColor">
-      <circle cx="1.5" cy="1.5" r="1.2" />
-      <circle cx="5.5" cy="1.5" r="1.2" />
-      <circle cx="9.5" cy="1.5" r="1.2" />
+    <svg width="11" height="3" viewBox="0 0 11 3" fill="currentColor" aria-hidden="true">
+      <circle cx="1" cy="1" r="1" transform="translate(0.5 0.5)" />
+      <circle cx="5" cy="1" r="1" transform="translate(0.5 0.5)" />
+      <circle cx="9" cy="1" r="1" transform="translate(0.5 0.5)" />
     </svg>
   )
 }

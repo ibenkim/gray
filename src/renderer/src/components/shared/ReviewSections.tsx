@@ -23,8 +23,8 @@ export function WorkflowSummary({
 export function QuestionsSection({ questions }: { questions?: WorkflowQuestionRef[] }) {
   if (!questions?.length) return null
   return (
-    <div className="ledger-section">
-      <div className="section-label">QUESTIONS</div>
+    <div className="editor-section">
+      <div className="section-label">Questions</div>
       <ul className="review-questions">
         {questions.map((q) => (
           <li key={q.id} className="review-question">
@@ -78,8 +78,8 @@ export function RedactionPreview({ sessionId }: { sessionId?: string }) {
   }, [sessionId])
   if (!sessionId) return null
   return (
-    <div className="ledger-section redaction-preview">
-      <div className="section-label">PRIVACY</div>
+    <div className="editor-section redaction-preview">
+      <div className="section-label">Privacy</div>
       <p className="review-summary-text">{privacyStatusText(summary)}</p>
     </div>
   )

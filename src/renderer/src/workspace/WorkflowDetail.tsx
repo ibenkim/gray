@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import { WorkspacePopover } from './WorkspacePopover'
 import {
@@ -18,12 +18,14 @@ import {
   WorkflowSummary
 } from '../components/shared/ReviewSections'
 import { useWorkspaceDrag } from '../hooks/useWorkspaceDrag'
+import { OverflowDots } from './WorkflowsHome'
 
 type Tab = 'overview' | 'log'
 
 /**
- * 1.5–1.7 — workflow detail: Overview (shared TRIGGER/STEPS), Log + run
- * detail from persisted Runs, ⋯ overflow + delete confirm.
+ * Workflow detail (Figma: workflow · workflow/log · run-detail · trigger-edit · menu ·
+ * delete-confirm): Overview shares the editor's TRIGGER/STEPS, Log groups runs by month,
+ * a run opens its step-by-step record. The tab underline slides; views rise in.
  */
 export default function WorkflowDetail({
   workflow,
@@ -153,14 +155,15 @@ export default function WorkflowDetail({
   }
 
   return (
-    <div className="ws-view">
+    <div className="ws-view ws-detail-view">
       <div className="ws-header" onMouseDown={onDragMouseDown}>
         <div className="ws-detail-head">
           <button
             className="back-btn"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={onBack}
-            title="Back"
+            title="Back to Workflows"
+            aria-label="Back to Workflows"
           >
             <BackChevron />
           </button>
@@ -186,39 +189,33 @@ export default function WorkflowDetail({
                 {workflow.name}
               </div>
             )}
-            <div className="ws-header-sub">
-              {workflow.status === 'on' ? 'On' : 'Off'} · {workflow.runCount} runs ·{' '}
-              {workflow.hoursReturned}
+            <div className="ws-detail-sub">
+              {workflow.status === 'on' ? 'On' : 'Off'} · {workflow.runCount} runs · {workflow.hoursReturned}
             </div>
           </div>
         </div>
-        <div className="ws-detail-actions">
-          <button
-            className="btn btn-secondary"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={requestRun}
-          >
-            Run
-          </button>
+        <div className="ws-detail-actions" onMouseDown={(e) => e.stopPropagation()}>
           {onShareToTeam && (
             <button
-              className="btn btn-secondary"
+              className="btn btn-hairline btn-ws"
               disabled={workflow.scope === 'team'}
-              onMouseDown={(e) => e.stopPropagation()}
               onClick={() => {
                 if (workflow.scope === 'team') return
                 onShareToTeam()
               }}
             >
-              {workflow.scope === 'team' ? 'Shared' : 'Share to Team'}
+              {workflow.scope === 'team' ? 'Shared with team' : 'Share to Team'}
             </button>
           )}
+          <button className="btn btn-primary btn-ws" onClick={requestRun}>
+            Run
+          </button>
           <button
             ref={moreRef}
             className="overflow-btn"
             title="More"
+            aria-label="More"
             aria-expanded={menuOpen}
-            onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setMenuOpen((o) => !o)}
           >
             <OverflowDots />
@@ -263,10 +260,7 @@ export default function WorkflowDetail({
                 className="overflow-item"
                 onClick={() => {
                   setMenuOpen(false)
-                  onUpdate((w) => ({
-                    ...w,
-                    status: w.status === 'on' ? 'off' : 'on'
-                  }))
+                  onUpdate((w) => ({ ...w, status: w.status === 'on' ? 'off' : 'on' }))
                 }}
               >
                 {workflow.status === 'on' ? 'Turn off' : 'Turn on'}
@@ -285,26 +279,16 @@ export default function WorkflowDetail({
         </div>
       </div>
 
-      <div className="ws-tabs">
-        <button
-          className={`ws-tab ${tab === 'overview' ? 'ws-tab-active' : ''}`}
-          onClick={() => {
-            setTab('overview')
-            setSelectedRunId(null)
-          }}
-        >
-          Overview
-        </button>
-        <button
-          className={`ws-tab ${tab === 'log' ? 'ws-tab-active' : ''}`}
-          onClick={() => setTab('log')}
-        >
-          Log
-        </button>
-      </div>
+      <Tabs
+        tab={tab}
+        onTab={(t) => {
+          setTab(t)
+          if (t === 'overview') setSelectedRunId(null)
+        }}
+      />
 
       {tab === 'overview' ? (
-        <div className="ws-detail-body scroll">
+        <div className="ws-detail-body scroll" key="overview">
           {showContract && workflow.runContract ? (
             <RunContractPanel
               contract={workflow.runContract}
@@ -318,11 +302,17 @@ export default function WorkflowDetail({
                 trigger={workflow.trigger}
                 onChange={(t) => onUpdate((w) => ({ ...w, trigger: t }))}
                 onTurnOff={() => onUpdate((w) => ({ ...w, status: 'off' }))}
+                renderPopover={({ anchor, onClose, content }) => (
+                  <WorkspacePopover anchor={anchor} onClose={onClose} className="trigger-pop-host">
+                    {content}
+                  </WorkspacePopover>
+                )}
               />
               <QuestionsSection questions={workflow.questions} />
-              <div className="ledger-section">
-                <div className="section-label">STEPS</div>
+              <div className="editor-section">
+                <div className="section-label">Steps</div>
                 <StepList
+                  animateIn
                   steps={workflow.steps}
                   initialEditStepId={initialEditStepId}
                   onChange={(updater) =>
@@ -345,6 +335,7 @@ export default function WorkflowDetail({
         </div>
       ) : selectedRun ? (
         <RunDetailView
+          key={`run-${selectedRun.id}`}
           run={selectedRun}
           alwaysOffer={alwaysOffer}
           onBack={() => setSelectedRunId(null)}
@@ -358,16 +349,13 @@ export default function WorkflowDetail({
           }}
         />
       ) : (
-        <LogTab
-          runs={runs}
-          onOpenRun={setSelectedRunId}
-          onOpenActivity={onOpenActivity}
-        />
+        <LogTab key="log" runs={runs} onOpenRun={setSelectedRunId} onOpenActivity={onOpenActivity} />
       )}
 
       {deleteOpen && (
         <WorkspaceDialog
-          title="Delete workflow?"
+          title={`Delete “${workflow.name}”?`}
+          target={workflow.name}
           confirmLabel="Delete workflow"
           returnFocusTo={moreRef.current}
           onCancel={() => setDeleteOpen(false)}
@@ -376,15 +364,53 @@ export default function WorkflowDetail({
             onDelete()
           }}
         >
-          <p className="delete-dialog-target">“{workflow.name}”</p>
           <p>
-            Scheduled runs stop immediately. Its {workflow.runCount} runs stay in History. This
-            can’t be undone.
+            Automatic runs stop immediately. Its {workflow.runCount} runs stay in History. This can’t be undone.
           </p>
         </WorkspaceDialog>
       )}
     </div>
   )
+}
+
+/** Overview · Log with an underline that slides to the active tab. */
+function Tabs({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
+  const refs = useRef<Record<Tab, HTMLButtonElement | null>>({ overview: null, log: null })
+  const [line, setLine] = useState<{ x: number; w: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = refs.current[tab]
+    if (el) setLine({ x: el.offsetLeft, w: el.offsetWidth })
+  }, [tab])
+  return (
+    <div className="ws-tabs" role="tablist">
+      {(['overview', 'log'] as Tab[]).map((t) => (
+        <button
+          key={t}
+          ref={(el) => {
+            refs.current[t] = el
+          }}
+          role="tab"
+          aria-selected={tab === t}
+          className={`ws-tab ${tab === t ? 'ws-tab-active' : ''}`}
+          onClick={() => onTab(t)}
+        >
+          {t === 'overview' ? 'Overview' : 'Log'}
+        </button>
+      ))}
+      {line && (
+        <span
+          className="ws-tab-underline"
+          style={{ width: line.w, transform: `translateX(${line.x}px)` }}
+          aria-hidden="true"
+        />
+      )}
+    </div>
+  )
+}
+
+/** "Jul 1, 9:00 A.M." */
+function runWhen(iso: string): string {
+  return formatRunWhen(iso).replace(/\s+·\s+/, ', ')
 }
 
 function LogTab({
@@ -396,36 +422,36 @@ function LogTab({
   onOpenRun: (id: string) => void
   onOpenActivity: () => void
 }) {
-  const sorted = [...runs].sort(
-    (a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt)
-  )
+  const sorted = [...runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
   const groups = groupRunsByMonth(sorted)
+  let row = 0
 
   return (
-    <div className="ws-detail-body scroll">
-      {groups.length === 0 && (
-        <div className="log-empty">Runs will show up here</div>
-      )}
+    <div className="ws-detail-body ws-detail-body-log scroll">
+      {groups.length === 0 && <div className="log-empty">Runs will show up here</div>}
       {groups.map((g) => (
-        <div className="ledger-section" key={g.key}>
-          <div className="section-label">{g.label}</div>
-          {g.runs.map((run) => {
-            const outcome = formatLogOutcome(run)
-            const hasQuestion = run.questions.length > 0
-            return (
-              <button
-                key={run.id}
-                className="log-row"
-                onClick={() => onOpenRun(run.id)}
-              >
-                <span className="log-when">{formatRunWhen(run.startedAt)}</span>
-                <span className={`log-outcome ${hasQuestion ? 'log-outcome-amber' : ''}`}>
-                  {outcome}
-                </span>
-                <span className="log-returned">{formatReturned(run.returnedMinutes)}</span>
-              </button>
-            )
-          })}
+        <div className="log-month" key={g.key}>
+          <div className="log-month-label">{g.label}</div>
+          <div>
+            {g.runs.map((run) => {
+              const held = run.outcome !== 'done'
+              return (
+                <button
+                  key={run.id}
+                  className="log-row"
+                  style={{ ['--i' as string]: row++ }}
+                  title={formatLogOutcome(run)}
+                  onClick={() => onOpenRun(run.id)}
+                >
+                  <span className="log-when">{runWhen(run.startedAt)}</span>
+                  <span className={`log-outcome ${held ? 'log-outcome-held' : ''}`}>
+                    {held ? run.stopReason ?? 'Stopped' : 'Done'}
+                  </span>
+                  <span className="log-returned">{formatReturned(run.returnedMinutes)}</span>
+                </button>
+              )
+            })}
+          </div>
         </div>
       ))}
       <button className="log-footnote" onClick={onOpenActivity}>
@@ -453,48 +479,68 @@ function RunDetailView({
   onFixStep: (stepId: string) => void
 }) {
   const firstFixable =
-    run.steps.find((s) => s.status === 'held' || s.status === 'skipped')?.stepId ??
-    run.steps[0]?.stepId
+    run.steps.find((s) => s.status === 'held' || s.status === 'skipped')?.stepId ?? run.steps[0]?.stepId
+  const stepsRef = useRef<HTMLDivElement>(null)
+  const [rail, setRail] = useState<{ top: number; height: number } | null>(null)
+
+  // The rail runs from the first node to the last one.
+  useLayoutEffect(() => {
+    const el = stepsRef.current
+    if (!el) return
+    const nodes = el.querySelectorAll<HTMLElement>('.run-step-node')
+    if (nodes.length < 2) return setRail(null)
+    // Rows are positioned, so offsetTop is row-relative; measure against the list instead.
+    // offsetTop of the row + the node's own offset keeps this transform-proof (rows rise in).
+    const centre = (node: HTMLElement): number => {
+      let y = node.offsetTop + node.offsetHeight / 2
+      let p = node.offsetParent as HTMLElement | null
+      while (p && p !== el) {
+        y += p.offsetTop
+        p = p.offsetParent as HTMLElement | null
+      }
+      return y
+    }
+    const top = centre(nodes[0])
+    setRail({ top, height: centre(nodes[nodes.length - 1]) - top })
+  }, [run])
+
+  const held = run.outcome !== 'done'
 
   return (
-    <div className="ws-detail-body scroll run-detail">
+    <div className="ws-detail-body ws-detail-body-log scroll run-detail">
       <button className="run-detail-back" onClick={onBack}>
         ‹  All runs
       </button>
-      <div className="run-detail-head">
-        <div className="run-detail-when">{formatRunWhen(run.startedAt)}</div>
-        <div className="run-detail-returned">{formatReturned(run.returnedMinutes)}</div>
+      <div className="log-row run-detail-summary" title={formatRunDetailMeta(run)}>
+        <span className="log-when">{runWhen(run.startedAt)}</span>
+        <span className={`log-outcome ${held ? 'log-outcome-held' : ''}`}>
+          {held ? run.stopReason ?? 'Stopped' : 'Done'}
+        </span>
+        <span className="log-returned">{formatReturned(run.returnedMinutes)}</span>
       </div>
-      <div className="run-detail-meta">{formatRunDetailMeta(run)}</div>
 
-      <div className="run-detail-steps">
-        {run.steps.map((step) => (
+      <div className="run-detail-steps" ref={stepsRef}>
+        {rail && <span className="run-detail-rail" style={{ top: rail.top, height: rail.height }} aria-hidden="true" />}
+        {run.steps.map((step, i) => (
           <RunStepBlock
             key={step.stepId}
+            index={i}
             step={step}
             receipt={run.questions.find((q) => q.stepId === step.stepId)}
             offeringAlways={alwaysOffer === step.stepId}
             onOfferAlways={() => onOfferAlways(step.stepId)}
             onAlwaysUse={onAlwaysUse}
-            artifacts={
-              step.index === run.steps.length
-                ? run.artifactLinks
-                : undefined
-            }
+            artifacts={step.index === run.steps.length ? run.artifactLinks : undefined}
           />
         ))}
       </div>
 
-      <div className="run-detail-divider" />
       <div className="run-detail-feedback">
         <span className="run-feedback-label">Went well?</span>
         <button className="run-feedback-link" onClick={onLooksRight}>
           Looks right
         </button>
-        <button
-          className="run-feedback-link"
-          onClick={() => firstFixable && onFixStep(firstFixable)}
-        >
+        <button className="run-feedback-link" onClick={() => firstFixable && onFixStep(firstFixable)}>
           Something’s off — fix a step
         </button>
       </div>
@@ -503,6 +549,7 @@ function RunDetailView({
 }
 
 function RunStepBlock({
+  index,
   step,
   receipt,
   offeringAlways,
@@ -510,6 +557,7 @@ function RunStepBlock({
   onAlwaysUse,
   artifacts
 }: {
+  index: number
   step: RunStepResult
   receipt?: QuestionReceipt
   offeringAlways: boolean
@@ -520,23 +568,23 @@ function RunStepBlock({
   const isHeld = step.status === 'held'
   const isSkipped = step.status === 'skipped'
   const isDone = step.status === 'done'
+  const isPending = !isHeld && !isSkipped && !isDone
 
   return (
     <div className="run-step-block">
-      <div className={`run-step-row ${isHeld ? 'run-step-row-held' : ''}`}>
-        <span className="run-step-num">{step.index}</span>
-        <span className={`run-step-label ${isHeld ? 'run-step-label-held' : ''}`}>
-          {isDone || isSkipped || isHeld ? step.doneLabel : step.label}
-        </span>
+      <div
+        className={`run-step-row ${isHeld ? 'run-step-row-held' : ''} ${isPending ? 'run-step-row-pending' : ''}`}
+        style={{ ['--i' as string]: index }}
+      >
+        <span className="run-step-node" />
+        <span className="run-step-text">{isDone || isSkipped || isHeld ? step.doneLabel : step.label}</span>
         {isSkipped && <span className="run-skipped-chip">Skipped</span>}
-        <span className="run-step-spacer" />
         <span className="run-step-time">{formatStepClock(step.endedAt ?? step.startedAt)}</span>
-        {isDone && <TealCheck />}
-        {isHeld && <span className="run-held-mark" />}
       </div>
       {receipt && (
         <button
           className="run-receipt"
+          style={{ ['--i' as string]: index }}
           onClick={() => {
             if (offeringAlways) return
             onOfferAlways()
@@ -554,7 +602,10 @@ function RunStepBlock({
             </span>
           ) : (
             <>
-              Asked: “{receipt.prompt}”  ·  You answered “{receipt.answerLabel}”
+              <span className="run-receipt-label">Asked:</span>
+              <span>{receipt.prompt}</span>
+              <span className="run-receipt-label">Answered:</span>
+              <span>{receipt.answerLabel}</span>
             </>
           )}
         </button>
@@ -571,7 +622,7 @@ function RunStepBlock({
             window.open(a.url, '_blank')
           }}
         >
-          {a.label}
+          {a.label.replace(/\s*↗\s*$/, '')} <span aria-hidden="true">↗</span>
         </a>
       ))}
     </div>
@@ -591,7 +642,7 @@ function groupRunsByMonth(runs: Run[]): { key: string; label: string; runs: Run[
     const d = new Date(groupRuns[0].startedAt)
     return {
       key,
-      label: d.toLocaleString('en-US', { month: 'long' }).toUpperCase(),
+      label: d.toLocaleString('en-US', { month: 'long' }),
       runs: groupRuns
     }
   })
@@ -599,32 +650,8 @@ function groupRunsByMonth(runs: Run[]): { key: string; label: string; runs: Run[
 
 function BackChevron() {
   return (
-    <svg width="6" height="10" viewBox="0 0 6 10" fill="none" stroke="currentColor" strokeWidth="1.2">
-      <path d="M5 1 1 5 5 9" />
-    </svg>
-  )
-}
-
-function OverflowDots() {
-  return (
-    <svg width="11" height="3" viewBox="0 0 11 3" fill="currentColor">
-      <circle cx="1.5" cy="1.5" r="1.2" />
-      <circle cx="5.5" cy="1.5" r="1.2" />
-      <circle cx="9.5" cy="1.5" r="1.2" />
-    </svg>
-  )
-}
-
-function TealCheck() {
-  return (
-    <svg className="run-teal-check" width="10" height="10" viewBox="0 0 10 10" fill="none">
-      <path
-        d="M1.5 5.2 3.8 7.5 8.5 2.5"
-        stroke="var(--teal)"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg width="6.08" height="9.74" viewBox="0 0 6.08191 9.74329" fill="none" aria-hidden="true">
+      <path d="M5.75 0.37L0.75 4.87L5.75 9.37" stroke="currentColor" />
     </svg>
   )
 }

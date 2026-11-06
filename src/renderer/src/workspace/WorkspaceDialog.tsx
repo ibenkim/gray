@@ -10,6 +10,7 @@ import { OverlayHostContext } from './WorkspacePopover'
  */
 export function WorkspaceDialog({
   title,
+  target,
   confirmLabel,
   onCancel,
   onConfirm,
@@ -17,6 +18,8 @@ export function WorkspaceDialog({
   children
 }: {
   title: string
+  /** The thing being changed. A name too long for the one-line title is repeated in full. */
+  target?: string
   confirmLabel: string
   onCancel: () => void
   onConfirm: () => void
@@ -80,18 +83,19 @@ export function WorkspaceDialog({
       }}
     >
       <div className="delete-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <div className="delete-dialog-title" id={titleId}>
+        <div className="delete-dialog-title" id={titleId} title={title}>
           {title}
         </div>
         <div className="delete-dialog-body" tabIndex={0}>
+          {target && target.length > 34 && <p className="delete-dialog-target">“{target}”</p>}
           {children}
         </div>
         <div className="delete-dialog-actions">
-          <button ref={cancelRef} className="btn btn-secondary" onClick={onCancel}>
+          <button ref={cancelRef} className="btn btn-secondary btn-md" onClick={onCancel}>
             Cancel
           </button>
           <button
-            className="btn btn-danger"
+            className="btn btn-danger btn-md"
             onClick={() => {
               if (confirmed.current) return
               confirmed.current = true

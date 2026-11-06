@@ -266,13 +266,30 @@ describe('M3-C sensor scope (actual JXA sensor source, synthetic bridge)', () =>
     expect(s.env.lines.some((l) => l.app === 'Slack' || l.appName === 'Slack')).toBe(false)
   })
 
+  it('Select apps with several apps reads exactly those apps (multi-select)', async () => {
+    const { appScope, appInScope } = await import('../providers')
+    const scope = appScope({ recordMode: 'one-app', selectedAppId: 'chrome', selectedAppIds: ['chrome', 'figma'] })
+    expect(appInScope(scope, 'Google Chrome')).toBe(true)
+    expect(appInScope(scope, 'Figma')).toBe(true)
+    expect(appInScope(scope, 'Slack')).toBe(false)
+    expect(appInScope(scope, 'Messages')).toBe(false)
+    // Full screen ignores any app choice; denied and own apps stay out either way.
+    const full = appScope({ recordMode: 'full-screen', selectedAppIds: ['chrome'] })
+    expect(full.allow).toBeNull()
+    expect(appInScope(full, '1Password 7')).toBe(false)
+    const s = sensor(scope, { name: 'Slack', bundleId: 'com.tinyspeck.slackmacgap' })
+    s.key()
+    expect(s.env.lines.some((l) => l.k === 'key')).toBe(false)
+  })
+
   it('host and sensor apply the same scope rule', async () => {
     const { appScope, appInScope } = await import('../providers')
     const table = ['Google Chrome', 'Chromium', 'Slack', '1Password 7', 'Messages', 'Electron', 'Figma', '']
     for (const opts of [
       { recordMode: 'one-app' as const, selectedAppId: 'chrome' },
       { recordMode: 'full-screen' as const },
-      { recordMode: 'one-app' as const, selectedAppId: 'figma', ignoreAppNames: ['Gray'] }
+      { recordMode: 'one-app' as const, selectedAppId: 'figma', ignoreAppNames: ['Gray'] },
+      { recordMode: 'one-app' as const, selectedAppId: 'chrome', selectedAppIds: ['chrome', 'figma'] }
     ]) {
       const scope = appScope(opts)
       for (const name of table) {

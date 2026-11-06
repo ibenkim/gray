@@ -263,7 +263,7 @@ describe('actual main wiring of the Record dropdown', () => {
     expect(c.visible).toBe(true)
     expect(pill().pillCalls).toBe(0) // the stationary pill was never moved or resized
     // Right-aligned, 8 px above the pill.
-    expect(ack.bounds).toMatchObject({ width: 266, height: 330, x: pill().bounds.x + 94 - 266, y: pill().bounds.y - 8 - 330 })
+    expect(ack.bounds).toMatchObject({ width: 342, height: 330, x: pill().bounds.x + pill().bounds.width - 342, y: pill().bounds.y - 8 - 330 })
   })
 
   it('refuses a foreign sender: nothing is created', async () => {
@@ -369,3 +369,42 @@ describe('actual main wiring of the Record dropdown', () => {
 
 // Keep EventEmitter referenced for the fake module factory's dynamic import.
 void EventEmitter
+
+describe('Record dropdown messages are bounded to what was offered (multi-select)', () => {
+  const base = {
+    revision: 1,
+    recordMode: 'one-app',
+    selectedAppId: 'chrome',
+    narrate: true,
+    apps: [
+      { id: 'chrome', name: 'Chrome', detail: 'a' },
+      { id: 'figma', name: 'Figma', detail: 'b' }
+    ],
+    screenGranted: true,
+    micGranted: true,
+    busy: false
+  }
+
+  it('keeps only offered app ids, once each; an older single choice still reads as one', async () => {
+    const { sanitizeDropdownSnapshot } = await import('./windowTransitions')
+    expect(sanitizeDropdownSnapshot({ ...base, selectedAppIds: ['figma', 'chrome', 'figma', 'slack', 7] })?.selectedAppIds).toEqual([
+      'figma',
+      'chrome'
+    ])
+    expect(sanitizeDropdownSnapshot(base)?.selectedAppIds).toEqual(['chrome'])
+    expect(sanitizeDropdownSnapshot({ ...base, selectedAppIds: 'chrome' })?.selectedAppIds).toEqual(['chrome'])
+  })
+
+  it('accepts toggleApp only for an offered app', async () => {
+    const { sanitizeDropdownCommand, sanitizeDropdownSnapshot } = await import('./windowTransitions')
+    const snap = sanitizeDropdownSnapshot({ ...base, selectedAppIds: ['chrome'] })
+    expect(sanitizeDropdownCommand({ id: 'c1', type: 'toggleApp', value: 'figma' }, snap)).toEqual({
+      id: 'c1',
+      type: 'toggleApp',
+      value: 'figma'
+    })
+    expect(sanitizeDropdownCommand({ id: 'c2', type: 'toggleApp', value: 'slack' }, snap)).toBeNull()
+    expect(sanitizeDropdownCommand({ id: 'c3', type: 'toggleApp', value: ['figma'] }, snap)).toBeNull()
+    expect(sanitizeDropdownCommand({ id: 'c4', type: 'toggleApp', value: 'figma' }, null)).toBeNull()
+  })
+})

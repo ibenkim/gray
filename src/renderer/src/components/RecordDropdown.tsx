@@ -23,6 +23,20 @@ export default function RecordDropdown() {
   const [snap, setSnap] = useState<RecordDropdownSnapshot | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const readySent = useRef(false)
+  /** Bumped each time the window is shown, so the panel replays its open motion. */
+  const [openSeq, setOpenSeq] = useState(0)
+  /** The installed apps' own icons (main caches them); null until the first answer. */
+  const [icons, setIcons] = useState<Record<string, string> | null>(null)
+  const iconsFor = useRef('')
+  const iconsReady = useRef<Promise<void> | null>(null)
+
+  useEffect(() => {
+    const replay = () => {
+      if (document.visibilityState === 'visible') setOpenSeq((n) => n + 1)
+    }
+    document.addEventListener('visibilitychange', replay)
+    return () => document.removeEventListener('visibilitychange', replay)
+  }, [])
 
   useEffect(() => {
     if (!bridge) return
@@ -31,7 +45,20 @@ export default function RecordDropdown() {
     return off
   }, [bridge])
 
-  // Report the real panel's height; ready once the first snapshot has laid out with its fonts.
+  // Ask main for the listed apps' icons whenever the list changes.
+  const appIds = snap?.apps.map((a) => a.id).join(',') ?? ''
+  useEffect(() => {
+    if (!bridge || !appIds || iconsFor.current === appIds) return
+    iconsFor.current = appIds
+    const ask = bridge.appIcons?.(appIds.split(',')) ?? Promise.resolve({})
+    iconsReady.current = ask.then(
+      (map) => setIcons(map ?? {}),
+      () => setIcons({})
+    )
+  }, [bridge, appIds])
+
+  // Report the real panel's height; ready once the first snapshot has laid out with its fonts
+  // and app icons (so they never pop in after the window shows; at most 300 ms of waiting).
   useEffect(() => {
     const el = panelRef.current
     if (!bridge || !snap || !el) return
@@ -41,7 +68,11 @@ export default function RecordDropdown() {
     observer.observe(el)
     if (!readySent.current) {
       readySent.current = true
-      void document.fonts.ready.then(() =>
+      const iconsSettled = Promise.race([
+        iconsReady.current ?? Promise.resolve(),
+        new Promise<void>((r) => setTimeout(r, 300))
+      ])
+      void Promise.all([document.fonts.ready, iconsSettled]).then(() =>
         requestAnimationFrame(() =>
           requestAnimationFrame(() => {
             report()
@@ -100,13 +131,15 @@ export default function RecordDropdown() {
   return (
     <div className="record-dropdown">
       <div ref={panelRef} className="record-dropdown-panel">
+        <div key={openSeq} className={openSeq > 0 ? 'record-dropdown-open' : undefined}>
         {snap && (
           <RecordPanel
             recordMode={snap.recordMode}
             onRecordMode={(value) => send({ type: 'setRecordMode', value })}
             apps={snap.apps}
-            selectedAppId={snap.selectedAppId}
-            onSelectApp={(value) => send({ type: 'selectApp', value })}
+            icons={icons}
+            selectedAppIds={snap.selectedAppIds?.length ? snap.selectedAppIds : [snap.selectedAppId]}
+            onToggleApp={(value) => send({ type: 'toggleApp', value })}
             narrate={snap.narrate}
             onNarrate={(value) => send({ type: 'setNarrate', value })}
             screenGranted={snap.screenGranted}
@@ -120,6 +153,7 @@ export default function RecordDropdown() {
             }}
           />
         )}
+        </div>
       </div>
     </div>
   )

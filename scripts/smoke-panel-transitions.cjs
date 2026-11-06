@@ -224,7 +224,7 @@ const fixtures = {
   'workspace:open': (_e, focus) => openWorkspace(focus)
 }
 // window:hideForRestore stays listed so the harness can still run against pre-R1 sources.
-const handled = new Set(['window:setBounds', 'window:hideForRestore', 'window:restorePill', 'pill:dragStart', 'pill:dragEnd', 'dropdown:open', 'dropdown:close', 'dropdown:dragStart', 'dropdown:dragEnd'])
+const handled = new Set(['window:setBounds', 'window:hideForRestore', 'window:restorePill', 'pill:dragStart', 'pill:dragEnd', 'dropdown:open', 'dropdown:close', 'dropdown:dragStart', 'dropdown:dragEnd', 'dropdown:appIcons'])
 const preloadSrc = fs.readFileSync(path.join(ROOT, 'out/preload/index.js'), 'utf8')
 const channels = new Set([...preloadSrc.matchAll(/invoke\(\s*["']([^"']+)["']/g)].map((m) => m[1]))
 for (const ch of channels) {
@@ -384,12 +384,12 @@ async function dom(win = pill) {
   return win.webContents.executeJavaScript(`(() => {
     const root = document.querySelector('.gray-root')
     const p = document.querySelector('.pill')
-    const m = document.querySelector('.morph-panel')
+    const m = document.querySelector('.morph-card')
     const card = m && m.firstElementChild
     const pr = p && p.getBoundingClientRect()
     const mr = m && m.getBoundingClientRect()
     const cr = card && card.getBoundingClientRect()
-    const slot = document.querySelector('.panel-slot')
+    const slot = document.querySelector('.surface-slot')
     const sr = slot && slot.getBoundingClientRect()
     return {
       root: root ? root.className : '',
@@ -781,13 +781,17 @@ async function run() {
     await sleep(700)
     const expanded = await dom()
     await capture('editor_expanded')
-    await pill.webContents.executeJavaScript(`document.querySelector('[title="Collapse"]')?.click()`)
+    // The editor collapses with Esc or a pill tap (no header button since the v4 redesign).
+    await pill.webContents.executeJavaScript(
+      `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`
+    )
     await sleep(700)
     const collapsed = await dom()
     await capture('editor_collapsed')
     await dragPill(25, 0)
     await sleep(500)
     const afterDrag = await dom()
+    if (!/gray-root-pill/.test(collapsed.root)) fail(sc, 'collapse_did_not_collapse', { root: collapsed.root })
     const reopened = !/gray-root-pill/.test(afterDrag.root)
     if (reopened) fail(sc, 'post_drag_click_expanded_panel', { root: afterDrag.root })
     report.scenarios[sc] = { failures: failures.length - before, expandedRoot: expanded.root, collapsedRoot: collapsed.root, afterDragRoot: afterDrag.root }

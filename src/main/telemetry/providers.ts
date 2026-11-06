@@ -92,6 +92,7 @@ const APP_ALIASES: Record<string, string[]> = {
   chrome: ['google chrome', 'chrome', 'chromium'],
   figma: ['figma'],
   slack: ['slack'],
+  notion: ['notion'],
   finder: ['finder'],
   mail: ['mail']
 }
@@ -103,12 +104,22 @@ const APP_ALIASES: Record<string, string[]> = {
  */
 export type AppScope = { self: string[]; deny: string[]; allow: string[] | null }
 
-export function appScope(opts: { recordMode?: string; selectedAppId?: string; ignoreAppNames?: string[] }): AppScope {
-  const selected = opts.recordMode === 'one-app' && opts.selectedAppId ? opts.selectedAppId.toLowerCase() : null
+export function appScope(opts: {
+  recordMode?: string
+  selectedAppId?: string
+  /** "Select apps" is multi-select: the scope is every chosen app (the union of their names). */
+  selectedAppIds?: string[]
+  ignoreAppNames?: string[]
+}): AppScope {
+  const ids =
+    opts.recordMode === 'one-app'
+      ? [...(opts.selectedAppIds ?? []), ...(opts.selectedAppId ? [opts.selectedAppId] : [])]
+      : []
+  const selected = [...new Set(ids.filter((id) => typeof id === 'string' && id).map((id) => id.toLowerCase()))]
   return {
     self: (opts.ignoreAppNames ?? ['gray', 'Electron']).map((n) => n.toLowerCase()),
     deny: APP_DENYLIST,
-    allow: selected ? (APP_ALIASES[selected] ?? [selected]) : null
+    allow: selected.length ? [...new Set(selected.flatMap((id) => APP_ALIASES[id] ?? [id]))] : null
   }
 }
 

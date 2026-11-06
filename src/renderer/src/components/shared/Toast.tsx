@@ -11,10 +11,11 @@ type ToastProps = {
 }
 
 /**
- * Shared toast — a paper card that slides in above the pill. First consumer is
- * the permission-revoked notice. The saved confirmation stays a status-pill.
+ * Toast above the pill (Figma: revoked-toast) — what changed, the concrete stake, then
+ * one primary fix and a quiet Dismiss. The card chrome and its rise-in come from the shell.
  */
 export default function Toast({
+  tone = 'info',
   title,
   body,
   actionLabel,
@@ -23,9 +24,9 @@ export default function Toast({
   onDismiss
 }: ToastProps) {
   return (
-    <div className="toast">
-      <div className="toast-title type-label">{title}</div>
-      {body && <div className="toast-body type-meta">{body}</div>}
+    <div className={`toast toast-${tone}`} role="status">
+      <div className="toast-title">{title}</div>
+      {body && <div className="toast-body">{body}</div>}
       {(actionLabel || onDismiss) && (
         <div className="toast-actions">
           {actionLabel && (

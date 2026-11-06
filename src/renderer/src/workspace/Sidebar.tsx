@@ -3,7 +3,10 @@ import { WorkspacePopover } from './WorkspacePopover'
 import type { Team } from '../state/types'
 import type { Space, WorkspaceNav } from './WorkspaceApp'
 
-/** Sidebar: traffic lights, team-menu (workspace switcher), nav items. */
+/**
+ * Sidebar (Figma: sidebar · team-menu): traffic lights, the workspace switcher and nav.
+ * The selected-row fill slides between nav items instead of jumping.
+ */
 export default function Sidebar({
   nav,
   onNav,
@@ -26,12 +29,18 @@ export default function Sidebar({
   const spaces: Space[] = ['Personal', teamName]
   const hasTeam = Boolean(team)
 
-  const switcherLabel =
-    space === 'Personal'
-      ? 'Personal'
-      : isOwner
-        ? `Team  ·  Owner`
-        : teamName
+  const switcherLabel = space === 'Personal' ? 'Personal' : teamName
+
+  const items: { id: WorkspaceNav; label: string }[] = [
+    { id: 'workflows', label: 'Workflows' },
+    { id: 'activity', label: 'Activity' },
+    ...(hasTeam ? [{ id: 'shared' as const, label: 'Shared' }] : []),
+    ...(hasTeam ? [{ id: 'teams' as const, label: isOwner ? 'Manage' : 'Team' }] : [])
+  ]
+  const activeIndex = Math.max(
+    0,
+    items.findIndex((i) => i.id === nav)
+  )
 
   return (
     <aside className="ws-sidebar">
@@ -41,12 +50,14 @@ export default function Sidebar({
           onMouseDown={(e) => e.stopPropagation()}
           onClick={() => window.grayBridge?.closeWindow?.()}
           title="Close"
+          aria-label="Close"
         />
         <button
           className="light light-min"
           onMouseDown={(e) => e.stopPropagation()}
           onClick={() => window.grayBridge?.minimizeWindow?.()}
           title="Minimize"
+          aria-label="Minimize"
         />
         <span className="light light-zoom" />
       </div>
@@ -55,13 +66,16 @@ export default function Sidebar({
         <button
           ref={buttonRef}
           className="team-menu-btn"
-          title={switcherLabel}
+          title={isOwner && space !== 'Personal' ? `${teamName} · Owner` : switcherLabel}
           aria-expanded={menuOpen}
+          aria-haspopup="menu"
           onClick={() => setMenuOpen((o) => !o)}
         >
           <span className="team-avatar" />
           <span className="team-name">{switcherLabel}</span>
-          <ChevronTiny />
+          <span className="team-chevron">
+            <ChevronTiny />
+          </span>
         </button>
         {menuOpen && (
           <WorkspacePopover
@@ -80,14 +94,16 @@ export default function Sidebar({
                   setMenuOpen(false)
                 }}
               >
-                {s}
+                <span>{s}</span>
+                {space === s && <CheckTiny />}
               </button>
             ))}
             <div className="team-menu-divider" />
             <button className="team-menu-item team-menu-item-dim">Join a team</button>
+            <div className="team-menu-divider" />
             <button className="team-menu-item team-menu-item-dim">Settings</button>
             <button
-              className="team-menu-item"
+              className="team-menu-item team-menu-item-danger"
               onClick={() => {
                 setMenuOpen(false)
                 void window.grayBridge?.logout?.()
@@ -100,34 +116,21 @@ export default function Sidebar({
       </div>
 
       <nav className="ws-nav">
-        <button
-          className={`ws-nav-item ${nav === 'workflows' ? 'ws-nav-active' : ''}`}
-          onClick={() => onNav('workflows')}
-        >
-          Workflows
-        </button>
-        <button
-          className={`ws-nav-item ${nav === 'activity' ? 'ws-nav-active' : ''}`}
-          onClick={() => onNav('activity')}
-        >
-          Activity
-        </button>
-        {hasTeam && (
-          <>
-            <button
-              className={`ws-nav-item ${nav === 'shared' ? 'ws-nav-active' : ''}`}
-              onClick={() => onNav('shared')}
-            >
-              Shared
-            </button>
-            <button
-              className={`ws-nav-item ${nav === 'teams' ? 'ws-nav-active' : ''}`}
-              onClick={() => onNav('teams')}
-            >
-              Teams
-            </button>
-          </>
-        )}
+        <span
+          className="ws-nav-indicator"
+          style={{ transform: `translateY(${activeIndex * 30}px)` }}
+          aria-hidden="true"
+        />
+        {items.map((item) => (
+          <button
+            key={item.id}
+            className={`ws-nav-item ${nav === item.id ? 'ws-nav-active' : ''}`}
+            aria-current={nav === item.id ? 'page' : undefined}
+            onClick={() => onNav(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
       </nav>
     </aside>
   )
@@ -135,8 +138,16 @@ export default function Sidebar({
 
 function ChevronTiny() {
   return (
-    <svg width="7" height="4" viewBox="0 0 7 4" fill="none" stroke="currentColor" strokeWidth="1">
+    <svg width="7" height="4" viewBox="0 0 7 4" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
       <path d="M0.5 0.5 3.5 3.5 6.5 0.5" />
+    </svg>
+  )
+}
+
+function CheckTiny() {
+  return (
+    <svg width="10" height="8" viewBox="0 0 9.74 7.78" fill="none" aria-hidden="true">
+      <path d="M0.37 3.68L3.37 7.03L9.37 0.33" stroke="currentColor" />
     </svg>
   )
 }
