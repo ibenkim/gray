@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { newId } from '../../../shared/id'
 import { hoursReturnedThisMonth } from '../../../shared/runFormat'
 import type { RecordingSummary } from '../../../shared/types'
@@ -29,9 +29,13 @@ export type Space = string
  * Shared Workspace shell — employee + owner use the same surfaces.
  * Teams/Shared are role-gated where needed; pill mutations sync via store.
  */
-export default function WorkspaceApp() {
-  const [nav, setNav] = useState<WorkspaceNav>('workflows')
+export default function WorkspaceApp({
+  initialNav = 'workflows',
+  initialTeamSpace = false
+}: { initialNav?: WorkspaceNav; initialTeamSpace?: boolean } = {}) {
+  const [nav, setNav] = useState<WorkspaceNav>(initialNav)
   const [space, setSpace] = useState<Space>('Personal')
+  const openedTeamSpace = useRef(!initialTeamSpace)
   const [detailId, setDetailId] = useState<string | null>(null)
   const [focusRunId, setFocusRunId] = useState<string | null>(null)
   const [editStepId, setEditStepId] = useState<string | null>(null)
@@ -49,6 +53,26 @@ export default function WorkspaceApp() {
   const { onMouseDown: onDragMouseDown } = useWorkspaceDrag()
   /** Card-local overlay layer for menus and confirmations (HF4). */
   const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null)
+  const windowRef = useRef<HTMLDivElement>(null)
+
+  // Each time the window is shown again, the card settles in (same curve as the first open).
+  useEffect(() => {
+    const replay = () => {
+      const el = windowRef.current
+      if (!el || document.visibilityState !== 'visible') return
+      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+      if (document.documentElement.classList.contains('gallery-still')) return
+      el.animate(
+        [
+          { opacity: 0, transform: 'translateY(10px) scale(0.975)' },
+          { opacity: 1, transform: 'none' }
+        ],
+        { duration: 520, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' }
+      )
+    }
+    document.addEventListener('visibilitychange', replay)
+    return () => document.removeEventListener('visibilitychange', replay)
+  }, [])
 
   function applySnapshot(snap: StoreSnapshot) {
     setWorkflows(snap.workflows)
@@ -145,13 +169,20 @@ export default function WorkspaceApp() {
 
   // Teams / Shared require a team — bounce home if the team drops away.
   useEffect(() => {
-    if ((nav === 'teams' || nav === 'shared') && !team) {
+    if (ready && (nav === 'teams' || nav === 'shared') && !team) {
       setNav('workflows')
     }
-  }, [nav, team])
+  }, [ready, nav, team])
 
   const isOwner = team?.role === 'owner'
   const teamSpaceName = team?.name ?? "Harry's team"
+
+  // Opened straight into the team space (design gallery): select it once the team loads.
+  useEffect(() => {
+    if (openedTeamSpace.current || !team) return
+    openedTeamSpace.current = true
+    setSpace(teamSpaceName)
+  }, [team, teamSpaceName])
 
   // Keep the team-space selection pointed at the live team name after rename.
   useEffect(() => {
@@ -245,7 +276,7 @@ export default function WorkspaceApp() {
   return (
     <OverlayHostContext.Provider value={overlayHost}>
     <div className="workspace-shell">
-      <div className="workspace-window">
+      <div className="workspace-window" ref={windowRef}>
         <div
           className="ws-drag-strip"
           aria-hidden="true"

@@ -78,6 +78,8 @@ export type StopResult = {
 export type CaptureOptions = {
   recordMode?: 'one-app' | 'full-screen'
   selectedAppId?: string
+  /** Every app a one-app recording may read (multi-select); `selectedAppId` is the first. */
+  selectedAppIds?: string[]
   ownerEmail?: string
   /** Capture voice narration for this session. */
   narrate?: boolean
@@ -396,6 +398,7 @@ export class TelemetryRecorder {
         ownerEmail: opts.ownerEmail,
         recordMode: opts.recordMode,
         selectedAppId: opts.selectedAppId,
+        ...(opts.selectedAppIds?.length ? { selectedAppIds: opts.selectedAppIds } : {}),
         screenshotCapture: this.screenshotCaptureStatus()
       })
       created = true

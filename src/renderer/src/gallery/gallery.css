@@ -1,0 +1,48 @@
+/* Design gallery chrome only (never in the app). */
+html:not(.gallery-frame),
+html:not(.gallery-frame) body,
+html:not(.gallery-frame) #root {
+  overflow: auto;
+  height: auto;
+  min-height: 100%;
+  background: #8fb3e6;
+}
+.gallery { padding: 32px 40px 80px; font-family: var(--gray-font); }
+.gallery-title { font-size: 22px; font-weight: 600; color: #fff; margin-bottom: 8px; }
+.gallery-group h2 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.85);
+  margin: 28px 0 12px;
+}
+.gallery-grid { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-end; }
+.gallery-item { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+/* A desk stacks a pill and its child window (the Record dropdown), right-aligned 8px apart. */
+.gallery-desk { display: flex; flex-direction: column; align-items: flex-end; justify-content: flex-end; gap: 8px; }
+.gallery-item iframe {
+  display: block;
+  border: none;
+  background: transparent;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+  transition: width 0.12s, height 0.12s;
+}
+.gallery-item figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+}
+.gallery-item figcaption a { color: #fff; text-decoration: none; font-weight: 500; }
+.gallery-item figcaption span { opacity: 0.7; font-variant-numeric: tabular-nums; }
+/* ?still=1 — snap every animation to its end state for pixel comparison. */
+.gallery-still *,
+.gallery-still *::before,
+.gallery-still *::after {
+  animation-delay: 0s !important;
+  animation-duration: 0s !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}

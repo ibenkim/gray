@@ -1,25 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { useWorkflow } from '../../state/WorkflowContext'
-import { PauseButton, ChevronDown } from '../GrayPill'
 import MicIcon from '../ui/MicIcon'
 import AppChip from '../shared/AppChip'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
+import RichText from '../shared/RichText'
 
 /**
- * 3.2 — expanded recording ledger. Header: [pause] · "Learning Workflow" ·
- * timer · chevron. Footer: Cancel (discard) · Finish (the only stop control).
+ * 3.2 — expanded recording ledger (Figma: recording-expanded-panel · Hero · Recording).
+ * Each understood action rises in at the bottom; the card grows upward from the pill
+ * (Teach "Rises" / "Panel"). "Now · Thinking..." breathes. Cancel discards; Finish is the
+ * only stop control. The pill below shows Reading… and toggles this panel.
  */
 export default function LearningPanel() {
-  const {
-    watchLog,
-    setWatchExpanded,
-    cancelRecording,
-    finishRecording,
-    elapsedLabel,
-    recordPaused,
-    toggleRecordPause
-  } = useWorkflow()
-  const [openVoiceIdx, setOpenVoiceIdx] = useState<number | null>(null)
+  const { watchLog, setWatchExpanded, cancelRecording, finishRecording, recordPaused } = useWorkflow()
   const logRef = useRef<HTMLDivElement>(null)
   const { onMouseDown: onDragMouseDown } = useWindowDrag()
 
@@ -28,60 +21,58 @@ export default function LearningPanel() {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' })
   }, [watchLog.length])
 
-  return (
-    <div className="ledger-panel">
-      <div className="ledger-header" onMouseDown={onDragMouseDown}>
-        <PauseButton paused={recordPaused} onToggle={toggleRecordPause} />
-        <span className="ledger-title">Learning Workflow</span>
-        <span className="ledger-time">{elapsedLabel}</span>
-        <button
-          className="chevron-btn"
-          onClick={() => setWatchExpanded(false)}
-          onMouseDown={(e) => e.stopPropagation()}
-          title="Collapse"
-        >
-          <ChevronDown />
-        </button>
-      </div>
+  // Esc folds the ledger back into the pill (recording continues).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setWatchExpanded(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setWatchExpanded])
 
-      <div className="watch-log scroll" ref={logRef}>
+  return (
+    <div className="ledger" onMouseDown={onDragMouseDown}>
+      <div className="watch-log" ref={logRef}>
         {watchLog.map((entry, i) => (
           <div className="watch-entry" key={`${entry.time}-${i}`}>
             <div className="watch-entry-main">
               <span className="watch-time">{entry.time}</span>
-              <span className="watch-text">{entry.text}</span>
-              {entry.app && <AppChip app={entry.app} muted />}
-              {entry.voiceNote && (
-                <button
-                  className={`voice-tag ${openVoiceIdx === i ? 'voice-tag-open' : ''}`}
-                  onClick={() => setOpenVoiceIdx(openVoiceIdx === i ? null : i)}
-                >
-                  <MicIcon size={7} />
-                  voice
-                </button>
-              )}
+              <span className="watch-text">
+                <RichText text={entry.text} />
+                {entry.app && <AppChip app={entry.app} small />}
+              </span>
             </div>
-            {entry.voiceNote && openVoiceIdx === i && (
+            {entry.voiceNote && (
               <div className="watch-voice">
-                <MicIcon size={8} />
-                <span className="watch-voice-text">{entry.voiceNote}</span>
+                <MicIcon size={11} />
+                <span>{entry.voiceNote}</span>
               </div>
             )}
           </div>
         ))}
-        <div className="watch-entry">
+        <div className="watch-entry watch-entry-now">
           <div className="watch-entry-main">
             <span className="watch-time">Now</span>
-            <span className="watch-text watch-text-thinking">Thinking...</span>
+            <span className={`watch-text ${recordPaused ? '' : 'breathe'}`}>
+              {recordPaused ? 'Paused' : 'Thinking...'}
+            </span>
           </div>
         </div>
       </div>
 
-      <div className="ledger-footer window-actions">
-        <button className="btn btn-quiet" onClick={cancelRecording}>
+      <div className="ledger-footer">
+        <button
+          className="btn btn-quiet"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={cancelRecording}
+        >
           Cancel
         </button>
-        <button className="btn btn-primary" onClick={finishRecording}>
+        <button
+          className="btn btn-primary"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={finishRecording}
+        >
           Finish
         </button>
       </div>

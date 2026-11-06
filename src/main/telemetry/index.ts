@@ -888,6 +888,9 @@ export function registerTelemetryIpc(): void {
         const status = await recorder.startRecording({
           recordMode: opts.recordMode,
           selectedAppId: opts.selectedAppId,
+          selectedAppIds: Array.isArray(opts.selectedAppIds)
+            ? [...new Set(opts.selectedAppIds.filter((v): v is string => typeof v === 'string' && v.length <= 64))].slice(0, 32)
+            : undefined,
           narrate: !!opts.narrate,
           ownerEmail: auth.email ?? opts.ownerEmail,
           ignoreAppNames: Array.isArray(opts.ignoreAppNames)

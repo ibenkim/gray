@@ -30,8 +30,8 @@ import type {
  * used — it could only show as a frosted flash or a corner outside the CSS silhouette.
  */
 
-export const PILL_W = 94
-export const PILL_H = 24
+export const PILL_W = 138
+export const PILL_H = 36
 export const PANEL_PADDING = 36
 
 export type Rect = { x: number; y: number; width: number; height: number }
@@ -217,15 +217,20 @@ export function createWindowTransitions(deps: TransitionDeps) {
     return { x, y: anchor.y + insets - height, width, height }
   }
 
-  /** Screen rect of the visible pill capsule inside the current window. */
+  /**
+   * Screen rect of the visible pill capsule inside the current window. A panel frame keeps the
+   * pill on its anchor inside the PANEL_PADDING inset (the renderer draws it there), so the
+   * inset is removed here; otherwise every panel close would move the anchor by the inset.
+   */
   function visualPillRect(b: Rect): Rect {
     const tall = b.height > PILL_H + 4
     const below = currentPlacement === 'below' && tall
+    const inset = tall ? currentInsets : 0
     const pw = Math.min(PILL_W, b.width)
     const ph = Math.min(PILL_H, b.height)
     return {
-      x: b.x + b.width - pw,
-      y: below ? b.y : b.y + b.height - ph,
+      x: b.x + b.width - inset - pw,
+      y: below ? b.y + inset : b.y + b.height - inset - ph,
       width: PILL_W,
       height: PILL_H
     }
@@ -844,8 +849,8 @@ export function registerTransitionIpc(
 /** Location hash of the dropdown route and the preload surface argument main supplies. */
 export const RECORD_DROPDOWN_HASH = 'record-dropdown'
 export const RECORD_DROPDOWN_ARG = '--gray-surface=record-dropdown'
-export const RECORD_DROPDOWN_W = 266
-const RECORD_DROPDOWN_DEFAULT_H = 330
+export const RECORD_DROPDOWN_W = 342
+const RECORD_DROPDOWN_DEFAULT_H = 365
 const RECORD_DROPDOWN_MAX_H = 2000
 /** Replay refusal window per child lifetime. */
 const MAX_RECENT_COMMANDS = 64
@@ -867,10 +872,17 @@ export function sanitizeDropdownSnapshot(raw: unknown): RecordDropdownSnapshot |
       return { id: text(o.id, 64), name: text(o.name, 80), detail: text(o.detail, 80) }
     })
     .filter((a) => a.id)
+  const selectedAppId = text(r.selectedAppId, 64)
+  // Only offered apps, each once; an older pill that sends one choice still reads as one.
+  const offered = new Set(apps.map((a) => a.id))
+  const chosen = Array.isArray(r.selectedAppIds) ? r.selectedAppIds.slice(0, 32).map((v) => text(v, 64)) : []
+  const selectedAppIds = [...new Set(chosen)].filter((id) => offered.has(id))
+  if (selectedAppIds.length === 0 && offered.has(selectedAppId)) selectedAppIds.push(selectedAppId)
   return {
     revision: Number.isFinite(r.revision) ? Number(r.revision) : 0,
     recordMode: r.recordMode,
-    selectedAppId: text(r.selectedAppId, 64),
+    selectedAppId,
+    selectedAppIds,
     narrate: r.narrate as boolean,
     apps,
     screenGranted: r.screenGranted as boolean,
@@ -892,6 +904,7 @@ export function sanitizeDropdownCommand(
     case 'setRecordMode':
       return r.value === 'one-app' || r.value === 'full-screen' ? { id, type: r.type, value: r.value } : null
     case 'selectApp':
+    case 'toggleApp':
       return typeof r.value === 'string' && !!snapshot?.apps.some((a) => a.id === r.value)
         ? { id, type: r.type, value: r.value }
         : null
@@ -919,6 +932,8 @@ export function createRecordDropdownWiring(o: {
   load: (win: BrowserWindow) => Promise<unknown>
   pill: () => BrowserWindow | null
   ctl: () => WindowTransitions
+  /** The installed apps' icons for the app rows (read-only; known ids only). */
+  appIcons?: (ids: unknown) => Promise<Record<string, string>>
 }) {
   let child: BrowserWindow | null = null
   let markReady: (() => void) | null = null
@@ -1043,6 +1058,9 @@ export function createRecordDropdownWiring(o: {
     dragToken = o.ctl().dragStart(p, { x: 0, y: 0, collapseToPill: false })
     return dragToken
   })
+  o.ipc.handle('dropdown:appIcons', (e, ids: unknown): Promise<Record<string, string>> | Record<string, string> =>
+    fromChild(e) && o.appIcons ? o.appIcons(ids) : {}
+  )
   o.ipc.handle('dropdown:dragEnd', (e, token: unknown): boolean => {
     if (!fromChild(e) || token == null || token !== dragToken) return false
     endDrag()

@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import type { FixOption } from '../../state/types'
+import RailCell from './RailCell'
+import RichText from './RichText'
 
 export type RunCardChip = {
   id: string
@@ -9,19 +11,23 @@ export type RunCardChip = {
 
 type RunCardProps = {
   variant: 'question' | 'error'
-  /** Step context line, e.g. "4 · Title the new section" or "Needs an answer". */
+  /** Step context line, e.g. "Choose a destination" / "Couldn’t continue". */
   title: string
-  /** Colored prompt / failure copy. */
+  /** Coloured prompt / failure copy. */
   message: string
   chips: RunCardChip[]
-  footer: string
+  /** Optional quiet line under the chips. */
+  footer?: string
   onSelect: (chipId: string, custom?: string) => void
   otherPlaceholder?: string
+  leading?: boolean
+  trailing?: boolean
 }
 
 /**
- * Shared mid-run hold card — amber question (6.3) and rose error (6.4).
- * Chip grammar matches fix-step 5.4.
+ * Mid-run hold card at the active step — accent for a question (running-question), rose for
+ * a failure (Hero · Run paused "Couldn’t continue"). Same chip grammar as the editor's
+ * decision card; the rail node turns into the forming spindles while the run holds.
  */
 export default function RunCard({
   variant,
@@ -30,57 +36,59 @@ export default function RunCard({
   chips,
   footer,
   onSelect,
-  otherPlaceholder = 'Type a title…'
+  otherPlaceholder = 'Type a value…',
+  leading = true,
+  trailing = true
 }: RunCardProps) {
   const [otherOpen, setOtherOpen] = useState(false)
   const [otherText, setOtherText] = useState('')
+  const rose = variant === 'error'
 
   return (
-    <div className={`run-card run-card-${variant}`}>
-      <div className="run-card-title">{title}</div>
-      <div className="run-card-message">{message}</div>
-      <div className="fix-options">
-        {chips.map((chip) => {
-          if (chip.kind === 'other' && otherOpen) {
+    <div className={`decision ${rose ? 'decision-rose' : ''}`} onMouseDown={(e) => e.stopPropagation()}>
+      <RailCell
+        anchor="decision"
+        state="forming"
+        formingTone={rose ? 'rose' : 'accent'}
+        leading={leading}
+        trailing={trailing}
+      />
+      <div className="decision-body" role="group" aria-label={title}>
+        <div className="decision-title">
+          <RichText text={title} />
+        </div>
+        <div className="decision-prompt">{message}</div>
+        <div className="decision-options">
+          {chips.map((chip) => {
+            if (chip.kind === 'other' && otherOpen) {
+              return (
+                <input
+                  key={chip.id}
+                  className="chip-input"
+                  autoFocus
+                  placeholder={otherPlaceholder}
+                  value={otherText}
+                  onChange={(e) => setOtherText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && otherText.trim()) onSelect(chip.id, otherText.trim())
+                    if (e.key === 'Escape') setOtherOpen(false)
+                  }}
+                />
+              )
+            }
             return (
-              <input
+              <button
                 key={chip.id}
-                className="fix-custom-input"
-                autoFocus
-                placeholder={otherPlaceholder}
-                value={otherText}
-                onChange={(e) => setOtherText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && otherText.trim()) {
-                    onSelect(chip.id, otherText.trim())
-                  }
-                }}
-              />
+                className="chip"
+                onClick={() => (chip.kind === 'other' ? setOtherOpen(true) : onSelect(chip.id))}
+              >
+                {chip.label}
+              </button>
             )
-          }
-          return (
-            <button
-              key={chip.id}
-              className={`fix-option ${chip.kind === 'suggested' ? 'fix-option-suggested' : ''}`}
-              onClick={() =>
-                chip.kind === 'other' ? setOtherOpen(true) : onSelect(chip.id)
-              }
-            >
-              {chip.kind === 'suggested' && <SparkIcon />}
-              {chip.label}
-            </button>
-          )
-        })}
+          })}
+        </div>
+        {footer && <div className="decision-foot">{footer}</div>}
       </div>
-      <div className="run-card-footer">{footer}</div>
     </div>
-  )
-}
-
-function SparkIcon() {
-  return (
-    <svg width="10" height="9" viewBox="0 0 10 9" fill="currentColor">
-      <path d="M5 0l1.1 2.9L9 4 6.1 5.1 5 8 3.9 5.1 1 4l2.9-1.1z" />
-    </svg>
   )
 }

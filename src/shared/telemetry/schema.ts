@@ -607,6 +607,8 @@ export const TelemetrySessionMetaSchema = z
     schemaVersion: z.literal(SCHEMA_VERSION),
     recordMode: z.enum(['one-app', 'full-screen']).optional(),
     selectedAppId: z.string().max(80).optional(),
+    /** "Select apps" is multi-select; `selectedAppId` stays the first for older readers. */
+    selectedAppIds: z.array(z.string().max(80)).max(32).optional(),
     delivery: SessionDeliverySchema.optional(),
     screenshotCapture: ScreenshotCaptureStatusSchema.optional(),
     /**
@@ -693,6 +695,11 @@ export function normalizeSessionMeta(raw: unknown): TelemetrySessionMeta | null 
     schemaVersion: SCHEMA_VERSION,
     recordMode: data.recordMode,
     selectedAppId: data.selectedAppId,
+    // A malformed list is dropped (the single selectedAppId still reads); it never hides the recording.
+    ...(Array.isArray(data.selectedAppIds) &&
+    z.array(z.string().max(80)).max(32).safeParse(data.selectedAppIds).success
+      ? { selectedAppIds: data.selectedAppIds as string[] }
+      : {}),
     ...(delivery ? { delivery } : {}),
     // Absent stays absent (read as unknown); a malformed value never becomes a claim and
     // never hides the recording.

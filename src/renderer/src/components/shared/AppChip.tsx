@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { StepApp } from '../../state/types'
 import { PencilIcon } from './TriggerSection'
+import notionLogo from '../../assets/apps/notion.svg'
+import slackLogo from '../../assets/apps/slack.svg'
+import figmaLogo from '../../assets/apps/figma.png'
 
 /** Apps offered when prompting to fill / change a chip. */
 export const KNOWN_APPS: StepApp[] = [
+  { id: 'notion', name: 'Notion' },
+  { id: 'slack', name: 'Slack' },
   { id: 'figma', name: 'Figma' },
-  { id: 'chrome', name: 'Chrome' },
-  { id: 'slack', name: 'Slack' }
+  { id: 'chrome', name: 'Chrome' }
 ]
 
 /** True when the step text is an "Open … in ___" style slot (app is separate). */
@@ -26,6 +30,8 @@ export function withAppSlotBlank(text: string): string {
 type AppChipProps = {
   app: StepApp
   muted?: boolean
+  /** 14px logo for the recording ledger; 16px elsewhere. */
+  small?: boolean
   /** Hover edit / delete — used on summary + StepList. */
   editable?: boolean
   onChangeApp?: (app: StepApp) => void
@@ -36,6 +42,7 @@ type AppChipProps = {
 export default function AppChip({
   app,
   muted = false,
+  small = false,
   editable = false,
   onChangeApp,
   onRemoveApp
@@ -63,14 +70,14 @@ export default function AppChip({
   return (
     <span
       ref={rootRef}
-      className={`app-chip ${muted ? 'app-chip-muted' : ''} ${editable ? 'app-chip-editable' : ''}`}
+      className={`app-chip ${small ? 'app-chip-sm' : ''} ${muted ? 'app-chip-muted' : ''} ${editable ? 'app-chip-editable' : ''}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <AppGlyph id={app.id} />
-      {app.name}
+      <AppLogo id={app.id} />
+      <span className="app-chip-name">{app.name}</span>
       {editable && hovered && !picking && (
         <span className="app-chip-actions">
           <button
@@ -180,7 +187,7 @@ function AppPicker({
             onPick(a)
           }}
         >
-          <AppGlyph id={a.id} />
+          <AppLogo id={a.id} />
           {a.name}
         </button>
       ))}
@@ -198,43 +205,30 @@ function TrashTiny() {
   )
 }
 
-function AppGlyph({ id }: { id: StepApp['id'] }) {
-  if (id === 'figma') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 12 12">
-        <rect width="12" height="12" rx="3" fill="#1e1e1e" />
-        <path d="M4.9 2.5h1.1v2.2H4.9a1.1 1.1 0 1 1 0-2.2z" fill="#f24e1e" />
-        <path d="M6 2.5h1.1a1.1 1.1 0 1 1 0 2.2H6z" fill="#ff7262" />
-        <path d="M4.9 4.9h1.1v2.2H4.9a1.1 1.1 0 1 1 0-2.2z" fill="#a259ff" />
-        <circle cx="7.1" cy="6" r="1.1" fill="#1abcfe" />
-        <path d="M4.9 7.3h1.1v1.1a1.1 1.1 0 1 1-1.1-1.1z" fill="#0acf83" />
-      </svg>
-    )
-  }
-  if (id === 'slack') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 12 12">
-        <rect width="12" height="12" rx="3" fill="#fff" />
-        <rect x="2.4" y="6.6" width="4.4" height="1.6" rx="0.8" fill="#e01e5a" />
-        <rect x="6.6" y="5.2" width="1.6" height="4.4" rx="0.8" fill="#2eb67d" />
-        <rect x="5.2" y="2.4" width="4.4" height="1.6" rx="0.8" fill="#36c5f0" transform="rotate(90 7.4 3.2)" />
-        <rect x="3.2" y="3.8" width="4.4" height="1.6" rx="0.8" fill="#ecb22e" />
-      </svg>
-    )
-  }
+const LOGO_SRC: Partial<Record<StepApp['id'], string>> = {
+  notion: notionLogo,
+  slack: slackLogo,
+  figma: figmaLogo
+}
+
+/** App logo (Figma: Logo/Notion 16, Logo/Slack 16, figma-2021-05-05). */
+export function AppLogo({ id }: { id: StepApp['id'] }) {
+  const src = LOGO_SRC[id]
+  if (src) return <img className="app-chip-logo" src={src} alt="" draggable={false} />
   if (id === 'chrome') {
     return (
-      <svg width="12" height="12" viewBox="0 0 12 12">
-        <circle cx="6" cy="6" r="5.5" fill="#fff" />
-        <circle cx="6" cy="6" r="5.2" fill="#4285f4" />
-        <circle cx="6" cy="6" r="2.2" fill="#fff" />
-        <circle cx="6" cy="6" r="1.7" fill="#4285f4" />
+      <svg className="app-chip-logo" viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="7.6" fill="#fff" />
+        <path d="M8 .4a7.6 7.6 0 0 1 6.58 3.8H8a3.8 3.8 0 0 0-3.3 1.9L1.42 3.65A7.6 7.6 0 0 1 8 .4Z" fill="#ea4335" />
+        <path d="M1.42 3.65 4.7 9.9a3.8 3.8 0 0 0 4.06 1.82l-2.2 3.82A7.6 7.6 0 0 1 1.42 3.65Z" fill="#34a853" />
+        <path d="M14.58 4.2A7.6 7.6 0 0 1 6.56 15.54l2.2-3.82a3.8 3.8 0 0 0 2.56-5.62L14.58 4.2Z" fill="#fbbc05" />
+        <circle cx="8" cy="8" r="2.9" fill="#4285f4" stroke="#fff" strokeWidth="1" />
       </svg>
     )
   }
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12">
-      <rect width="12" height="12" rx="3" fill="#e4e5e6" />
+    <svg className="app-chip-logo" viewBox="0 0 16 16" aria-hidden="true">
+      <rect width="16" height="16" rx="4" fill="var(--gray-color-gray-1)" />
     </svg>
   )
 }

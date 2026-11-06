@@ -50,11 +50,10 @@ export function formatSchedule(cadence: ScheduleCadence): string {
       if (days.length === 5 && WEEKDAYS.every((d) => days.includes(d))) {
         return `Every weekday at ${at}`
       }
-      if (days.length === 1) {
-        return `Every week on ${WEEKDAY_NAMES[days[0]]} at ${at}`
-      }
-      const names = days.map((d) => WEEKDAY_NAMES[d]).join(', ')
-      return `Every week on ${names} at ${at}`
+      // Portfolio copy: "Every Monday at 9:00 A.M." / "Every Monday and Thursday at …".
+      const names = days.map((d) => WEEKDAY_NAMES[d])
+      const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
+      return `Every ${list} at ${at}`
     }
     case 'monthly':
       return `${ordinal(cadence.day)} of each month at ${at}`
@@ -224,4 +223,67 @@ export const SCHEDULE_PRESETS: ScheduleCadence[] = [
 
 export function cadenceKey(c: ScheduleCadence): string {
   return formatSchedule(c)
+}
+
+const DAY_PATTERNS: { day: Weekday; re: RegExp }[] = [
+  { day: 1, re: /\bmon(day)?s?\b/ },
+  { day: 2, re: /\btue(s|sday)?s?\b/ },
+  { day: 3, re: /\bwed(nesday)?s?\b/ },
+  { day: 4, re: /\bthu(r|rs|rsday)?s?\b/ },
+  { day: 5, re: /\bfri(day)?s?\b/ },
+  { day: 6, re: /\bsat(urday)?s?\b/ },
+  { day: 0, re: /\bsun(day)?s?\b/ }
+]
+
+/** "9", "9:30", "9am", "4:30 p.m.", "16:30", "noon" → TimeOfDay (default 9:00 A.M.). */
+function parseTimeOfDay(text: string): TimeOfDay {
+  if (/\bnoon\b/.test(text)) return { hour: 12, minute: 0 }
+  if (/\bmidnight\b/.test(text)) return { hour: 0, minute: 0 }
+  const MER = '(a\\.?\\s?m\\.?|p\\.?\\s?m\\.?)'
+  const m =
+    text.match(new RegExp(`\\bat\\s+(\\d{1,2})(?::(\\d{2}))?\\s*${MER}?`)) ??
+    text.match(new RegExp(`\\b(\\d{1,2}):(\\d{2})\\s*${MER}?`)) ??
+    text.match(new RegExp(`\\b(\\d{1,2})()\\s*${MER}`))
+  if (!m) return { hour: 9, minute: 0 }
+  let hour = parseInt(m[1], 10)
+  const minute = m[2] ? Math.min(59, parseInt(m[2], 10)) : 0
+  const meridiem = m[3]?.replace(/[\s.]/g, '')
+  if (meridiem === 'pm' && hour < 12) hour += 12
+  if (meridiem === 'am' && hour === 12) hour = 0
+  if (!meridiem && hour >= 1 && hour <= 6) hour += 12 // "at 4:30" in a work context means P.M.
+  return { hour: Math.min(23, Math.max(0, hour)), minute }
+}
+
+/**
+ * Smart-trigger text → structured cadence (Figma: Input/Smart trigger). Understands daily,
+ * weekday(s), named days, weekly, monthly ("on the 1st") and "every N days", each with an
+ * optional time. Returns null when no schedule is recognised.
+ */
+export function parseScheduleText(raw: string): ScheduleCadence | null {
+  const text = raw.toLowerCase().replace(/[“”"]/g, ' ').trim()
+  if (!text) return null
+  const time = parseTimeOfDay(text.replace(/\b(\d{1,2})(st|nd|rd|th)\b/g, ' '))
+
+  const interval = text.match(/\bevery\s+(\d{1,3})\s+days?\b/)
+  if (interval) {
+    const intervalDays = Math.min(365, Math.max(1, parseInt(interval[1], 10)))
+    return { kind: 'custom', intervalDays, time, label: `Every ${intervalDays} days at ${formatTime(time)}` }
+  }
+  if (/\b(month|monthly)\b/.test(text)) {
+    const d = text.match(/\b(\d{1,2})(st|nd|rd|th)\b/) ?? text.match(/\bday\s+(\d{1,2})\b/)
+    const day = d ? Math.min(31, Math.max(1, parseInt(d[1], 10))) : 1
+    return { kind: 'monthly', day, time }
+  }
+  if (/\bweekdays?\b|\bwork ?days?\b|\bmon(day)?\s*(-|–|to|through)\s*fri(day)?\b/.test(text)) {
+    return { kind: 'weekly', days: [...WEEKDAYS], time }
+  }
+  const days = DAY_PATTERNS.filter((p) => p.re.test(text)).map((p) => p.day)
+  if (days.length) return { kind: 'weekly', days: days.sort((a, b) => a - b) as Weekday[], time }
+  if (/\b(daily|every\s*day|each\s*day|every\s+morning|every\s+evening|nightly)\b/.test(text)) {
+    return { kind: 'daily', time }
+  }
+  if (/\b(weekly|every\s+week|each\s+week)\b/.test(text)) {
+    return { kind: 'weekly', days: [1], time }
+  }
+  return null
 }

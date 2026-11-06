@@ -501,7 +501,7 @@ async function scenarioChecks(html) {
     await emitChunk(48)
     await js(`document.querySelector('.pill')?.click()`)
     await waitFor(() => js('!!document.querySelector(".ledger-footer .btn-primary")'), 4000, 'ledger')
-    await js(`(() => { document.querySelector('.ledger-header .play-pause-btn').click(); document.querySelector('.ledger-footer .btn-primary').click() })()`)
+    await js(`(() => { document.querySelector('.pill .play-pause-btn').click(); document.querySelector('.ledger-footer .btn-primary').click() })()`)
     const save = await savedAudio(id)
     const st = await fm()
     s.rapidPauseFinish = { save, liveTracks: st.liveTracks, maxStopsPerTrack: st.maxStopsPerTrack }
@@ -698,7 +698,7 @@ async function ownerCycles(html, n) {
     out.latencies.push(Date.now() - t0)
     const m = await telemetry.getTelemetryStore().getSessionMeta(id)
     if (m && m.delivery.save.state === 'complete') out.complete++
-    await waitFor(() => js('document.querySelector(".gray-root") && !document.querySelector(".gray-root-glass")'), 4000, 'renderer idle')
+    await waitFor(() => js('document.querySelector(".gray-root") && !document.querySelector(".pill-recording, .pill-paused, .pill-thinking")'), 4000, 'renderer idle')
     await sleep(100)
   }
   out.latencies.sort((a, b) => a - b)

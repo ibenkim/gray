@@ -840,6 +840,7 @@ function mapAppName(appName: string | null | undefined): StepApp | undefined {
   if (lower.includes('chrome') || lower.includes('safari') || lower.includes('firefox'))
     return { id: 'chrome', name: 'Chrome' }
   if (lower.includes('slack')) return { id: 'slack', name: 'Slack' }
+  if (lower.includes('notion')) return { id: 'notion', name: 'Notion' }
   if (lower.includes('finder')) return { id: 'finder', name: 'Finder' }
   if (lower.includes('mail') || lower.includes('outlook')) return { id: 'mail', name: 'Mail' }
   return undefined

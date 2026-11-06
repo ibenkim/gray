@@ -59,6 +59,7 @@ import {
   stopActiveRecording
 } from './telemetry'
 import { registerAutomationIpc, stopActiveAutomationRun } from './automation'
+import { appIconDataUrls } from './appIcons'
 
 let pillWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
@@ -82,8 +83,8 @@ let overlayDemotedForSettings = false
 const MARGIN = 24
 
 /** Content size of the Library card (matches `.workspace-window`). */
-const WORKSPACE_CONTENT_W = 807
-const WORKSPACE_CONTENT_H = 549
+const WORKSPACE_CONTENT_W = 908
+const WORKSPACE_CONTENT_H = 616
 /**
  * Transparent inset so the CSS shadow (blur 30 + `#3E2B49` @ 20%) can paint
  * outside the opaque card — Electron clips shadows to the window bounds.
@@ -386,7 +387,8 @@ const recordDropdown = createRecordDropdownWiring({
       ? win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${RECORD_DROPDOWN_HASH}`)
       : win.loadFile(join(__dirname, '../renderer/index.html'), { hash: RECORD_DROPDOWN_HASH }),
   pill: () => pillWindow,
-  ctl: () => transitions
+  ctl: () => transitions,
+  appIcons: appIconDataUrls
 })
 const transitions = createWindowTransitions({
   pill: () => pillWindow,

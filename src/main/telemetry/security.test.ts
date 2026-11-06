@@ -18,6 +18,26 @@ describe('renderer / preload isolation', () => {
 })
 
 describe('normalizeSessionMeta', () => {
+  it('keeps a valid multi-app choice and drops a malformed one without hiding the recording', () => {
+    const base = {
+      sessionId: 'tsess_apps',
+      startedAt: '2026-07-29T04:28:43.153Z',
+      captureStatus: 'stopped',
+      processingStatus: 'not_started',
+      schemaVersion: 1,
+      recordMode: 'one-app',
+      selectedAppId: 'chrome'
+    }
+    expect(normalizeSessionMeta({ ...base, selectedAppIds: ['chrome', 'figma'] })?.selectedAppIds).toEqual([
+      'chrome',
+      'figma'
+    ])
+    const malformed = normalizeSessionMeta({ ...base, selectedAppIds: ['chrome', 42] })
+    expect(malformed).not.toBeNull()
+    expect(malformed?.selectedAppIds).toBeUndefined()
+    expect(malformed?.selectedAppId).toBe('chrome')
+  })
+
   it('maps legacy failed status to stopped capture + failed processing without keeping raw error', () => {
     const meta = normalizeSessionMeta({
       sessionId: 'tsess_x',

@@ -9,28 +9,24 @@ import {
   RunContractPanel,
   WorkflowSummary
 } from '../shared/ReviewSections'
-import { ChevronDown } from '../GrayPill'
 import { useWindowDrag } from '../../hooks/useWindowDrag'
 
 /**
- * 05 — editor, 660×521 white panel. Header · summary · TRIGGER · QUESTIONS ·
- * STEPS · footer (Cancel with confirm · Run · Save Workflow). Esc collapses to
- * the "Editing" pill — Cancel/✕ is the only destructive exit.
+ * 05 — "Here's what I learned" (Figma: editor · Hero · Review). Sections rise in one after
+ * another as the card opens; Run and Save wait until every highlighted question is answered.
+ * Esc folds the editor into the pill — Cancel (with confirm) is the only destructive exit.
  */
 export default function EditorPanel() {
-  const {
-    workflow,
-    setWorkflow,
-    saveWorkflow,
-    runWorkflow,
-    cancelEditor,
-    setEditorCollapsed
-  } = useWorkflow()
+  const { workflow, setWorkflow, saveWorkflow, runWorkflow, cancelEditor, setEditorCollapsed } =
+    useWorkflow()
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [showContract, setShowContract] = useState(false)
   const { onMouseDown: onDragMouseDown } = useWindowDrag()
+
+  const openQuestions = workflow.steps.filter((s) => s.fix && !s.fix.collapsed).length
+  const blocked = openQuestions > 0
 
   // Esc → collapse (not discard).
   useEffect(() => {
@@ -77,29 +73,19 @@ export default function EditorPanel() {
     runWorkflow(accepted)
   }
 
-  return (
-    <div className="editor-panel">
-      <div className="editor-chrome">
-        <button
-          className="editor-close"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={() => setConfirmDiscard(true)}
-          title="Cancel"
-        >
-          <XGlyph />
-        </button>
-        <button
-          className="chevron-btn editor-collapse"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={() => setEditorCollapsed(true)}
-          title="Collapse"
-        >
-          <ChevronDown />
-        </button>
-      </div>
+  const blockedTitle = blocked
+    ? `Answer the highlighted question${openQuestions > 1 ? 's' : ''} first`
+    : undefined
+  let section = 0
+  const rise = (extra = '') => ({
+    className: `enter-rise ${extra}`,
+    style: { ['--i' as string]: section++ }
+  })
 
-      <div className="editor-head" onMouseDown={onDragMouseDown}>
-        <div className="eyebrow">Here's what I learned</div>
+  return (
+    <div className="editor-panel" onMouseDown={onDragMouseDown}>
+      <div {...rise('editor-head')}>
+        <div className="editor-eyebrow">Here’s what I learned</div>
         <div className="editor-title-row">
           {editingTitle ? (
             <input
@@ -124,15 +110,19 @@ export default function EditorPanel() {
               {workflow.name}
             </button>
           )}
-          <span
-            className="editor-edit-icon"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={beginTitleEdit}
-          >
-            <PencilIcon />
-          </span>
+          {!editingTitle && (
+            <span
+              className="editor-edit-icon"
+              role="button"
+              aria-label="Rename"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={beginTitleEdit}
+            >
+              <PencilIcon />
+            </span>
+          )}
         </div>
-        <div className="meta">{workflow.metaLabel}</div>
+        <div className="editor-meta">{workflow.metaLabel}</div>
       </div>
 
       <div className="editor-body scroll">
@@ -144,20 +134,31 @@ export default function EditorPanel() {
           />
         ) : (
           <>
-            <WorkflowSummary summary={workflow.summary} goal={workflow.goal} />
-
-            <RedactionPreview sessionId={workflow.sessionId} />
-
-            <TriggerSection
-              trigger={workflow.trigger}
-              onChange={(t) => setWorkflow((w) => ({ ...w, trigger: t }))}
-            />
-
-            <QuestionsSection questions={workflow.questions} />
-
-            <div className="ledger-section">
-              <div className="section-label">STEPS</div>
+            {(workflow.summary || workflow.goal) && (
+              <div {...rise()}>
+                <WorkflowSummary summary={workflow.summary} goal={workflow.goal} />
+              </div>
+            )}
+            {workflow.sessionId && (
+              <div {...rise()}>
+                <RedactionPreview sessionId={workflow.sessionId} />
+              </div>
+            )}
+            <div {...rise()}>
+              <TriggerSection
+                trigger={workflow.trigger}
+                onChange={(t) => setWorkflow((w) => ({ ...w, trigger: t }))}
+              />
+            </div>
+            {!!workflow.questions?.length && (
+              <div {...rise()}>
+                <QuestionsSection questions={workflow.questions} />
+              </div>
+            )}
+            <div {...rise('editor-section')}>
+              <div className="section-label">Steps</div>
               <StepList
+                animateIn
                 steps={workflow.steps}
                 onChange={(updater) =>
                   setWorkflow((w) => {
@@ -178,32 +179,43 @@ export default function EditorPanel() {
         )}
       </div>
 
-      <div className="panel-divider" />
-      <div className="panel-footer window-actions">
+      <div className="editor-footer enter-rise" style={{ ['--i' as string]: section + 2 }}>
         {confirmDiscard ? (
-          <div className="discard-confirm">
-            <span>Discard these {workflow.steps.length} steps?</span>
-            <button className="btn btn-danger discard-yes" onClick={cancelEditor}>
-              Discard
-            </button>
+          <div className="discard-confirm" onMouseDown={(e) => e.stopPropagation()}>
+            <span>
+              Discard these {workflow.steps.length} steps? Gray won’t keep this recording’s workflow.
+            </span>
             <button className="btn btn-quiet" onClick={() => setConfirmDiscard(false)}>
-              Keep
+              Keep editing
+            </button>
+            <button className="btn btn-danger" onClick={cancelEditor}>
+              Discard
             </button>
           </div>
         ) : (
           <>
-            <button className="btn btn-quiet" onClick={() => setConfirmDiscard(true)}>
+            <button
+              className="btn btn-quiet"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setConfirmDiscard(true)}
+            >
               Cancel
             </button>
-            <div className="window-actions-right">
+            <div className="window-actions-right" onMouseDown={(e) => e.stopPropagation()}>
               <button
                 className="btn btn-secondary"
                 onClick={requestRun}
-                disabled={showContract}
+                disabled={showContract || blocked}
+                title={blockedTitle}
               >
                 Run
               </button>
-              <button className="btn btn-primary" onClick={saveWorkflow}>
+              <button
+                className="btn btn-primary"
+                onClick={saveWorkflow}
+                disabled={blocked}
+                title={blockedTitle}
+              >
                 Save Workflow
               </button>
             </div>
@@ -211,13 +223,5 @@ export default function EditorPanel() {
         )}
       </div>
     </div>
-  )
-}
-
-function XGlyph() {
-  return (
-    <svg width="7" height="7" viewBox="0 0 7 7" stroke="currentColor" strokeWidth="1.2">
-      <path d="M0.8 0.8 6.2 6.2 M6.2 0.8 0.8 6.2" />
-    </svg>
   )
 }

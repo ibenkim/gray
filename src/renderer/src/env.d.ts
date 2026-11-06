@@ -131,6 +131,7 @@ declare global {
       dismiss: () => void
       dragStart: () => Promise<number | null>
       dragEnd: (token: number | null) => Promise<boolean>
+      appIcons?: (ids: string[]) => Promise<Record<string, string>>
       onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => () => void
     }
     grayBridge: {
@@ -215,6 +216,7 @@ declare global {
       telemetryStart: (opts?: {
         recordMode?: 'one-app' | 'full-screen'
         selectedAppId?: string
+        selectedAppIds?: string[]
         ownerEmail?: string
         narrate?: boolean
       }) => Promise<{ ok: boolean; status?: TelemetryRecordingStatus; error?: string }>

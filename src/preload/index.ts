@@ -65,6 +65,7 @@ type TelemetryRecordingStatus = {
 type TelemetryStartOpts = {
   recordMode?: 'one-app' | 'full-screen'
   selectedAppId?: string
+  selectedAppIds?: string[]
   ownerEmail?: string
   narrate?: boolean
 }
@@ -529,6 +530,8 @@ const grayDropdown = {
   dismiss: () => ipcRenderer.send('dropdown:dismiss'),
   dragStart: (): Promise<number | null> => ipcRenderer.invoke('dropdown:dragStart'),
   dragEnd: (token: number | null): Promise<boolean> => ipcRenderer.invoke('dropdown:dragEnd', token),
+  /** The installed apps' icons as data URLs, for known app ids only. */
+  appIcons: (ids: string[]): Promise<Record<string, string>> => ipcRenderer.invoke('dropdown:appIcons', ids),
   onSnapshot: (cb: (snapshot: RecordDropdownSnapshot) => void) => {
     const listener = (_e: unknown, snapshot: RecordDropdownSnapshot) => cb(snapshot)
     ipcRenderer.on('dropdown:snapshot', listener)
