@@ -64,6 +64,8 @@ export class AutomationRunner {
   private waitResolve: (() => void) | null = null
   private controlQueue: RunnerControl[] = []
   private resolution: ResolutionStats = { tier1: 0, tier2: 0 }
+  /** A step was skipped or not run (simulated), so the run cannot report done. */
+  private incomplete = false
 
   constructor(opts: AutomationRunnerOptions) {
     this.runId = opts.runId
@@ -71,9 +73,8 @@ export class AutomationRunner {
     this.onEvent = opts.onEvent
     this.variables = { ...(opts.variables ?? {}) }
     this.mode = opts.mode ?? 'supervised'
-    this.allowedAddressIds = opts.allowedAddressIds?.length
-      ? new Set(opts.allowedAddressIds)
-      : null
+    // An empty scope allows nothing; only an omitted scope (pure runner tests) is unchecked.
+    this.allowedAddressIds = opts.allowedAddressIds ? new Set(opts.allowedAddressIds) : null
     this.allowedHosts = resolveAllowedHosts(opts.allowedAddressIds, opts.addresses)
     this.intentByOrder = new Map()
     this.summaryByOrder = new Map()
@@ -95,6 +96,7 @@ export class AutomationRunner {
     this.running = true
     this.stopped = false
     this.opIndex = 0
+    this.incomplete = false
     this.resolution = { tier1: 0, tier2: 0 }
     try {
       await this.actuator.start()
@@ -162,6 +164,7 @@ export class AutomationRunner {
             label: label.startsWith('[Simulated]') ? label : `[Simulated] ${label}`,
             simulated: true
           })
+          this.incomplete = true
           this.opIndex += 1
         } else if (outcome === 'skip') {
           this.onEvent({
@@ -169,8 +172,10 @@ export class AutomationRunner {
             runId: this.runId,
             stepOrder: op.stepOrder,
             opIndex: this.opIndex,
-            label
+            label,
+            skipped: true
           })
+          this.incomplete = true
           this.opIndex += 1
         } else if (outcome === 'stopped') {
           break
@@ -185,7 +190,7 @@ export class AutomationRunner {
     this.onEvent({
       type: 'finished',
       runId: this.runId,
-      outcome: this.stopped ? 'stopped' : 'done',
+      outcome: this.stopped ? 'stopped' : this.incomplete ? 'incomplete' : 'done',
       resolution: { ...this.resolution }
     })
   }
@@ -207,6 +212,13 @@ export class AutomationRunner {
     op: AutomationOp,
     label: string
   ): Promise<'done' | 'skip' | 'stopped' | 'retry' | 'simulated'> {
+    // Simulated mode dispatches only known read-only queries; anything else (clicks, keys,
+    // typing, app launch, navigation — even a URL can create records — and manual or
+    // question steps) is reported, not run.
+    if (this.mode === 'simulated' && op.op !== 'wait_for') {
+      return 'simulated'
+    }
+
     if (op.op === 'manual') {
       return this.holdForError(
         op,
@@ -219,11 +231,6 @@ export class AutomationRunner {
 
     if (op.op === 'ask_user') {
       return this.holdForQuestion(op, label)
-    }
-
-    // Simulated mode: skip mutating ops but still prove navigation.
-    if (this.mode === 'simulated' && isMutatingOp(op)) {
-      return 'simulated'
     }
 
     // Supervised: gate Commit / submit-like ops for approval.
@@ -509,6 +516,8 @@ export class AutomationRunner {
     label: string,
     prompt: string
   ): Promise<'done' | 'skip' | 'stopped' | 'retry'> {
+    // An approval sent before this prompt was shown cannot approve it.
+    this.controlQueue = this.controlQueue.filter((c) => c.kind !== 'approve')
     this.hold = 'question'
     this.onEvent({
       type: 'question',
@@ -533,14 +542,15 @@ export class AutomationRunner {
         this.hold = null
         return 'skip'
       }
-      if (cmd.kind === 'answer' || cmd.kind === 'takeOver' || cmd.kind === 'retry') {
+      // Only an explicit approval commits; Take Over, Retry or an answer do not.
+      if (cmd.kind === 'approve') {
         this.hold = null
         return 'done'
       }
       if (cmd.kind === 'pause') this.paused = true
       if (cmd.kind === 'resume') this.paused = false
     }
-    return this.stopped ? 'stopped' : 'done'
+    return 'stopped'
   }
 
   private async holdForQuestion(
@@ -666,31 +676,6 @@ export class AutomationRunner {
       if (timer) clearTimeout(timer)
     }
   }
-}
-
-function isMutatingOp(op: AutomationOp): boolean {
-  switch (op.op) {
-    case 'type_text':
-    case 'set_clipboard':
-    case 'activate_element':
-    case 'click_at':
-      return true
-    case 'scroll':
-      return true
-    case 'keystroke':
-      return isMutatingKeystroke(op.chord ?? '')
-    default:
-      return false
-  }
-}
-
-/** Plain typing / paste — not navigation shortcuts like Cmd+L. */
-function isMutatingKeystroke(chord: string): boolean {
-  if (!chord) return false
-  if (/^(Cmd|Ctrl|Control)\+V$/i.test(chord)) return true
-  // No command/ctrl/alt modifier → typing a character or Return/Tab in a field.
-  if (!/(Cmd|Ctrl|Control|Alt|Option|Meta)/i.test(chord)) return true
-  return false
 }
 
 function navigationDestination(

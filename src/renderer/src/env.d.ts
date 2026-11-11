@@ -86,6 +86,7 @@ type AutomationRunEvent =
       opIndex: number
       label: string
       simulated?: boolean
+      skipped?: boolean
     }
   | {
       type: 'stepFailed'
@@ -116,7 +117,7 @@ type AutomationRunEvent =
   | {
       type: 'finished'
       runId: string
-      outcome: 'done' | 'stopped'
+      outcome: 'done' | 'incomplete' | 'stopped'
       resolution?: { tier1: number; tier2: number }
     }
 

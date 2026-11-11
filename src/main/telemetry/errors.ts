@@ -99,3 +99,17 @@ export function logProcessingFailure(scope: string, err: unknown): ProcessingErr
   console.error(`[telemetry] ${scope} failed code=${mapped.code}`)
   return mapped.code
 }
+
+/**
+ * M5 hold: live recorded-workflow execution needs a main-owned reviewed run contract (M12/M13).
+ * Nothing ran and nothing on screen was touched by this request.
+ */
+export function runContractRequired(sessionId?: string) {
+  return {
+    ok: false as const,
+    sessionId,
+    errorCode: 'RUN_CONTRACT_REQUIRED' as const,
+    error:
+      'Running recorded workflows is unavailable in this build until run review is added. Nothing was run.'
+  }
+}

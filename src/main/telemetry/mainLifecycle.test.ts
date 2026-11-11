@@ -194,7 +194,7 @@ vi.mock('../windowTransitions', () => ({
       }
     })
 }))
-vi.mock('../automation', () => ({ registerAutomationIpc: () => {}, stopActiveAutomationRun: () => {} }))
+vi.mock('../automation', () => ({ registerAutomationIpc: () => {} }))
 vi.mock('./index', () => ({
   flushTelemetryOnQuit: async () => {},
   initTelemetry: async () => {},

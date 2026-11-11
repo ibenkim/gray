@@ -10,7 +10,7 @@ vi.mock('electron', () => ({
   }
 }))
 
-import type { AutomationScript } from '../../shared/telemetry/schema'
+import { AutomationOpKindSchema, type AutomationScript } from '../../shared/telemetry/schema'
 import { AutomationRunner, resolveClickPoint, toFailureCode } from './runner'
 import type { Actuator, ActuatorResult, QueryParams, RunEvent } from './types'
 
@@ -267,69 +267,104 @@ describe('AutomationRunner', () => {
     expect(toFailureCode('out_of_scope')).toBe('out_of_scope')
   })
 
-  it('simulated mode skips mutating ops but runs navigation', async () => {
+  it('simulated mode dispatches only read-only queries (M5)', async () => {
     const actuator = new FakeActuator()
     const events: RunEvent[] = []
-    const script: AutomationScript = {
-      ops: [
-        baseOp({ op: 'open_app', appName: 'Safari', label: 'Open Safari' }),
-        baseOp({
-          op: 'open_url',
-          stepOrder: 2,
-          url: 'https://example.com/path',
-          label: 'Open example'
-        }),
-        baseOp({
-          op: 'type_text',
-          stepOrder: 3,
-          literalText: 'hello',
-          label: 'Type hello'
-        }),
-        baseOp({
-          op: 'activate_element',
-          stepOrder: 4,
-          elementLabel: 'Go',
-          label: 'Click Go'
-        }),
-        baseOp({
-          op: 'wait_for',
-          stepOrder: 5,
-          waitCondition: 'app_frontmost',
-          appName: 'Safari',
-          label: 'Wait frontmost'
-        })
-      ],
-      warnings: []
-    }
+    const chords = ['Cmd+S', 'Cmd+Enter', 'Delete', 'Cmd+W', 'Cmd+X', 'Cmd+V', 'Cmd+L', 'Cmd+Shift+K', 'a']
+    const ops = [
+      baseOp({ op: 'open_app', appName: 'Safari', label: 'Open Safari' }),
+      baseOp({ op: 'open_url', url: 'https://example.com/create', label: 'Open create page' }),
+      baseOp({ op: 'type_text', literalText: 'hello', label: 'Type hello' }),
+      baseOp({ op: 'set_clipboard', literalText: 'hello', label: 'Copy hello' }),
+      baseOp({ op: 'activate_element', elementLabel: 'Go', label: 'Click Go' }),
+      baseOp({ op: 'click_at', clickX: 10, clickY: 10, label: 'Click point' }),
+      baseOp({ op: 'scroll', clickX: 10, clickY: 10, scrollDelta: 3, label: 'Scroll' }),
+      ...chords.map((chord) => baseOp({ op: 'keystroke', chord, label: `Press ${chord}` })),
+      baseOp({ op: 'manual', prompt: 'Submit the form by hand', label: 'Submit manually' }),
+      baseOp({ op: 'ask_user', prompt: 'Which account?', variableKey: 'acct', label: 'Ask account' }),
+      baseOp({ op: 'wait_for', waitCondition: 'app_frontmost', appName: 'Safari', label: 'Wait frontmost' })
+    ].map((op, i) => ({ ...op, stepOrder: i + 1 }))
 
     const runner = new AutomationRunner({
       runId: 'run_sim',
       sessionId: 'tsess_1',
-      script,
+      script: { ops, warnings: [] },
       actuator,
       mode: 'simulated',
       onEvent: (e) => events.push(e)
     })
-
     await runner.start()
 
-    expect(actuator.calls).toContain('activateApp:Safari')
-    expect(actuator.calls).toContain('openUrl:https://example.com/path:')
-    expect(actuator.calls).toContain('query:app_frontmost')
-    expect(actuator.calls).not.toContain('type:hello')
-    expect(actuator.calls).not.toContain('press:Go')
+    expect(new Set(ops.map((o) => o.op))).toEqual(new Set(AutomationOpKindSchema.options)) // full op union
+    expect(actuator.calls).toEqual(['query:app_frontmost'])
+    const notRun = events.filter((e) => e.type === 'stepDone' && e.simulated)
+    expect(notRun).toHaveLength(ops.length - 1)
+    expect(events.some((e) => e.type === 'navigating' || e.type === 'question' || e.type === 'stepFailed')).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'incomplete' })
+  })
 
-    const simulatedDone = events.filter((e) => e.type === 'stepDone' && e.simulated)
-    expect(simulatedDone).toHaveLength(2)
-    expect(simulatedDone.every((e) => e.type === 'stepDone' && e.label.startsWith('[Simulated]'))).toBe(
-      true
-    )
-    expect(events.find((e) => e.type === 'navigating' && e.destination === 'example.com')).toBeTruthy()
-    expect(events.at(-1)).toMatchObject({
-      type: 'finished',
-      outcome: 'done',
-      resolution: { tier1: 1, tier2: 1 }
+  it('a commit is approved only by an explicit approve (M5)', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const runner = new AutomationRunner({
+      runId: 'run_approve',
+      sessionId: 'tsess_1',
+      script: {
+        ops: [baseOp({ op: 'keystroke', chord: 'Cmd+Enter', label: 'Send message' })],
+        warnings: []
+      },
+      actuator,
+      onEvent: (e) => events.push(e)
     })
+    runner.control({ kind: 'approve' }) // sent before the prompt: must not count
+    const run = runner.start()
+    await vi.waitFor(() => expect(events.some((e) => e.type === 'question')).toBe(true))
+    for (const cmd of [{ kind: 'takeOver' }, { kind: 'retry' }, { kind: 'answer', value: 'yes' }] as const) {
+      runner.control(cmd)
+      await new Promise((r) => setTimeout(r, 10))
+      expect(actuator.calls).toEqual([])
+    }
+    runner.control({ kind: 'approve' })
+    await run
+    expect(actuator.calls).toEqual(['keystroke:Cmd+Enter'])
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'done' })
+  })
+
+  it('an empty address scope allows no URL (M5)', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const runner = new AutomationRunner({
+      runId: 'run_scope',
+      sessionId: 'tsess_1',
+      script: { ops: [baseOp({ op: 'open_url', url: 'https://example.com/', label: 'Open' })], warnings: [] },
+      actuator,
+      allowedAddressIds: [],
+      onEvent: (e) => {
+        events.push(e)
+        if (e.type === 'stepFailed') setTimeout(() => runner.control({ kind: 'stop' }), 1)
+      }
+    })
+    await runner.start()
+    expect(events.find((e) => e.type === 'stepFailed')).toMatchObject({ code: 'out_of_scope' })
+    expect(actuator.calls).toEqual([])
+  })
+
+  it('a skipped step is not reported as done (M5)', async () => {
+    const actuator = new FakeActuator()
+    const events: RunEvent[] = []
+    const runner = new AutomationRunner({
+      runId: 'run_skip',
+      sessionId: 'tsess_1',
+      script: { ops: [baseOp({ op: 'manual', prompt: 'Do it', label: 'Manual' })], warnings: [] },
+      actuator,
+      onEvent: (e) => {
+        events.push(e)
+        if (e.type === 'stepFailed') setTimeout(() => runner.control({ kind: 'skip' }), 1)
+      }
+    })
+    await runner.start()
+    expect(events.find((e) => e.type === 'stepDone')).toMatchObject({ skipped: true })
+    expect(events.at(-1)).toMatchObject({ type: 'finished', outcome: 'incomplete' })
   })
 
   it('halts open_url outside allowedAddressIds with out_of_scope', async () => {

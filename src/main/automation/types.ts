@@ -100,8 +100,10 @@ export type RunEvent =
       stepOrder: number
       opIndex: number
       label: string
-      /** True when the op was skipped as a no-op under simulated mode. */
+      /** True when the op was not run under simulated mode. */
       simulated?: boolean
+      /** True when the user skipped the op; it did not run. */
+      skipped?: boolean
     }
   | {
       type: 'stepFailed'
@@ -135,7 +137,8 @@ export type RunEvent =
   | {
       type: 'finished'
       runId: string
-      outcome: 'done' | 'stopped'
+      /** `incomplete`: reached the end, but a step was skipped or not run. */
+      outcome: 'done' | 'incomplete' | 'stopped'
       resolution?: ResolutionStats
     }
 
@@ -146,6 +149,7 @@ export type RunnerControl =
   | { kind: 'retry' }
   | { kind: 'skip' }
   | { kind: 'takeOver' }
+  | { kind: 'approve' }
   | { kind: 'answer'; value: string; variableKey?: string | null }
 
 /** Optional per-step intent metadata from the extracted workflow. */

@@ -58,7 +58,7 @@ import {
   registerTelemetryIpc,
   stopActiveRecording
 } from './telemetry'
-import { registerAutomationIpc, stopActiveAutomationRun } from './automation'
+import { registerAutomationIpc } from './automation'
 import { appIconDataUrls } from './appIcons'
 
 let pillWindow: BrowserWindow | null = null
@@ -892,7 +892,6 @@ app.whenReady().then(async () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   stopPermissionWatch()
-  stopActiveAutomationRun()
   void flushTelemetryOnQuit()
   setEditorScrimVisible(false)
   editorScrim?.destroy()

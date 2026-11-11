@@ -190,7 +190,7 @@ vi.mock('./team', () => ({
   revokeInvite: () => null,
   teamFromInvite: () => null
 }))
-vi.mock('./automation', () => ({ registerAutomationIpc: () => {}, stopActiveAutomationRun: () => {} }))
+vi.mock('./automation', () => ({ registerAutomationIpc: () => {} }))
 vi.mock('./telemetry', () => ({
   flushTelemetryOnQuit: async () => {},
   initTelemetry: async () => {},

@@ -1614,62 +1614,59 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const beginRun = useCallback((wf: Workflow) => {
-    const steps = makeRunSteps(wf)
-    const useAutomation = !!wf.sessionId
-    automationRunRef.current = useAutomation
-    automationVarKeyRef.current = null
-    if (steps.length > 0 && !useAutomation) steps[0].status = 'active'
-    // Automation: leave all pending until the runner emits stepStarted.
-    setWorkflow(wf)
-    setRunSteps(steps)
-    setRunPaused(false)
-    setRunCollapsed(false)
-    setRunElapsed(0)
-    setSavedConfirm(null)
-    const provisionalId = newId('run')
-    activeRunRef.current = {
-      id: provisionalId,
-      workflowId: wf.id,
-      startedAt: new Date().toISOString(),
-      questionReceipts: []
+    const enterRun = (runId: string) => {
+      const steps = makeRunSteps(wf)
+      const useAutomation = !!wf.sessionId
+      automationRunRef.current = useAutomation
+      automationVarKeyRef.current = null
+      if (steps.length > 0 && !useAutomation) steps[0].status = 'active'
+      // Automation: leave all pending until the runner emits stepStarted.
+      setWorkflow(wf)
+      setRunSteps(steps)
+      setRunPaused(false)
+      setRunCollapsed(false)
+      setRunElapsed(0)
+      setSavedConfirm(null)
+      activeRunRef.current = {
+        id: runId,
+        workflowId: wf.id,
+        startedAt: new Date().toISOString(),
+        questionReceipts: []
+      }
+      holdMirroredRef.current = null
+      runPersistedRef.current = false
+      setState('running')
     }
-    holdMirroredRef.current = null
-    runPersistedRef.current = false
-    setState('running')
 
-    if (useAutomation && wf.sessionId) {
-      void window.grayBridge
-        ?.automationRunStart?.({
-          sessionId: wf.sessionId,
-          recompileIfNeeded: !!wf.automationStale,
-          editorSteps: wf.steps.map((s) => ({ index: s.index, title: s.title }))
-        })
-        .then((result) => {
-          if (!result?.ok) {
-            automationRunRef.current = false
-            setRunSteps((prev) => {
-              const next = prev.map((s) => ({ ...s }))
-              if (next[0]) {
-                next[0].status = 'error'
-                next[0].error = {
-                  message:
-                    result?.error ??
-                    'Could not start automation. Accessibility permission may be required.'
-                }
-              }
-              return next
-            })
-            setRunCollapsed(false)
-            return
-          }
-          if (result.runId && activeRunRef.current) {
-            activeRunRef.current.id = result.runId
-          }
-          if (wf.automationStale) {
-            setWorkflow((w) => ({ ...w, automationStale: false }))
-          }
-        })
+    if (!wf.sessionId) {
+      enterRun(newId('run'))
+      return
     }
+    // Recorded workflow: main decides first. A refused start never enters the run ledger, so
+    // no Retry/Skip/Take Over can fall through to the mock engine or save a run.
+    void window.grayBridge
+      ?.automationRunStart?.({
+        sessionId: wf.sessionId,
+        recompileIfNeeded: !!wf.automationStale,
+        editorSteps: wf.steps.map((s) => ({ index: s.index, title: s.title }))
+      })
+      .then((result) => {
+        if (!result?.ok) {
+          setRecordingNotice({
+            tone: 'info',
+            title: 'Can’t run this workflow yet',
+            body: result?.error ?? 'Could not start this workflow. Nothing was run.',
+            sessionId: null,
+            action: null
+          })
+          setState('idle')
+          return
+        }
+        enterRun(result.runId ?? newId('run'))
+        if (wf.automationStale) {
+          setWorkflow((w) => ({ ...w, automationStale: false }))
+        }
+      })
   }, [])
 
   const runWorkflow = useCallback(
@@ -1685,15 +1682,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         }
         return
       }
-      // Preflight: automation needs Accessibility; mock runs need Screen.
-      if (wf.sessionId) {
-        if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
-          window.grayBridge?.openPermissionSettings?.('accessibility')
-          setToastArmed(true)
-          void computeStake()
-          return
-        }
-      } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
+      // Preflight: mock runs need Screen. Recorded runs go straight to main, which refuses
+      // them before needing any permission (M5 hold).
+      if (!wf.sessionId && permissionsRef.current && permissionsRef.current.screen !== 'granted') {
         window.grayBridge?.openPermissionSettings?.('screen')
         setToastArmed(true)
         void computeStake()
@@ -1787,14 +1778,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         console.warn(`[pill] runWorkflow: workflow ${workflowId} not in store`)
         return
       }
-      if (fromStore.sessionId) {
-        if (permissionsRef.current && permissionsRef.current.accessibility !== 'granted') {
-          window.grayBridge?.openPermissionSettings?.('accessibility')
-          setToastArmed(true)
-          void computeStake()
-          return
-        }
-      } else if (permissionsRef.current && permissionsRef.current.screen !== 'granted') {
+      if (!fromStore.sessionId && permissionsRef.current && permissionsRef.current.screen !== 'granted') {
         window.grayBridge?.openPermissionSettings?.('screen')
         setToastArmed(true)
         void computeStake()
