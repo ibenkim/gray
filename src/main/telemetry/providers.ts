@@ -24,9 +24,8 @@ export interface InteractionProvider {
   /** Force an immediate sample (e.g. after app/window or clipboard change). */
   poke?(): void
   /**
-   * Whether this provider observes real key presses. When true the recorder skips
-   * registering global shortcut accelerators, which would otherwise swallow those
-   * chords from the app being recorded.
+   * Whether this provider observes real key presses. When false the recorder declares a
+   * keyboard capture gap; it never registers global accelerators in its place.
    */
   readonly capturesKeys?: boolean
   /** Flush any buffered in-progress typing (called before the session stops). */

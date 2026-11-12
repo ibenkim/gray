@@ -210,8 +210,8 @@ type TypingBuffer = {
  * Produces real click and typing events by way of NSEvent global monitors, and
  * element identity via the Accessibility API. Both require the host app to hold
  * the Accessibility permission; without it the child stays alive but reports
- * `monitors: false` / empty AX attributes, and the recorder falls back to
- * accelerator-based shortcut capture.
+ * `monitors: false` / empty AX attributes, and the recorder declares that keyboard
+ * input is not captured (it never claims shortcuts as a fallback).
  */
 export class JxaAccessibilityProvider implements InteractionProvider {
   enabled = true
@@ -465,7 +465,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
               'Privacy & Security › Accessibility, then restart the app.'
           )
         } else if (!caps.monitors) {
-          console.warn('[telemetry/ax] input monitors unavailable — falling back to shortcuts only')
+          console.warn('[telemetry/ax] input monitors unavailable — keyboard input will not be captured')
         }
         this.onCapabilities?.({ capturesKeys: this.capturesKeys })
         return
