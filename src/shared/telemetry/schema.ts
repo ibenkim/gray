@@ -49,7 +49,12 @@ export const TelemetryEventTypeSchema = z.enum([
   'file_dialog',
   'download',
   'narration_span',
-  'marker'
+  'marker',
+  /**
+   * A capture source is unavailable for this recording (e.g. keyboard input is not observed):
+   * declared once, instead of claiming system-wide shortcuts as a fallback.
+   */
+  'capture_capability'
 ])
 
 export type TelemetryEventType = z.infer<typeof TelemetryEventTypeSchema>
@@ -238,6 +243,19 @@ export const SemanticOpSchema = z.enum([
   'redo',
   'select_all',
   'cut',
+  // M8-C: named Cmd commands carried through from the observed chord.
+  'save_as',
+  'find',
+  'print',
+  'new',
+  'new_tab',
+  'reopen_tab',
+  'close',
+  'quit',
+  'line_start',
+  'line_end',
+  'document_start',
+  'document_end',
   'other'
 ])
 export type SemanticOp = z.infer<typeof SemanticOpSchema>
@@ -369,6 +387,19 @@ export const TelemetryEventDataSchema = z
     keyCount: z.number().int().nonnegative().optional(),
     /** Key that ended the entry, e.g. "Return" or "Tab". */
     submitKey: z.string().max(24).optional(),
+    /** Named command of an observed chord (only for well-known, app-independent chords). */
+    command: z
+      .enum([
+        'copy', 'cut', 'paste', 'undo', 'redo', 'select_all', 'save', 'save_as', 'find', 'print',
+        'new', 'new_tab', 'reopen_tab', 'close', 'quit',
+        'line_start', 'line_end', 'document_start', 'document_end'
+      ])
+      .optional(),
+    /** An observed Cmd/Ctrl+C or +X: which one produced this clipboard change. */
+    clipboardAction: z.enum(['copy', 'cut']).optional(),
+    /** capture_capability: which source, and whether it is available. */
+    capability: z.enum(['keyboard']).optional(),
+    available: z.boolean().optional(),
     clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
     clickModifiers: ClickModifiersSchema.optional(),
@@ -878,6 +909,8 @@ export const PolishedSessionSchema = z
      * decides. Present only with verified timing.
      */
     segmentCandidates: z.array(SegmentCandidateSchema).optional(),
+    /** Capture sources declared unavailable for this recording (missing evidence, not absence). */
+    captureGaps: z.array(z.enum(['keyboard'])).optional(),
     /** Compact screen-state reference table used by segments/actions. */
     screens: z.array(ScreenStateRefSchema).optional()
   })

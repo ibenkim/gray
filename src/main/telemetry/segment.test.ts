@@ -104,7 +104,10 @@ describe('classifyInputKind', () => {
 describe('semanticOpFromShortcut', () => {
   it('maps common chords', () => {
     expect(semanticOpFromShortcut('Cmd+C')).toBe('copy')
-    expect(semanticOpFromShortcut('Ctrl+V')).toBe('paste')
+    expect(semanticOpFromShortcut('Cmd+V')).toBe('paste')
+    // M8-C: on macOS Ctrl chords are not these commands; legacy rows leave them unknown.
+    expect(semanticOpFromShortcut('Ctrl+V')).toBe('other')
+    expect(semanticOpFromShortcut('Ctrl+A')).toBe('other')
     expect(semanticOpFromShortcut('Cmd+S')).toBe('save')
     expect(semanticOpFromShortcut('Cmd+Shift+Z')).toBe('redo')
   })

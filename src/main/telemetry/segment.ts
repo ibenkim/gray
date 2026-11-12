@@ -253,13 +253,15 @@ export function classifyInputKind(
 export function semanticOpFromShortcut(shortcut: string | undefined): import('../../shared/telemetry/schema').SemanticOp | undefined {
   if (!shortcut) return undefined
   const s = shortcut.toLowerCase().replace(/\s+/g, '')
-  if (/(cmd|ctrl|meta)\+c$/.test(s)) return 'copy'
-  if (/(cmd|ctrl|meta)\+v$/.test(s)) return 'paste'
-  if (/(cmd|ctrl|meta)\+x$/.test(s)) return 'cut'
-  if (/(cmd|ctrl|meta)\+s$/.test(s)) return 'save'
-  if (/(cmd|ctrl|meta)\+z$/.test(s)) return 'undo'
-  if (/(cmd|ctrl|meta)\+shift\+z$/.test(s) || /(cmd|ctrl|meta)\+y$/.test(s)) return 'redo'
-  if (/(cmd|ctrl|meta)\+a$/.test(s)) return 'select_all'
+  // Legacy rows without an observed command: Cmd chords only. On macOS Ctrl chords are
+  // text/terminal bindings (Ctrl+A = line start, Ctrl+C = interrupt), so they stay unknown.
+  if (/^(cmd|meta)\+c$/.test(s)) return 'copy'
+  if (/^(cmd|meta)\+v$/.test(s)) return 'paste'
+  if (/^(cmd|meta)\+x$/.test(s)) return 'cut'
+  if (/^(cmd|meta)\+s$/.test(s)) return 'save'
+  if (/^(cmd|meta)\+z$/.test(s)) return 'undo'
+  if (/^(cmd|meta)\+shift\+z$/.test(s)) return 'redo'
+  if (/^(cmd|meta)\+a$/.test(s)) return 'select_all'
   if (/^(enter|return)$/.test(s)) return 'submit'
   return 'other'
 }

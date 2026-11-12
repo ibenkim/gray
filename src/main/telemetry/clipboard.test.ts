@@ -90,7 +90,10 @@ describe('ClipboardWatcher', () => {
       expect(watcher.getLatest(8)?.clipboard.text).toBe('synthetic copied text')
       expect(watcher.getLatest(9)).toBeNull() // the pasteboard changed since: no match
       expect(watcher.getLatest(undefined)).toBeNull() // unknown pasteboard state: no match
-      expect(watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 9)).toBeNull() // unchanged content
+      // M8-C: identical bytes from a new verified copy/cut (new pasteboard identity) are a new change.
+      expect(watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 9)).not.toBeNull()
+      expect(watcher.getLatest(9)).not.toBeNull()
+      expect(watcher.ingestText('synthetic copied text', ['public.utf8-plain-text'], 9)).toBeNull() // repeat notification
       expect(watcher.ingestText('password=synthetic', ['public.utf8-plain-text'], 10)).toBeNull() // sensitive
       expect(watcher.ingestText('', ['public.png'], 11)?.clipboard.contentType).toBe('image')
       watcher.reset()

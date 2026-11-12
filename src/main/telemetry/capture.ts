@@ -1,4 +1,4 @@
-import { globalShortcut, screen } from 'electron'
+import { screen } from 'electron'
 import { newId } from '../../shared/id'
 import {
   EVENT_SCHEMA_VERSION,
@@ -114,24 +114,6 @@ const POLL_MS = 800
 const MAX_ADMITTED_JOBS = 16
 
 /**
- * Fallback shortcut chords, used only when the interaction provider cannot
- * observe key presses passively (no Accessibility permission, or non-macOS).
- *
- * Registering an accelerator claims the chord system-wide, so the recorded app
- * never receives it — hence C/V/X are omitted and the whole mechanism is skipped
- * whenever passive capture is available.
- */
-const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
-  { accelerator: 'CommandOrControl+S', label: 'Cmd/Ctrl+S' },
-  { accelerator: 'CommandOrControl+Enter', label: 'Cmd/Ctrl+Enter' },
-  { accelerator: 'CommandOrControl+Shift+S', label: 'Cmd/Ctrl+Shift+S' },
-  { accelerator: 'CommandOrControl+P', label: 'Cmd/Ctrl+P' },
-  { accelerator: 'CommandOrControl+N', label: 'Cmd/Ctrl+N' },
-  { accelerator: 'CommandOrControl+Shift+T', label: 'Cmd/Ctrl+Shift+T' },
-  { accelerator: 'CommandOrControl+Shift+Z', label: 'Cmd/Ctrl+Shift+Z' }
-]
-
-/**
  * Main-process recorder: active-win polling + clipboard watcher + sparse
  * keyframes + an interaction provider that supplies clicks, typing and chords.
  *
@@ -158,7 +140,7 @@ export class TelemetryRecorder {
   private transitions: Promise<unknown> = Promise.resolve()
   private ingress: IngressStats = { accepted: 0, rejectedStale: 0, rejectedClosed: 0, drainedAfterBoundary: 0 }
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private registeredShortcuts: string[] = []
+  private keyboardDeclared = false
   private lastAppKey: string | null = null
   private lastWindowKey: string | null = null
   private lastBounds: ActiveWinResult['bounds'] | null = null
@@ -275,7 +257,6 @@ export class TelemetryRecorder {
   haltSources(): void {
     if (this.sourcesActive) {
       this.stopPolling()
-      this.unregisterShortcuts()
       // Flush while ingress is still open so a half-typed entry lands in the session.
       try {
         this.interaction.flush?.()
@@ -306,7 +287,7 @@ export class TelemetryRecorder {
         this.clock
       )
     }
-    this.registerShortcuts(gen)
+    this.declareKeyboardCapability(this.interaction.enabled ? this.interaction.capturesKeys : false)
   }
 
   /** Await the interaction child's exit and every admitted job (their events still land). */
@@ -392,6 +373,7 @@ export class TelemetryRecorder {
     this.lastScreenSnapshot = null
     this.lastFocusTarget = null
     this.pendingClipboardPairId = null
+    this.keyboardDeclared = false
     this.lastFieldLength = null
     this.finalizing = false
     this.artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] }
@@ -436,9 +418,9 @@ export class TelemetryRecorder {
       this.startSources()
       if (this.interaction.enabled) {
         this.interaction.onCapabilityChange?.(({ capturesKeys }) => {
-          // The provider only learns whether the OS will deliver key events after
-          // its child reports in; register the fallback if it will not.
-          if (this.phase === 'recording' && !capturesKeys) this.registerShortcuts(this.generation)
+          // The provider only learns whether the OS will deliver key events after its child
+          // reports in; declare the reduced capability if it will not.
+          if (this.phase === 'recording') this.declareKeyboardCapability(capturesKeys)
         })
       }
       this.phase = 'recording'
@@ -709,6 +691,7 @@ export class TelemetryRecorder {
       data: {
         clipboard: { ...change.clipboard, pairId },
         clipboardPairId: pairId,
+        clipboardAction: copy.action,
         elementLabel: partial.data?.elementLabel,
         elementRole: partial.data?.elementRole,
         appName
@@ -994,37 +977,21 @@ export class TelemetryRecorder {
     return null
   }
 
-  private registerShortcuts(gen: number): void {
-    // Passive observation is strictly better: it sees every chord (including
-    // Cmd+C/V/X) without intercepting it from the app being recorded.
-    if (this.interaction.capturesKeys) return
-    if (this.registeredShortcuts.length > 0 || gen !== this.generation || !this.sourcesActive) return
-    for (const { accelerator, label } of SHORTCUTS) {
-      try {
-        const ok = globalShortcut.register(accelerator, () => {
-          if (!this.admits(gen)) return
-          this.recordEvent('keyboard_shortcut', {
-            data: { shortcut: label }
-          })
-        })
-        if (ok) this.registeredShortcuts.push(accelerator)
-      } catch {
-        // Some accelerators may be reserved by the OS.
+  /**
+   * M8-C: when key presses are not observed, say so once in the recording. Never claim
+   * system-wide shortcuts as a fallback: that would take the chord from the recorded app.
+   */
+  private declareKeyboardCapability(capturesKeys: boolean | undefined): void {
+    if (capturesKeys !== false || this.keyboardDeclared || !this.sourcesActive) return
+    this.keyboardDeclared = true
+    this.recordEvent('capture_capability', {
+      data: {
+        capability: 'keyboard',
+        available: false,
+        message: 'Keyboard input is not observed in this recording; typing and shortcuts are missing.'
       }
-    }
+    })
   }
-
-  private unregisterShortcuts(): void {
-    for (const accel of this.registeredShortcuts) {
-      try {
-        globalShortcut.unregister(accel)
-      } catch {
-        /* ignore */
-      }
-    }
-    this.registeredShortcuts = []
-  }
-
   private ingestInteraction(partial: InteractionPartial, gen: number): void {
     if (!this.admits(gen)) return
     // Sequencing owner for provider input too: any buffered typing happened before this

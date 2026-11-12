@@ -343,9 +343,9 @@ describe('M3-B copy provenance (actual JXA sensor source, synthetic pasteboard)'
 
   it('reads the pasteboard once after one change by the in-scope chord app', () => {
     const s = sensor(ONE_APP_CHROME, CHROME, [(x) => x.copy(), write('synthetic chrome copy'), (x) => x.copy(true), write('synthetic chrome cut')])
-    expect(s.copies().map((l) => [l.app, l.text, l.pb])).toEqual([
-      ['Google Chrome', 'synthetic chrome copy', 8],
-      ['Google Chrome', 'synthetic chrome cut', 9]
+    expect(s.copies().map((l) => [l.app, l.text, l.pb, l.cut])).toEqual([
+      ['Google Chrome', 'synthetic chrome copy', 8, false],
+      ['Google Chrome', 'synthetic chrome cut', 9, true]
     ])
     expect(s.env.pbReads).toBe(4) // string + types, once per verified copy
     expect(s.env.lines.filter((l) => l.k === 'key').every((l) => typeof l.pb === 'number')).toBe(true)

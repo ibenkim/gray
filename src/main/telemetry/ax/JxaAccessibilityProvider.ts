@@ -868,7 +868,12 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       type: 'clipboard_changed',
       target: { appName, appBundleId, accessibleLabel: el.elementLabel },
       data: { appName, appBundleId, elementRole: el.elementRole, elementLabel: el.elementLabel },
-      copy: { text: typeof line.text === 'string' ? line.text : null, types, pasteboard: line.pb }
+      copy: {
+        text: typeof line.text === 'string' ? line.text : null,
+        types,
+        pasteboard: line.pb,
+        action: line.cut === true ? 'cut' : 'copy'
+      }
     })
   }
 
@@ -901,7 +906,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           documentTitle: this.context.documentTitle,
           elementRole: this.context.elementRole,
           elementLabel: this.context.elementLabel,
-          shortcut: chord
+          shortcut: chord,
+          command: commandForChord(event)
         }
       })
       return
@@ -964,21 +970,13 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       this.armTypingTimer()
       return
     }
-    if (NAVIGATION_KEYS.has(code)) {
+    if (NAVIGATION_KEYS.has(code) || code === KEY_FORWARD_DELETE) {
       if (event.repeat === true) return
-      if (this.typing && this.typing.keyCount > 0) {
-        this.countKey(event)
-        this.armTypingTimer()
-        return
-      }
+      // An observed navigation/edit key is its own named event. An open entry ends first, so
+      // order is kept; no caret position is inferred (later text is checked by read-back).
+      if (this.typing && this.typing.keyCount > 0) this.flushTyping()
       const name = SPECIAL_KEY_NAMES[code]
       if (name) this.emitBareKey(name, event)
-      return
-    }
-    if (code === KEY_FORWARD_DELETE) {
-      // Editing/caret movement: keeps the entry open but adds no characters.
-      this.countKey(event)
-      this.armTypingTimer()
       return
     }
 
@@ -1356,8 +1354,11 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   }
 
   private disable(): void {
+    const had = this.capturesKeys
     this.disabled = true
     this.enabled = false
+    // A permanent sensor failure loses keys too: the recorder must declare it.
+    if (had) this.onCapabilities?.({ capturesKeys: false })
     void this.stop().catch(() => undefined)
   }
 }
@@ -1448,6 +1449,41 @@ function printableChars(chars?: string | null): string | null {
 }
 
 /** Render an observed chord the way the automation compiler expects it. */
+type ChordCommand = NonNullable<NonNullable<InteractionPartial['data']>['command']>
+
+/**
+ * Named commands for well-known, app-independent Cmd/Ctrl chords (macOS conventions). Anything
+ * else stays an unnamed shortcut: its meaning is app-specific.
+ */
+export function commandForChord(event: JxaKeyEvent): ChordCommand | undefined {
+  // Cmd only: on macOS Ctrl chords are text/terminal bindings (Ctrl+A = line start, Ctrl+C).
+  if (!event.cmd || event.ctrl || event.opt) return undefined
+  const shift = event.shift === true
+  switch (event.code) {
+    case 123: return shift ? undefined : 'line_start'
+    case 124: return shift ? undefined : 'line_end'
+    case 126: return shift ? undefined : 'document_start'
+    case 125: return shift ? undefined : 'document_end'
+  }
+  const base = (printableChars(event.base) ?? '').toLowerCase()
+  const table: Record<string, [ChordCommand | undefined, ChordCommand | undefined]> = {
+    c: ['copy', undefined],
+    x: ['cut', undefined],
+    v: ['paste', undefined],
+    z: ['undo', 'redo'],
+    a: ['select_all', undefined],
+    s: ['save', 'save_as'],
+    f: ['find', undefined],
+    p: ['print', undefined],
+    n: ['new', undefined],
+    t: ['new_tab', 'reopen_tab'],
+    w: ['close', undefined],
+    q: ['quit', undefined]
+  }
+  const entry = table[base]
+  return entry ? entry[shift ? 1 : 0] : undefined
+}
+
 export function describeChord(event: JxaKeyEvent): string | null {
   const parts: string[] = []
   if (event.cmd) parts.push('Cmd')

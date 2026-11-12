@@ -80,13 +80,13 @@ function events(sessionId: string): Array<{ type: string; target?: { appName?: s
   return existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).event) : []
 }
 /** What the sensor emits for a copy it verified (one pasteboard change by `appName`). */
-function verifiedCopy(text: string, appName?: string) {
+function verifiedCopy(text: string, appName?: string, action: 'copy' | 'cut' = 'copy') {
   h.ix.pb += 1
   h.ix.cb?.({
     type: 'clipboard_changed',
     target: appName ? { appName } : undefined,
     data: appName ? { appName } : {},
-    copy: { text, types: ['public.utf8-plain-text'], pasteboard: h.ix.pb }
+    copy: { text, types: ['public.utf8-plain-text'], pasteboard: h.ix.pb, action }
   })
 }
 function paste(appName = 'Google Chrome') {
@@ -127,7 +127,7 @@ describe('M3-B clipboard scope (actual production composition)', () => {
     paste() // pasteboard still holds that copy: matched
     h.ix.pb += 1 // an excluded app copies (the sensor emits nothing for it)
     paste() // must not claim the earlier in-scope text
-    verifiedCopy('synthetic in-scope cut', 'Google Chrome')
+    verifiedCopy('synthetic in-scope cut', 'Google Chrome', 'cut')
     await call(owner, 'telemetry:sessionStop', { sessionId })
     verifiedCopy('synthetic copy after Stop', 'Google Chrome')
     await sleep(200)
@@ -135,7 +135,7 @@ describe('M3-B clipboard scope (actual production composition)', () => {
     const ev = events(sessionId)
     const measured = {
       electronReads: h.clip.reads,
-      clipboardEvents: ev.filter((e) => e.type === 'clipboard_changed').map((e) => ({ app: e.data?.appName ?? e.target?.appName ?? null, text: e.data?.clipboard?.text ?? null })),
+      clipboardEvents: ev.filter((e) => e.type === 'clipboard_changed').map((e) => ({ app: e.data?.appName ?? e.target?.appName ?? null, text: e.data?.clipboard?.text ?? null, action: e.data?.clipboardAction })),
       pastes: ev.filter((e) => e.type === 'paste_detected').map((e) => e.data?.clipboard?.text ?? null),
       nonHollow: { events: ev.length, appSwitch: ev.filter((e) => e.type === 'app_switch').length }
     }
@@ -144,8 +144,8 @@ describe('M3-B clipboard scope (actual production composition)', () => {
     expect(measured.nonHollow.appSwitch).toBeGreaterThan(0)
     expect(measured.electronReads).toBe(0)
     expect(measured.clipboardEvents).toEqual([
-      { app: 'Google Chrome', text: 'synthetic in-scope copy' },
-      { app: 'Google Chrome', text: 'synthetic in-scope cut' }
+      { app: 'Google Chrome', text: 'synthetic in-scope copy', action: 'copy' },
+      { app: 'Google Chrome', text: 'synthetic in-scope cut', action: 'cut' }
     ])
     // R4: the second paste followed an unobserved copy, so it carries no clipboard content.
     expect(measured.pastes).toEqual(['synthetic in-scope copy'])

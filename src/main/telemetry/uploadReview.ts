@@ -291,6 +291,9 @@ export function reviewPreview(review: PreparedReview): ReviewPreview {
   if (body.vars?.length) categories.push('Detected input variables with sanitized examples')
   if (body.addrs?.length) categories.push('Detected destinations (URL/file templates)')
   if (body.dur != null) categories.push('Recording duration and mode')
+  if (body.gaps?.includes('keyboard')) {
+    categories.push('Notice: keyboard input was not captured — typing and shortcuts are missing from this recording')
+  }
   return {
     sessionId: review.sessionId,
     revision: review.revision,

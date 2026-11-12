@@ -28,7 +28,8 @@ const { InMemoryTelemetryStore } = await import('./store/InMemoryTelemetryStore'
 const { FileTelemetryStore } = await import('./store/FileTelemetryStore')
 const { createWorkflowModelInput } = await import('./modelInput')
 const { JxaAccessibilityProvider } = await import('./ax/JxaAccessibilityProvider')
-const { prepareReview, reviewDigest, validateApproval, REVIEW_POLICY_VERSION } = await import('./uploadReview')
+const { prepareReview, reviewDigest, reviewPreview, validateApproval, REVIEW_POLICY_VERSION } = await import('./uploadReview')
+const { formatWatchEntry } = await import('../../shared/telemetry/formatWatchEntry')
 
 afterEach(() => {
   vi.useRealTimers()
@@ -429,5 +430,120 @@ describe('M8-A: secure evidence through persistence and prepared review', () => 
       .toMatchObject({ ok: false, code: 'REVIEW_STALE' })
     const again = (await prepareReview(store, sessionId, 'test-model')) as { ok: true; review: any }
     expect(again.review).toMatchObject({ policyVersion: REVIEW_POLICY_VERSION, revision: revision + 1 })
+  })
+})
+
+describe('M8-C: observed semantics through persistence, polish and the prepared review', () => {
+  type Sensor = InstanceType<typeof JxaAccessibilityProvider>
+  function fakeSensor() {
+    const provider = new JxaAccessibilityProvider()
+    provider.start = (onEvent, _scope, clock) => {
+      provider['onEvent'] = onEvent
+      if (clock) provider['now'] = clock
+    }
+    provider.stop = async () => {}
+    return provider
+  }
+  const line = (s: Sensor, obj: Record<string, unknown>) => s.handleLine(JSON.stringify(obj))
+
+  async function journey(drive: (s: Sensor) => void) {
+    const sensor = fakeSensor()
+    const store = new FileTelemetryStore(mkdtempSync(join(tmpdir(), 'gray-m8c-')), { isPackaged: false, isDev: true })
+    const recorder = new TelemetryRecorder(store, { interaction: sensor })
+    const { sessionId } = await recorder.startRecording({})
+    sensor.emitFromSample({ appName: 'FixtureApp', elementRole: 'AXTextField', elementLabel: 'Name', selectedLabels: [] })
+    drive(sensor)
+    await recorder.pauseRecording()
+    await recorder.resumeRecording()
+    await recorder.stopRecording()
+    await store.updateDelivery(sessionId!, (d) => ({ ...d!, save: { state: 'complete' } }), { captureStatus: 'stopped' })
+    const events = (await store.readSessionEvents(sessionId!)).sort((a, b) => a.sequence - b.sequence)
+    const polished = await polishSession(store, sessionId!)
+    const prepared = (await prepareReview(store, sessionId!, 'test-model')) as { ok: boolean; review: any }
+    return { events, polished, prepared }
+  }
+
+  it.each([
+    ['the sensor reports no key monitors', (s: Sensor) => {
+      line(s, { k: 'ready', trusted: true, monitors: false, secureApi: true })
+      line(s, { k: 'ready', trusted: true, monitors: false, secureApi: true })
+    }],
+    ['the sensor fails permanently after keys were available', (s: Sensor) => {
+      line(s, { k: 'ready', trusted: true, monitors: true, secureApi: true })
+      for (let i = 0; i < 5; i++) line(s, { k: 'fault' })
+    }]
+  ])('R1 %s: declared once and visible in the log, polish and the review', async (_n, drive) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { events, polished, prepared } = await journey(drive)
+    const declared = events.filter((e) => e.type === 'capture_capability')
+    expect(declared).toHaveLength(1)
+    expect(formatWatchEntry(declared[0])?.text).toMatch(/Keyboard input is not observed/)
+    expect(polished.captureGaps).toEqual(['keyboard'])
+    expect(prepared.review.body.gaps).toEqual(['keyboard'])
+    expect(reviewPreview(prepared.review).categories.join(' ')).toMatch(/keyboard input was not captured/)
+    vi.restoreAllMocks()
+  })
+
+  it('R1 control: keys available, no declaration anywhere', async () => {
+    const { events, polished, prepared } = await journey((s) => line(s, { k: 'ready', trusted: true, monitors: true, secureApi: true }))
+    expect(events.some((e) => e.type === 'capture_capability')).toBe(false)
+    expect(polished.captureGaps).toBeUndefined()
+    expect(prepared.review.body.gaps).toBeUndefined()
+  })
+
+  it('R2 navigation inside an entry is kept, in order, through the review', async () => {
+    const key = (chars: string) => ({ code: 0, chars, base: chars, app: 'FixtureApp' })
+    const { events, prepared } = await journey((s) => {
+      s.handleKey(key('a'))
+      s.handleKey(key('b'))
+      s.handleKey({ code: 123, chars: null, base: null, app: 'FixtureApp' })
+      s.handleKey(key('c'))
+    })
+    const seen = events.filter((e) => e.type === 'text_input' || e.type === 'key_pressed')
+    expect(seen.map((e) => e.data?.typedText ?? e.data?.shortcut)).toEqual(['ab', 'Left', 'c'])
+    expect(JSON.stringify(prepared.review.body.acts)).toContain('Left')
+  })
+
+  it('R3 identical text from a new copy then a cut keeps both identities and both paste pairs', async () => {
+    const { events } = await journey((s) => {
+      line(s, { k: 'key', code: 8, base: 'c', cmd: true, app: 'FixtureApp', pb: 7 })
+      line(s, { k: 'copy', app: 'FixtureApp', pb: 8, cut: false, text: 'synthetic repeated text', types: ['public.utf8-plain-text'] })
+      line(s, { k: 'key', code: 9, base: 'v', cmd: true, app: 'FixtureApp', pb: 8 })
+      line(s, { k: 'key', code: 7, base: 'x', cmd: true, app: 'FixtureApp', pb: 8 })
+      line(s, { k: 'copy', app: 'FixtureApp', pb: 9, cut: true, text: 'synthetic repeated text', types: ['public.utf8-plain-text'] })
+      line(s, { k: 'key', code: 9, base: 'v', cmd: true, app: 'FixtureApp', pb: 9 })
+    })
+    const copies = events.filter((e) => e.type === 'clipboard_changed')
+    const pastes = events.filter((e) => e.type === 'paste_detected')
+    expect(copies.map((e) => e.data?.clipboardAction)).toEqual(['copy', 'cut'])
+    expect(pastes.map((e) => e.data?.clipboardPairId)).toEqual(copies.map((e) => e.data?.clipboardPairId))
+    expect(new Set(pastes.map((e) => e.data?.clipboardPairId)).size).toBe(2)
+  })
+
+  it('R4 observed cut and command provenance reach polish and the model body unchanged', async () => {
+    const chord = (base: string, extra: Record<string, unknown> = {}) =>
+      ({ code: 0, chars: base, base, cmd: true, app: 'FixtureApp', ...extra })
+    const { polished, prepared } = await journey((s) => {
+      line(s, { k: 'copy', app: 'FixtureApp', pb: 3, cut: true, text: 'synthetic cut text', types: ['public.utf8-plain-text'] })
+      s.handleKey(chord('a', { cmd: false, ctrl: true }))
+      s.handleKey(chord('c', { cmd: false, ctrl: true }))
+      s.handleKey(chord('s', { shift: true }))
+      s.handleKey(chord('s'))
+    })
+    const clip = polished.actions.find((a) => a.category === 'clipboard')!
+    expect(clip).toMatchObject({ text: 'Cut text to clipboard', semanticOp: 'cut' })
+    const ops = Object.fromEntries(
+      polished.actions.filter((a) => a.category === 'shortcut').map((a) => [a.text, a.semanticOp])
+    )
+    expect(ops).toMatchObject({
+      'Used shortcut Ctrl+A': 'other',
+      'Used shortcut Ctrl+C': 'other',
+      'Used shortcut Cmd+Shift+S': 'save_as',
+      'Used shortcut Cmd+S': 'save'
+    })
+    const body = JSON.stringify(prepared.review.body)
+    expect(body).not.toMatch(/"op":"(select_all|copy)"/)
+    expect(body).toContain('"op":"cut"')
   })
 })

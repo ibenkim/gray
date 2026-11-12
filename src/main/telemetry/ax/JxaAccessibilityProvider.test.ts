@@ -123,10 +123,38 @@ describe('JxaAccessibilityProvider', () => {
     expect(provider.pasteboardCount()).toBe(6)
     const copies = events.filter((e) => e.type === 'clipboard_changed')
     expect(copies).toHaveLength(1)
-    expect(copies[0]).toMatchObject({ data: { appName: 'Notes' }, copy: { text: 'synthetic copy', pasteboard: 5 } })
+    expect(copies[0]).toMatchObject({ data: { appName: 'Notes' }, copy: { text: 'synthetic copy', pasteboard: 5, action: 'copy' } })
+    provider.handleLine(JSON.stringify({ k: 'copy', app: 'Notes', pb: 7, cut: true, text: 'synthetic cut', types: [] }))
+    expect(events.filter((e) => e.type === 'clipboard_changed')[1]).toMatchObject({ copy: { action: 'cut' } })
     // An unknown count invalidates the last one (re-review R4): nothing can match it.
     provider.handleLine(JSON.stringify({ k: 'key', code: 9, base: 'v', cmd: true, app: 'Notes', pb: null }))
     expect(provider.pasteboardCount()).toBeUndefined()
+  })
+
+  it('M8-C: well-known Cmd chords are named commands; Ctrl/Option and app-specific chords are not', () => {
+    const { provider, events } = harness()
+    const chord = (base: string, extra: Partial<JxaKeyEvent> = {}) =>
+      provider.handleKey({ code: 0, chars: base, base, cmd: true, ...extra })
+    chord('s')
+    chord('s', { shift: true })
+    chord('z', { shift: true })
+    chord('c')
+    provider.handleKey({ code: 123, chars: null, base: null, cmd: true })
+    chord('a', { cmd: false, ctrl: true }) // Ctrl+A is line start in Cocoa text, not select all
+    chord('k') // app-specific
+    chord('s', { opt: true })
+    const shortcuts = events.filter((e) => e.type === 'keyboard_shortcut')
+    expect(shortcuts.map((e) => [e.data?.shortcut, e.data?.command])).toEqual([
+      ['Cmd+S', 'save'],
+      ['Cmd+Shift+S', 'save_as'],
+      ['Cmd+Shift+Z', 'redo'],
+      ['Cmd+C', 'copy'],
+      ['Cmd+Left', 'line_start'],
+      ['Ctrl+A', undefined],
+      ['Cmd+K', undefined],
+      ['Cmd+Alt+S', undefined]
+    ])
+    expect(events.some((e) => e.type === 'text_input')).toBe(false)
   })
 
   it('tolerates transient faults and only disables after repeated ones', () => {
@@ -448,16 +476,20 @@ describe('JxaAccessibilityProvider typing capture', () => {
     expect(events.map((e) => e.data?.shortcut)).toEqual(['Cmd+C', 'Cmd+V'])
   })
 
-  it('ignores arrow keys as characters but keeps the entry open', () => {
+  it('M8-C: a navigation key inside an entry is its own named event, in order (no caret inference)', () => {
     const { provider, events } = harness()
     provider.handleKey(char('a'))
     provider.handleKey(key({ code: 123 })) // Left arrow
     provider.handleKey(char('b'))
+    provider.handleKey(key({ code: 117 })) // Forward delete
     provider.flush()
 
-    const typed = events.filter((e) => e.type === 'text_input')
-    expect(typed).toHaveLength(1)
-    expect(typed[0].data?.typedText).toBe('ab')
+    expect(events.map((e) => [e.type, e.data?.typedText ?? e.data?.shortcut])).toEqual([
+      ['text_input', 'a'],
+      ['key_pressed', 'Left'],
+      ['text_input', 'b'],
+      ['key_pressed', 'ForwardDelete']
+    ])
   })
 
   it('drops NSEvent private-use characters for function keys', () => {

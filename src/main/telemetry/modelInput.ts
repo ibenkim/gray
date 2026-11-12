@@ -127,6 +127,8 @@ export type CompactWorkflowModelInput = {
   vars?: CompactModelVariable[]
   /** Deterministic destinations extracted before the model call. */
   addrs?: CompactModelAddress[]
+  /** Capture sources not observed in this recording (e.g. keyboard). */
+  gaps?: Array<'keyboard'>
   elided?: true
 }
 
@@ -233,6 +235,7 @@ export function prepareWorkflowModelInput(
   if (segs.length) body.segs = segs
   if (vars.length) body.vars = vars
   if (addrs.length) body.addrs = addrs
+  if (polishedSession.captureGaps?.length) body.gaps = [...polishedSession.captureGaps]
   if (elided) body.elided = true
 
   const estimatedChars = JSON.stringify(body).length

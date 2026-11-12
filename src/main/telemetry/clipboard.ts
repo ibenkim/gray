@@ -23,6 +23,7 @@ export type ClipboardWatcherOptions = {
  */
 export class ClipboardWatcher {
   private lastHash: string | null = null
+  private lastPasteboard: number | undefined = undefined
   private readonly ignoreHashes: Set<string>
   /** Most recent recorded copy and the pasteboard changeCount it was read at. */
   private latest: { at: number; clipboard: ClipboardData; pasteboard?: number } | null = null
@@ -35,6 +36,7 @@ export class ClipboardWatcher {
   reset(): void {
     this.latest = null
     this.lastHash = null
+    this.lastPasteboard = undefined
   }
 
   /**
@@ -55,8 +57,11 @@ export class ClipboardWatcher {
   private process(text: string, formats: string[], pasteboard?: number): ClipboardChange | null {
     const trimmed = text ?? ''
     const contentHash = hashContent(trimmed, formats)
-    if (contentHash === this.lastHash) return null
+    // A repeat notification is the same content AND the same pasteboard identity; a new verified
+    // copy/cut of identical bytes is a new change (new changeCount) and must re-pair pastes.
+    if (contentHash === this.lastHash && pasteboard === this.lastPasteboard) return null
     this.lastHash = contentHash
+    this.lastPasteboard = pasteboard
 
     if (this.ignoreHashes.has(contentHash)) return null
     if (!trimmed && !['image', 'file'].includes(classifyContent('', formats))) return null

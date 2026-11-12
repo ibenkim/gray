@@ -76,10 +76,20 @@ describe('TelemetryRecorder shortcut strategy', () => {
     expect(register).not.toHaveBeenCalled()
   })
 
-  it('falls back to accelerators when the provider cannot observe keys', async () => {
+  it('M8-C: never claims accelerators; a missing keyboard source is declared once instead', async () => {
     const provider = new FakeInteractionProvider(false)
-    await startRecorder(provider)
-    expect(register).toHaveBeenCalled()
+    const { recorder, events } = await startRecorder(provider)
+    expect(register).not.toHaveBeenCalled()
+    await recorder.pauseRecording()
+    await recorder.resumeRecording()
+    const declared = events.filter((e) => e.type === 'capture_capability')
+    expect(declared).toHaveLength(1)
+    expect(declared[0].data).toMatchObject({ capability: 'keyboard', available: false })
+  })
+
+  it('declares nothing when keys are observed', async () => {
+    const { events } = await startRecorder(new FakeInteractionProvider(true))
+    expect(events.some((e) => e.type === 'capture_capability')).toBe(false)
   })
 
   it('flushes buffered typing before stopping', async () => {

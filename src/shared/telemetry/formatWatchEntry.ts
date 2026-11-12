@@ -60,6 +60,10 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
       const verb = event.type === 'click' ? 'Clicked' : 'Selected'
       return { time, text: `${verb} ${name}`, appName }
     }
+    case 'capture_capability': {
+      if (event.data?.available !== false) return null
+      return { time, text: event.data?.message || 'A capture source is unavailable in this recording', appName }
+    }
     case 'credential_entered': {
       const label = event.data?.elementLabel || event.target?.accessibleLabel
       return { time, text: label ? `Entered a password in ${label}` : 'Entered a password', appName }

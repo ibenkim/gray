@@ -28,6 +28,7 @@ export const WORKFLOW_INSTRUCTIONS = `Extract an executable L2 intent workflow f
 
 Schema: screens[], segs[].{i,kind,a,d,acts[]}, acts[].{i,c,ids,ty,t,a,d,e,r,h,ct,tx,k,sb,sa,w,tr,x,y,wx,wy,op,inf,v,nt,mk,l1,cp}, vars[], addrs[].
 c codes: nav=navigation act=interaction in=input sub=submission sc=shortcut err=error clip=clipboard.
+gaps[] (optional) lists capture sources NOT observed in this recording, e.g. keyboard = typing and shortcuts were not captured. Missing evidence is not absence: never infer that no typing happened, and add no typed values.
 ty codes: nav|act|type|click|copy|paste|sub|save|sc|err|clip. tr: ax|coords|none (omit means ax).
 k=inputKind (email|date|url|text|…). w=preceding wait ms. sb/sa reference screens[].id. elided=true means low-value acts were dropped.
 addrs[] are deterministic destinations already extracted — reference them by id in requires[].ref; do not invent URLs.

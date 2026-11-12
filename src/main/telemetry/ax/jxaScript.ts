@@ -10,7 +10,7 @@
  *   {k:'ax', …, valueTail?}          — focused element / window sample (on change)
  *   {k:'key', code, chars, base, …}  — a physical key press
  *   {k:'click', x, y, role, label, …}— a mouse press with its Accessibility target
- *   {k:'copy', app, pb, text, types} — clipboard after a verified in-scope Cmd/Ctrl+C|X
+ *   {k:'copy', app, pb, cut, text, types} — clipboard after a verified in-scope Cmd/Ctrl+C (cut: X)
  *   {k:'stats', keys, clicks}        — monitor callback counters (debug heartbeat)
  *
  * Non-secure text fields include `valueTail` (last ≤160 chars of AXValue) so the
@@ -203,7 +203,7 @@ function checkCopy() {
     return;
   }
   if (pasteboardCount() !== pb) return;
-  emit({ k: 'copy', app: copy.app, appBundleId: copy.bundleId, pb: pb, text: text, types: types });
+  emit({ k: 'copy', app: copy.app, appBundleId: copy.bundleId, pb: pb, cut: copy.cut === true, text: text, types: types });
 }
 
 /* ── Accessibility C API: resolves the element under the pointer ── */
@@ -725,7 +725,7 @@ function onKey(evt) {
     if (chord && !secure && (b0 === 'c' || b0 === 'x')) {
       var pb0 = pasteboardCount();
       if (pb0 !== null) {
-        pendingCopy = { pb: pb0, app: front.name, bundleId: front.bundleId, deadline: Date.now() + COPY_SETTLE_MS };
+        pendingCopy = { pb: pb0, app: front.name, bundleId: front.bundleId, cut: b0 === 'x', deadline: Date.now() + COPY_SETTLE_MS };
       }
     }
     scheduleSample(140);

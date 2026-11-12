@@ -751,10 +751,12 @@ export async function polishSession(
           pairId,
           sourceLabel
         }
+        const cut = event.data?.clipboardAction === 'cut'
+        const verb = cut ? 'Cut' : 'Copied'
         const desc =
           clip.contentType === 'url' && clip.urlHost
-            ? `Copied ${clip.urlHost} link`
-            : `Copied ${clip.contentType} to clipboard`
+            ? `${verb} ${clip.urlHost} link`
+            : `${verb} ${clip.contentType} to clipboard`
         push({
           text: desc,
           category: 'clipboard',
@@ -767,7 +769,7 @@ export async function polishSession(
           clipboard: clip,
           clipboardPairId: pairId,
           transferSourceLabel: sourceLabel,
-          semanticOp: 'copy'
+          semanticOp: cut ? 'cut' : 'copy'
         })
         break
       }
@@ -919,8 +921,11 @@ export async function polishSession(
       case 'keyboard_shortcut':
       case 'key_pressed': {
         const shortcut = event.data?.shortcut || 'a shortcut'
+        // The observed command wins; without one only legacy Cmd chords are named.
         const semanticOp =
-          event.type === 'keyboard_shortcut' ? semanticOpFromShortcut(shortcut) : undefined
+          event.type === 'keyboard_shortcut'
+            ? (event.data?.command ?? semanticOpFromShortcut(shortcut))
+            : undefined
         // Collapse long arrow runs into one action with a repeat count in the text.
         const prior = drafts[drafts.length - 1]
         if (
@@ -1025,6 +1030,9 @@ export async function polishSession(
     timing,
     segments,
     ...(timingVerified ? { segmentCandidates: candidates } : {}),
+    ...(events.some((e) => e.type === 'capture_capability' && e.data?.capability === 'keyboard' && e.data.available === false)
+      ? { captureGaps: ['keyboard' as const] }
+      : {}),
     screens
   }
 

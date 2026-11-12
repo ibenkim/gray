@@ -72,7 +72,7 @@ export type InteractionPartial = {
   /** Recorder-clock start of a buffered span (first key of a typing entry). */
   startedAt?: number
   /** `clipboard_changed` only: a copy the source verified (never persisted raw). */
-  copy?: { text: string | null; types: string[]; pasteboard: number }
+  copy?: { text: string | null; types: string[]; pasteboard: number; action: 'copy' | 'cut' }
 }
 
 /** Hard denylist — password managers, banking, messaging (capture-spec §5). */
