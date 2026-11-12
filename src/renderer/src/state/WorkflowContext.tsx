@@ -1206,6 +1206,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         attempt.recorderFailed = true
         void endNarrationAttempt(attempt)
       }
+      // Main stamps the audio's session offset when it receives this (one IPC hop of slack).
+      recorder.onstart = () => {
+        if (live()) void bridge.narrationBegan?.(sessionId)?.catch(() => undefined)
+      }
       attempt.recorder = recorder
       recorder.start(1000)
     } catch {

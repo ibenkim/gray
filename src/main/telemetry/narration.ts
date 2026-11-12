@@ -62,22 +62,37 @@ export function alignNarration(
     })
 }
 
+/** Where the narration audio sits on the session timeline (session-relative monotonic ms). */
+export type NarrationAudioWindow = { startMs: number; endMs?: number }
+
 /**
  * Attach overlapping narration spans onto polished actions by monotonic elapsedMs.
  * Action window is [actionElapsed, nextActionElapsed) (last action +5s). Narration is an
- * annotation on existing actions, never a new observation. The audio's real start offset is
- * not recorded yet, so spans are assumed to start at session start and the result is marked
- * `narrationTiming: 'audio_offset_unverified'`. Actions without elapsedMs get no narration.
+ * annotation on existing actions, never a new observation. With a recorded audio window,
+ * audio-relative spans are shifted by its start and clipped at its end (narration ends at the
+ * first pause); without one, audio is assumed to start at session start and the result is
+ * marked `audio_offset_unverified`. Actions without elapsedMs get no narration.
  */
-export function attachNarration(polished: PolishedSession, spans: NarrationSpan[]): PolishedSession {
+export function attachNarration(
+  polished: PolishedSession,
+  spans: NarrationSpan[],
+  audio?: NarrationAudioWindow
+): PolishedSession {
   if (!spans.length || !polished.actions.length) return polished
+
+  const placed = audio
+    ? spans
+        .map((s) => ({ ...s, startMs: s.startMs + audio.startMs, endMs: s.endMs + audio.startMs }))
+        .filter((s) => audio.endMs === undefined || s.startMs < audio.endMs)
+        .map((s) => (audio.endMs !== undefined && s.endMs > audio.endMs ? { ...s, endMs: audio.endMs } : s))
+    : spans
 
   const actions: PolishedAction[] = polished.actions.map((action, i) => {
     if (action.elapsedMs === undefined) return action
     const start = action.elapsedMs
     const nextMs = polished.actions[i + 1]?.elapsedMs
     const end = nextMs !== undefined ? Math.max(start, nextMs) : start + 5_000
-    const overlapping = spans.filter((s) => s.startMs < end && s.endMs > start)
+    const overlapping = placed.filter((s) => s.startMs < end && s.endMs > start)
     if (!overlapping.length) return action
 
     const narrationText = overlapping
@@ -97,7 +112,11 @@ export function attachNarration(polished: PolishedSession, spans: NarrationSpan[
     }
   })
 
-  return { ...polished, actions, narrationTiming: 'audio_offset_unverified' }
+  return {
+    ...polished,
+    actions,
+    narrationTiming: audio ? 'audio_start_main_receipt' : 'audio_offset_unverified'
+  }
 }
 
 /**

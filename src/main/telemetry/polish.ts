@@ -20,7 +20,7 @@ function urlHostFromEvent(event: TelemetryEvent): string | undefined {
   }
   return undefined
 }
-import { attachNarration } from './narration'
+import { attachNarration, type NarrationAudioWindow } from './narration'
 import { classifyInputKind, segmentActions, semanticOpFromShortcut } from './segment'
 import { resolveTargetResolution } from './axTarget'
 import type { TelemetryStore } from './store/TelemetryStore'
@@ -93,6 +93,7 @@ export async function polishSession(
   /** Session-relative ms of the previous event; null at start and after a resume. */
   let lastTs: number | null = null
   let pendingWaitMs = 0
+  let audio: NarrationAudioWindow | undefined
   let lastScreenId: string | undefined
   let lastScreenDelta: ScreenAfterDelta | undefined
   let pendingClipboard: PendingClipboard | null = null
@@ -108,7 +109,8 @@ export async function polishSession(
     if (lastScreenId && !draft.screenBeforeId && draft.category !== 'session') {
       draft.screenBeforeId = lastScreenId
     }
-    draft.elapsedMs ??= byId.get(draft.sourceEventIds[0])?.elapsedMs
+    const first = byId.get(draft.sourceEventIds[0])
+    draft.elapsedMs ??= first?.startElapsedMs ?? first?.elapsedMs
     drafts.push(draft)
   }
 
@@ -275,11 +277,18 @@ export async function polishSession(
     const event = events[i]
     // Monotonic session time; a paused span is not user waiting.
     const ts = event.elapsedMs
-    if (timingVerified && lastTs !== null && ts - lastTs >= IDLE_GAP_MS) {
+    // Waiting ends when the input begins: a typing entry's own duration is not a wait.
+    const began = Math.min(event.startElapsedMs ?? ts, ts)
+    if (timingVerified && lastTs !== null && began - lastTs >= IDLE_GAP_MS) {
       // Preserve wait semantics on the next real action instead of a dropped idle row.
-      pendingWaitMs += ts - lastTs
+      pendingWaitMs += began - lastTs
     }
     lastTs = event.type === 'session_paused' ? null : ts
+    if (event.type === 'narration_started' && !audio) audio = { startMs: ts }
+    else if (audio && audio.endMs === undefined && (event.type === 'session_paused' || event.type === 'session_stopped')) {
+      // Narration ends at the first pause (or Stop); later speech has no audio.
+      audio.endMs = ts
+    }
 
     switch (event.type) {
       case 'session_started':
@@ -970,7 +979,7 @@ export async function polishSession(
     order: i + 1
   }))
 
-  const { segments, screens } = segmentActions(actions)
+  const { segments, screens, candidates } = segmentActions(actions)
 
   const sequenceRange = {
     min: events.length ? events[0].sequence : 0,
@@ -985,6 +994,7 @@ export async function polishSession(
     actions,
     timing,
     segments,
+    ...(timingVerified ? { segmentCandidates: candidates } : {}),
     screens
   }
 
@@ -1000,7 +1010,8 @@ export async function polishSession(
             startMs: s.startMs,
             endMs: s.endMs,
             ...(s.marker ? { marker: s.marker } : {})
-          }))
+          })),
+          timingVerified ? audio : undefined
         )
       }
     } catch (err) {

@@ -434,6 +434,8 @@ const grayBridge = {
     sessionId: string
   ): Promise<{ ok: boolean; audioPath?: string | null; error?: string }> =>
     ipcRenderer.invoke('narration:start', sessionId),
+  narrationBegan: (sessionId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('narration:began', sessionId),
   narrationAppend: (
     sessionId: string,
     chunk: ArrayBuffer

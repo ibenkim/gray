@@ -16,6 +16,11 @@ export const TelemetryEventTypeSchema = z.enum([
   /** Pause and resume boundaries: the gap between them is on the timeline, not user waiting. */
   'session_paused',
   'session_resumed',
+  /**
+   * The narration audio began (main receipt of the renderer's recorder start). Its elapsedMs is
+   * the audio's session offset, uncertain by that IPC hop; narration ends at the first pause.
+   */
+  'narration_started',
   'navigation',
   'app_switch',
   'window_switch',
@@ -280,6 +285,16 @@ export const ActivitySegmentSchema = z
 
 export type ActivitySegment = z.infer<typeof ActivitySegmentSchema>
 
+export const SegmentCandidateSchema = z
+  .object({
+    afterOrder: z.number().int().positive(),
+    beforeOrder: z.number().int().positive(),
+    gapMs: z.number().int().nonnegative()
+  })
+  .strict()
+
+export type SegmentCandidate = z.infer<typeof SegmentCandidateSchema>
+
 export const TelemetryEventDataSchema = z
   .object({
     appName: z.string().max(120).optional(),
@@ -389,6 +404,8 @@ export const TelemetryEventSchema = z
     sequence: z.number().int().nonnegative(),
     timestamp: z.string().datetime(),
     elapsedMs: z.number().int().nonnegative(),
+    /** Start of a buffered span (first key of a typing entry); elapsedMs is its last input. */
+    startElapsedMs: z.number().int().nonnegative().optional(),
     type: TelemetryEventTypeSchema,
     page: z.string().max(200).optional(),
     route: z.string().max(300).optional(),
@@ -756,7 +773,10 @@ export const PolishedActionSchema = z
       'clipboard'
     ]),
     timestamp: z.string().datetime(),
-    /** Session-relative time of the first source event (absent in older polished files). */
+    /**
+     * Session-relative time the action began: its first source event (a typing entry's first
+     * key). Absent in older polished files and whenever timing is unverified.
+     */
     elapsedMs: z.number().int().nonnegative().optional(),
     sourceEventIds: z.array(z.string()).min(1),
     appName: z.string().max(120).optional(),
@@ -826,12 +846,19 @@ export const PolishedSessionSchema = z
     /** Clock behind action elapsedMs; absent in older polished files (treat as unverified). */
     timing: z.enum(['monotonic', 'legacy_unverified']).optional(),
     /**
-     * Narration was attached assuming audio started at session start; the real audio offset is
-     * not recorded yet, so narration-to-action alignment is approximate.
+     * How narration was placed on the timeline. `audio_start_main_receipt`: from the recorded
+     * audio start (uncertain by one IPC hop), clipped at the first pause. `audio_offset_unverified`:
+     * no audio start was recorded, so audio was assumed to start at session start (approximate).
      */
-    narrationTiming: z.literal('audio_offset_unverified').optional(),
-    /** Activity groups for hierarchical model packing. */
+    narrationTiming: z.enum(['audio_start_main_receipt', 'audio_offset_unverified']).optional(),
+    /** Final activity groups for hierarchical model packing. */
     segments: z.array(ActivitySegmentSchema).optional(),
+    /**
+     * Candidate boundaries only: every gap of at least 4s between consecutive actions (the
+     * spec's initial heuristic). Never splits segments by itself; later semantic segmentation
+     * decides. Present only with verified timing.
+     */
+    segmentCandidates: z.array(SegmentCandidateSchema).optional(),
     /** Compact screen-state reference table used by segments/actions. */
     screens: z.array(ScreenStateRefSchema).optional()
   })

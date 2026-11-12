@@ -12,7 +12,8 @@ import type {
 export interface InteractionProvider {
   readonly enabled: boolean
   /** `scope` is enforced by the source before it reads app content (M3-C); absent = read nothing. */
-  start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope): void
+  /** `clock` is the recorder's monotonic clock; occurrence times must be read from it. */
+  start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope, clock?: () => number): void
   /**
    * May resolve later: a child-backed provider settles once its process has exited, and
    * rejects if exit could not be confirmed (teardown failure, never a silent success).
@@ -61,6 +62,14 @@ export type InteractionPartial = {
   >
   target?: TelemetryTarget
   data?: TelemetryEvent['data']
+  /**
+   * Recorder-clock time the input happened, when it was buffered before emission (typing).
+   * Absent: it happened now. Sensor lines are timed at main receipt; the child's own clock is
+   * not calibrated against main's and is never used.
+   */
+  occurredAt?: number
+  /** Recorder-clock start of a buffered span (first key of a typing entry). */
+  startedAt?: number
   /** `clipboard_changed` only: a copy the source verified (never persisted raw). */
   copy?: { text: string | null; types: string[]; pasteboard: number }
 }

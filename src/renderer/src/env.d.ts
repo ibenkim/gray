@@ -290,6 +290,7 @@ declare global {
       narrationStart: (
         sessionId: string
       ) => Promise<{ ok: boolean; audioPath?: string | null; error?: string }>
+      narrationBegan?: (sessionId: string) => Promise<{ ok: boolean }>
       narrationAppend: (
         sessionId: string,
         chunk: ArrayBuffer

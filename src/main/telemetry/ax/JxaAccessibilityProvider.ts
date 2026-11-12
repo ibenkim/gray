@@ -182,7 +182,9 @@ type TypingBuffer = {
   elementRole?: string
   elementLabel?: string
   redacted: boolean
+  /** Recorder-clock readings: first and latest input of this entry. */
   startedAt: number
+  lastAt: number
 }
 
 /**
@@ -242,6 +244,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   /** When key events are flowing, ignore valueTail to avoid double-counting. */
   /** Monotonic ms of the last key event; null until one arrives. */
   private lastKeyEventAt: number | null = null
+  /** The recorder's monotonic clock, so occurrence times share its origin. */
+  private now: () => number = () => performance.now()
   private pasteboard: number | undefined
 
   pasteboardCount(): number | undefined {
@@ -278,7 +282,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     if (this.capabilities) cb({ capturesKeys: this.capturesKeys })
   }
 
-  start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope): void {
+  start(onEvent: (partial: InteractionPartial) => void, scope?: AppScope, clock?: () => number): void {
+    if (clock) this.now = clock
     this.pasteboard = undefined
     if (this.disabled || process.platform !== 'darwin') {
       this.enabled = false
@@ -644,10 +649,10 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         label: elementLabel,
         role: elementRole,
         appName,
-        at: performance.now()
+        at: this.now()
       }
     } else if (this.pendingActivation) {
-      const age = performance.now() - this.pendingActivation.at
+      const age = this.now() - this.pendingActivation.at
       if (age <= ACTIVATION_WINDOW_MS) {
         const act = this.pendingActivation
         this.pendingActivation = null
@@ -679,14 +684,14 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           label: elementLabel,
           role: elementRole,
           length: valueLength,
-          at: performance.now(),
+          at: this.now(),
           grew: false
         }
       } else if (valueLength > prev.length) {
         this.lastField = {
           ...prev,
           length: valueLength,
-          at: performance.now(),
+          at: this.now(),
           grew: true
         }
         if (this.fieldSettleTimer) clearTimeout(this.fieldSettleTimer)
@@ -724,7 +729,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         this.lastField = {
           ...prev,
           length: valueLength,
-          at: performance.now(),
+          at: this.now(),
           grew: false
         }
       }
@@ -748,7 +753,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.lastValueLen = { contextKey, length: sample.valueLength }
 
     // Key monitors own the buffer when they are delivering events.
-    if (this.lastKeyEventAt !== null && performance.now() - this.lastKeyEventAt < 1500) return
+    if (this.lastKeyEventAt !== null && this.now() - this.lastKeyEventAt < 1500) return
     if (!prev) return
 
     if (sample.valueLength < prev.length) {
@@ -794,7 +799,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
-      startedAt: performance.now()
+      startedAt: this.now(),
+      lastAt: this.now()
     }
     return this.typing
   }
@@ -820,7 +826,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   /** Exposed for tests — handle one observed key press. */
   handleKey(event: JxaKeyEvent): void {
     if (!this.onEvent) return
-    this.lastKeyEventAt = performance.now()
+    this.lastKeyEventAt = this.now()
 
     const secure = event.secure === true || this.context.secure
     const isChord = event.cmd === true || event.ctrl === true
@@ -1134,12 +1140,14 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
-      startedAt: performance.now()
+      startedAt: this.now(),
+      lastAt: this.now()
     }
     return this.typing
   }
 
   private armTypingTimer(): void {
+    if (this.typing) this.typing.lastAt = this.now()
     if (this.typingTimer) clearTimeout(this.typingTimer)
     this.typingTimer = setTimeout(() => {
       this.typingTimer = null
@@ -1163,6 +1171,9 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     const role = buffer.elementRole
     this.onEvent({
       type: 'text_input',
+      // When the entry happened, not when it was flushed (idle timer, focus change, Stop).
+      startedAt: buffer.startedAt,
+      occurredAt: submitKey ? this.now() : buffer.lastAt,
       target: {
         role,
         accessibleLabel: buffer.elementLabel,

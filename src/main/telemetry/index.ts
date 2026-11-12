@@ -108,7 +108,7 @@ const receiptSlots = new Map<string, (report?: AudioReport) => void>()
 const pendingAppends = new Set<Promise<unknown>>()
 const captureStatusListeners = new Set<(status: ReturnType<typeof currentStatus>) => void>()
 /** One narration stream per session; it ends at the first pause (resume is without it). */
-let narration: { sessionId: string; state: 'active' | 'ended' } | null = null
+let narration: { sessionId: string; state: 'active' | 'ended'; began?: boolean } | null = null
 /** Chunk account retained from the narration's end (first pause) until Stop consumes it. */
 const pauseAudioReports = new Map<string, AudioReport>()
 
@@ -1536,6 +1536,14 @@ export function registerTelemetryIpc(): void {
       return { ok: false, error: 'Narration is not active for this session' }
     }
     return { ok: true, audioPath: narrationRecorder.getAudioPath() }
+  })
+
+  /** The renderer's recorder actually started: its receipt time is the audio's session offset. */
+  ipcMain.handle('narration:began', (e, sessionId: string) => {
+    if (!narrationOpenFor(e, sessionId) || !narration || narration.began) return { ok: false }
+    const event = recorder?.getRecordingStatus().sessionId === sessionId ? recorder.recordEvent('narration_started') : null
+    if (event) narration.began = true
+    return { ok: !!event }
   })
 
   ipcMain.handle(

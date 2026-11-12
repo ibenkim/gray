@@ -2,11 +2,14 @@ import {
   type ActivitySegment,
   type ActivitySegmentKind,
   type PolishedAction,
-  type ScreenStateRef
+  type ScreenStateRef,
+  type SegmentCandidate
 } from '../../shared/telemetry/schema'
 
 const IDLE_SPLIT_MS = 8_000
 const BURST_GAP_MS = 2_500
+/** Spec's initial candidate threshold; candidates never split final segments by themselves. */
+const CANDIDATE_GAP_MS = 4_000
 
 /**
  * Deterministic activity segmentation for hierarchical model packing.
@@ -16,10 +19,11 @@ const BURST_GAP_MS = 2_500
 export function segmentActions(actions: PolishedAction[]): {
   segments: ActivitySegment[]
   screens: ScreenStateRef[]
+  candidates: SegmentCandidate[]
 } {
   const content = actions.filter((a) => a.category !== 'session')
   if (content.length === 0) {
-    return { segments: [], screens: collectScreens(actions) }
+    return { segments: [], screens: collectScreens(actions), candidates: [] }
   }
 
   const groups: PolishedAction[][] = []
@@ -62,7 +66,19 @@ export function segmentActions(actions: PolishedAction[]): {
     }
   })
 
-  return { segments, screens: collectScreens(actions) }
+  return { segments, screens: collectScreens(actions), candidates: gapCandidates(content) }
+}
+
+/** Every >=4s gap between consecutive content actions with known times (candidate detection). */
+function gapCandidates(content: PolishedAction[]): SegmentCandidate[] {
+  const out: SegmentCandidate[] = []
+  for (let i = 1; i < content.length; i++) {
+    const prev = content[i - 1].elapsedMs
+    const next = content[i].elapsedMs
+    if (prev === undefined || next === undefined || next - prev < CANDIDATE_GAP_MS) continue
+    out.push({ afterOrder: content[i - 1].order, beforeOrder: content[i].order, gapMs: next - prev })
+  }
+  return out
 }
 
 function shouldSplit(prev: PolishedAction, next: PolishedAction): boolean {

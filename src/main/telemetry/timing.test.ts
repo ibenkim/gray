@@ -27,6 +27,8 @@ const { polishSession } = await import('./polish')
 const { InMemoryTelemetryStore } = await import('./store/InMemoryTelemetryStore')
 const { FileTelemetryStore } = await import('./store/FileTelemetryStore')
 const { createWorkflowModelInput } = await import('./modelInput')
+const { JxaAccessibilityProvider } = await import('./ax/JxaAccessibilityProvider')
+const { prepareReview } = await import('./uploadReview')
 
 afterEach(() => {
   vi.useRealTimers()
@@ -225,5 +227,139 @@ describe('model input on a long log (M6-R2)', () => {
     expect(body.dur).toBe(n - 1)
     expect(body.acts.length).toBeLessThanOrEqual(48)
     expect(body.acts.length).toBeGreaterThan(0)
+  })
+})
+
+describe('M6-B: occurrence time, sequencing owner, audio window, candidates', () => {
+  /** Real provider buffering, no child process: start only wires the recorder's callback and clock. */
+  function fakeSensor() {
+    const provider = new JxaAccessibilityProvider()
+    provider.start = (onEvent, _scope, clock) => {
+      provider['onEvent'] = onEvent
+      if (clock) provider['now'] = clock
+    }
+    provider.stop = async () => {}
+    return provider
+  }
+  const key = (chars: string) => ({ code: 0, chars, app: 'FixtureApp' })
+
+  it('a typing entry keeps when it happened and is sequenced before later events', async () => {
+    let mono = 0
+    const sensor = fakeSensor()
+    const recorder = new TelemetryRecorder(new InMemoryTelemetryStore(), { clock: () => mono, interaction: sensor })
+    const events: TelemetryEvent[] = []
+    recorder.onEvent((e) => events.push(e))
+    await recorder.startRecording({})
+    mono = 1_000
+    sensor.handleKey(key('a'))
+    mono = 1_500
+    sensor.handleKey(key('b'))
+    mono = 10_000 // the idle flush has not fired; another source records first
+    recorder.recordEvent('app_switch', { data: { appName: 'OtherApp' } })
+
+    const [typed, sw] = [events.find((e) => e.type === 'text_input'), events.find((e) => e.type === 'app_switch')]
+    expect(typed).toMatchObject({ elapsedMs: 1_500, startElapsedMs: 1_000, data: { typedText: 'ab' } })
+    expect(typed!.sequence).toBeLessThan(sw!.sequence)
+    expect(sw!.elapsedMs).toBe(10_000)
+    // Occurrence order agrees with emitted order.
+    const elapsed = [...events].sort((a, b) => a.sequence - b.sequence).map((e) => e.elapsedMs)
+    expect(elapsed).toEqual([...elapsed].sort((a, b) => a - b))
+    await recorder.stopRecording()
+  })
+
+  // M6-B-R1: provider events that do not flush the typing buffer themselves.
+  for (const [name, interrupt] of [
+    ['scroll', (s: InstanceType<typeof JxaAccessibilityProvider>) => s.handleScroll({ axis: 'vertical', delta: 3, app: 'FixtureApp' })],
+    ['same-field click', (s: InstanceType<typeof JxaAccessibilityProvider>) => s.handleClick({ app: 'FixtureApp', role: 'AXTextField', label: 'Name', x: 10, y: 10 })],
+    ['unlabelled click', (s: InstanceType<typeof JxaAccessibilityProvider>) => s.handleClick({ app: 'FixtureApp', x: 10, y: 10 })]
+  ] as const) {
+    it(`buffered typing is recorded before a later provider ${name} (through prepared review)`, async () => {
+      let mono = 50_000
+      const sensor = fakeSensor()
+      sensor['context'] = { appName: 'FixtureApp', elementRole: 'AXTextField', elementLabel: 'Name', secure: false }
+      const store = new FileTelemetryStore(mkdtempSync(join(tmpdir(), 'gray-m6b-seq-')), { isPackaged: false, isDev: true })
+      const recorder = new TelemetryRecorder(store, { clock: () => mono, interaction: sensor })
+      const { sessionId } = await recorder.startRecording({})
+      mono = 51_000
+      sensor.handleKey(key('a'))
+      mono = 51_500
+      sensor.handleKey(key('b'))
+      mono = 52_000
+      interrupt(sensor)
+      mono = 53_000
+      await recorder.stopRecording()
+      // Main's Stop marks the save complete; the recorder alone does not.
+      await store.updateDelivery(sessionId!, (d) => ({ ...d!, save: { state: 'complete' } }), { captureStatus: 'stopped' })
+
+      const events = (await store.readSessionEvents(sessionId!)).sort((a, b) => a.sequence - b.sequence)
+      const seen = events.filter((e) => e.type !== 'session_started' && e.type !== 'session_stopped')
+      expect(seen.map((e) => [e.type, e.elapsedMs]), name).toEqual([
+        ['text_input', 1_500],
+        [name === 'scroll' ? 'scroll' : 'click', 2_000]
+      ])
+      const elapsed = events.map((e) => e.elapsedMs)
+      expect(elapsed).toEqual([...elapsed].sort((a, b) => a - b))
+
+      const review = await prepareReview(store, sessionId!, 'test-model')
+      expect(review, name).toMatchObject({ ok: true })
+      const acts = JSON.stringify((review as { review: { body: { acts: unknown[] } } }).review.body.acts)
+      const typed = acts.indexOf('ab')
+      expect(typed, name).toBeGreaterThan(-1)
+      expect(typed, name).toBeLessThan(acts.indexOf(name === 'scroll' ? 'croll' : 'lick'))
+    })
+  }
+
+  it("a typing entry's own duration is not waiting, and its action starts at the first key", async () => {
+    const typed = { ...ev(2, 50_000, 'text_input', WALL + 50_000, { appName: 'FixtureApp', elementRole: 'AXTextField', elementLabel: 'Name', typedText: 'hello' }), startElapsedMs: 41_000 }
+    const p = await polish([
+      ev(0, 0, 'session_started', WALL),
+      ev(1, 1_000, 'click', WALL + 1_000, click('Open')),
+      typed,
+      ev(3, 51_000, 'click', WALL + 51_000, click('Save'))
+    ])
+    const entry = p.actions.find((a) => a.typedText === 'hello')
+    expect(entry).toMatchObject({ elapsedMs: 41_000, waitedMs: 40_000 })
+    expect(p.actions.find((a) => a.elementLabel === 'Save')?.waitedMs).toBeUndefined()
+  })
+
+  it('narration is placed from the recorded audio start and ends at the first pause', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: SID })
+    await store.appendEvents(SID, [
+      ev(0, 0, 'session_started', WALL),
+      ev(1, 2_000, 'narration_started', WALL + 2_000),
+      ev(2, 3_000, 'click', WALL + 3_000, click('A')),
+      ev(3, 10_000, 'click', WALL + 10_000, click('B')),
+      ev(4, 12_000, 'session_paused', WALL + 12_000),
+      ev(5, 20_000, 'session_resumed', WALL + 20_000),
+      ev(6, 30_000, 'click', WALL + 30_000, click('C'))
+    ])
+    // Audio-relative spans: "first" is at session 2.0–3.5s; "late" would be after the pause.
+    await store.saveNarration!(SID, {
+      sessionId: SID,
+      spans: [
+        { text: 'first', startMs: 0, endMs: 1_500 },
+        { text: 'late', startMs: 12_000, endMs: 13_000 }
+      ]
+    } as never)
+    const p = await polishSession(store, SID)
+    expect(p.narrationTiming).toBe('audio_start_main_receipt')
+    const text = Object.fromEntries(p.actions.filter((a) => a.elementLabel).map((a) => [a.elementLabel, a.narrationText]))
+    expect(text).toEqual({ A: 'first', B: undefined, C: undefined })
+  })
+
+  it('4s gaps are candidates only; final segments are unchanged and legacy has none', async () => {
+    const events = [
+      ev(0, 0, 'session_started', WALL),
+      ev(1, 1_000, 'click', WALL + 1_000, click('A')),
+      ev(2, 6_000, 'click', WALL + 6_000, click('B')),
+      ev(3, 7_000, 'click', WALL + 7_000, click('C'))
+    ]
+    const p = await polish(events)
+    const order = (l: string) => p.actions.find((a) => a.elementLabel === l)!.order
+    expect(p.segmentCandidates).toEqual([{ afterOrder: order('A'), beforeOrder: order('B'), gapMs: 5_000 }])
+    expect(p.segments).toHaveLength(1)
+    const legacy = await polish(events.map((e) => ({ ...e, schemaVersion: LEGACY_EVENT_SCHEMA_VERSION })))
+    expect(legacy.segmentCandidates).toBeUndefined()
   })
 })

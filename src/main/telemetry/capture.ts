@@ -142,6 +142,8 @@ export class TelemetryRecorder {
   private sessionId: string | null = null
   private sequence = 0
   /** Monotonic clock reading at session start; elapsedMs is measured from it. */
+  /** True while an interaction partial is being recorded (buffered typing was flushed first). */
+  private ingesting = false
   private startedAtMono = 0
   private startedAtIso: string | null = null
   private recording = false
@@ -298,7 +300,11 @@ export class TelemetryRecorder {
     this.sourcesActive = true
     this.startPolling(gen)
     if (this.interaction.enabled) {
-      this.interaction.start((partial) => this.ingestInteraction(partial, gen), appScope(this.opts))
+      this.interaction.start(
+        (partial) => this.ingestInteraction(partial, gen),
+        appScope(this.opts),
+        this.clock
+      )
     }
     this.registerShortcuts(gen)
   }
@@ -546,11 +552,15 @@ export class TelemetryRecorder {
     type: TelemetryEventType,
     partial: Partial<
       Pick<TelemetryEvent, 'page' | 'route' | 'viewport' | 'target' | 'data' | 'screenStateId'>
-    > = {}
+    > &
+      Pick<InteractionPartial, 'occurredAt' | 'startedAt'> = {}
   ): TelemetryEvent | null {
     if (!this.sessionId) return null
     if (!this.recording && type !== 'session_stopped') return null
     if (this.paused && type !== 'session_stopped') return null
+    // Sequencing owner: buffered typing happened earlier than anything recorded now, so it is
+    // emitted first; sequence order then agrees with occurrence order.
+    if (!this.ingesting && this.sourcesActive) this.flushInteraction()
     // Boundary markers are the recorder's own, not late source input.
     if (this.finalizing && type !== 'session_stopped' && type !== 'session_paused') {
       this.ingress.drainedAfterBoundary += 1
@@ -572,7 +582,8 @@ export class TelemetryRecorder {
       // Wall time, display only. elapsedMs (monotonic, session-relative) is the only legal
       // duration and order source; it keeps running through pauses, so gaps stay explicit.
       timestamp: new Date().toISOString(),
-      elapsedMs: Math.max(0, Math.round(this.clock() - this.startedAtMono)),
+      elapsedMs: this.sinceStart(partial.occurredAt ?? this.clock()),
+      ...(partial.startedAt !== undefined ? { startElapsedMs: this.sinceStart(partial.startedAt) } : {}),
       type,
       page: partial.page,
       route: partial.route,
@@ -595,6 +606,18 @@ export class TelemetryRecorder {
 
   async flush(): Promise<void> {
     await this.queue?.flush()
+  }
+
+  private flushInteraction(): void {
+    try {
+      this.interaction.flush?.()
+    } catch {
+      /* never block recording */
+    }
+  }
+
+  private sinceStart(mono: number): number {
+    return Math.max(0, Math.round(mono - this.startedAtMono))
   }
 
   // ── internals ──
@@ -1004,6 +1027,19 @@ export class TelemetryRecorder {
 
   private ingestInteraction(partial: InteractionPartial, gen: number): void {
     if (!this.admits(gen)) return
+    // Sequencing owner for provider input too: any buffered typing happened before this
+    // partial (scroll, same-field click, …), so it is recorded first. The flush only emits
+    // text_input, which re-enters here without flushing again.
+    if (partial.type !== 'text_input' && !this.ingesting) this.flushInteraction()
+    this.ingesting = true
+    try {
+      this.ingestAdmitted(partial)
+    } finally {
+      this.ingesting = false
+    }
+  }
+
+  private ingestAdmitted(partial: InteractionPartial): void {
     if (this.shouldIgnoreApp(partial.data?.appName ?? partial.target?.appName)) return
 
     // M3-B: copies arrive verified from the sensor; unknown app identity is never recorded.
@@ -1111,7 +1147,9 @@ export class TelemetryRecorder {
     // on screenshot I/O; attach pre/post shot paths asynchronously when enabled.
     this.recordEvent(partial.type, {
       target: partial.target,
-      data
+      data,
+      occurredAt: partial.occurredAt,
+      startedAt: partial.startedAt
     })
 
     if (partial.type === 'element_activated' || partial.type === 'click') {

@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
     status: { sessionId: string | null; recording: boolean }
     narrating: boolean
   },
+  recorded: [] as string[],
   order: [] as string[],
   transcribe: vi.fn(),
   parse: vi.fn()
@@ -92,6 +93,11 @@ vi.mock('./capture', () => ({
       return { ...this.status }
     }
     haltSources() {}
+    recordEvent(type: string) {
+      if (!this.status.recording) return null
+      h.recorded.push(type)
+      return { type }
+    }
     constructor() {
       h.recorder = this
     }
@@ -326,6 +332,17 @@ describe('telemetry:sessionStop (Finish) — M1 local-only hold', () => {
     expect(getNarrationRecorder()!.isActive()).toBe(false)
     expect(existsSync(audioPath)).toBe(true)
     expect(statSync(audioPath).size).toBe(4096)
+  })
+
+  it('narration:began records the audio start once, for the owner of an active narration (M6-B)', async () => {
+    h.recorded.length = 0
+    expect((await invokeFrom({}, 'narration:began', SID)).ok).toBe(false)
+    await startNarratedSession()
+    expect((await invokeFrom({}, 'narration:began', SID)).ok).toBe(false)
+    expect((await invokeFrom(ownerSender, 'narration:began', 'tsess_other')).ok).toBe(false)
+    expect((await invokeFrom(ownerSender, 'narration:began', SID)).ok).toBe(true)
+    expect((await invokeFrom(ownerSender, 'narration:began', SID)).ok).toBe(false)
+    expect(h.recorded).toEqual(['narration_started'])
   })
 
   it('narrated Finish without the renderer chunk account is incomplete, not saved', async () => {
