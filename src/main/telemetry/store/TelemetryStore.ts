@@ -65,6 +65,8 @@ export type StoredNarration = {
 }
 
 export interface TelemetryStore {
+  /** Durable unsent-event outbox bound to this storage root; absent → memory-only queue. */
+  outboxPath?(): string
   createSession(input: CreateSessionInput): Promise<TelemetrySessionMeta>
   appendEvents(sessionId: string, events: TelemetryEvent[]): Promise<AppendEventsResult>
   stopSession(sessionId: string): Promise<TelemetrySessionMeta>

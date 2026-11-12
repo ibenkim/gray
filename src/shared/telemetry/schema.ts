@@ -477,6 +477,8 @@ export const SaveErrorCodeSchema = z.enum([
   'EVENTS_NOT_PERSISTED',
   'EVENTS_REJECTED',
   'EVENTS_DROPPED',
+  /** Saved event lines that cannot be read back (e.g. a torn final line after a crash). */
+  'EVENTS_INVALID',
   'ARTIFACT_FAILED',
   'AUDIO_INCOMPLETE',
   'MANIFEST_WRITE_FAILED',
@@ -565,6 +567,8 @@ export const SessionDeliverySchema = z
         finalSequence: z.number().int().nonnegative().optional(),
         storedEvents: z.number().int().nonnegative().optional(),
         pendingEvents: z.number().int().nonnegative().optional(),
+        /** Which events were pending, so a later retry can prove each one was accounted for. */
+        pendingEventIds: z.array(z.string()).optional(),
         rejectedEvents: z.number().int().nonnegative().optional(),
         droppedEvents: z.number().int().nonnegative().optional(),
         filteredEvents: z.number().int().nonnegative().optional(),

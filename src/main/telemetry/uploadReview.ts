@@ -321,6 +321,7 @@ export const SAVE_ERROR_TEXT: Record<SaveErrorCode, string> = {
     'Some recorded steps are not written to disk yet. They are kept and can be saved again.',
   EVENTS_REJECTED: 'Some recorded steps could not be stored.',
   EVENTS_DROPPED: 'Some recorded steps were lost because the recorder fell behind.',
+  EVENTS_INVALID: 'Some saved steps are damaged on disk and could not be read back.',
   ARTIFACT_FAILED: 'Some screenshots could not be saved.',
   AUDIO_INCOMPLETE: 'Narration audio may be incomplete.',
   MANIFEST_WRITE_FAILED: 'The recording could not be marked as saved.',

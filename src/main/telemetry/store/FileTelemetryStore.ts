@@ -7,8 +7,10 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync
 } from 'fs'
 import { dirname, resolve, sep } from 'path'
@@ -78,7 +80,7 @@ type Layout = 'session' | 'legacy'
  */
 export class FileTelemetryStore implements TelemetryStore {
   private readonly root: string
-  private readonly appendLocks = new Map<string, Promise<void>>()
+  private readonly appendLocks = new Map<string, Promise<unknown>>()
   private readonly metaLocks = new Map<string, Promise<unknown>>()
   private ready = false
 
@@ -155,6 +157,12 @@ export class FileTelemetryStore implements TelemetryStore {
       throw new Error(`[telemetry] unknown session ${id}`)
     }
 
+    // Dedupe and append are one critical section per session: concurrent appends of the same
+    // event cannot both pass the check.
+    return this.serialize(this.appendLocks, id, () => this.appendUnlocked(id, events))
+  }
+
+  private async appendUnlocked(id: string, events: TelemetryEvent[]): Promise<AppendEventsResult> {
     const seen = await this.loadEventIds(id)
     let accepted = 0
     let duplicates = 0
@@ -194,7 +202,7 @@ export class FileTelemetryStore implements TelemetryStore {
 
     if (lines.length > 0) {
       const layout = this.layoutOf(id)
-      await this.safeAppend(this.pathFor(id, 'events', layout), lines.join('\n') + '\n')
+      await this.appendLines(this.pathFor(id, 'events', layout), lines.join('\n') + '\n')
     }
 
     return { accepted, duplicates, rejected, filtered }
@@ -672,16 +680,31 @@ export class FileTelemetryStore implements TelemetryStore {
     }
   }
 
-  private async withMetaLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.metaLocks.get(id) ?? Promise.resolve()
+  private withMetaLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    return this.serialize(this.metaLocks, id, fn)
+  }
+
+  /** Run `fn` after every earlier holder of `key`; the entry is removed by its last holder. */
+  private async serialize<T>(locks: Map<string, Promise<unknown>>, key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = locks.get(key) ?? Promise.resolve()
     const run = prev.catch(() => undefined).then(fn)
     const tail = run.catch(() => undefined)
-    this.metaLocks.set(id, tail)
+    locks.set(key, tail)
     try {
       return await run
     } finally {
-      if (this.metaLocks.get(id) === tail) this.metaLocks.delete(id)
+      if (locks.get(key) === tail) locks.delete(key)
     }
+  }
+
+  /** Lock entries still held (tests: entries must be released). */
+  heldLocks(): number {
+    return this.appendLocks.size + this.metaLocks.size
+  }
+
+  /** The unsent-event outbox belongs to this storage root (never replayed into another). */
+  outboxPath(): string {
+    return this.safeJoin('outbox', 'unsent-v2.json')
   }
 
   private safeReaddir(dir: string): string[] {
@@ -711,32 +734,41 @@ export class FileTelemetryStore implements TelemetryStore {
     }
   }
 
-  private async safeAppend(path: string, chunk: string): Promise<void> {
-    const prev = this.appendLocks.get(path) ?? Promise.resolve()
-    let release!: () => void
-    const gate = new Promise<void>((r) => {
-      release = r
-    })
-    this.appendLocks.set(
-      path,
-      prev.then(() => gate)
-    )
-    await prev
+  /**
+   * Append under the caller's session lock. A torn final line (crash mid-append) is left as
+   * evidence and terminated first, so it can never swallow the next valid line; the checked
+   * read still counts it as invalid.
+   */
+  private async appendLines(path: string, chunk: string): Promise<void> {
     try {
       mkdirSync(dirname(path), { recursive: true })
-      appendFileSync(path, chunk, 'utf8')
+      appendFileSync(path, endsTorn(path) ? '\n' + chunk : chunk, 'utf8')
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       throw new Error(`[telemetry] failed to append ${path}: ${msg}`)
-    } finally {
-      release()
-      if (this.appendLocks.get(path) === gate) this.appendLocks.delete(path)
     }
   }
 
   private async loadEventIds(sessionId: string): Promise<Set<string>> {
     const events = await this.readSessionEvents(sessionId)
     return new Set(events.map((e) => e.eventId))
+  }
+}
+
+/** True when a non-empty file does not end with a newline. */
+function endsTorn(path: string): boolean {
+  let fd: number | undefined
+  try {
+    const size = statSync(path).size
+    if (size === 0) return false
+    fd = openSync(path, 'r')
+    const last = Buffer.alloc(1)
+    readSync(fd, last, 0, 1, size - 1)
+    return last[0] !== 0x0a
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 

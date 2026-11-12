@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { existsSync, mkdtempSync, readFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -316,6 +316,71 @@ describe('start: one owner, rollback on failure', () => {
     expect((await call(winner, 'telemetry:sessionStart', {})).ok).toBe(true)
     expect((await call(loser, 'telemetry:sessionPause', {})).ok).toBe(false)
     expect(status().phase).toBe('recording')
+  })
+})
+
+describe('M7: damaged saved events are never a complete save', () => {
+  it('a torn line in the saved events makes Stop incomplete with EVENTS_INVALID', async () => {
+    const owner = new FakeOwner()
+    const id = await start(owner)
+    await mod.getTelemetryRecorder()!.flush()
+    appendFileSync(join(h.devDir, 'sessions', id, 'events.jsonl'), '{"schemaVersion":1,"event":{"eventId":"tev')
+    const stopped = await call(owner, 'telemetry:sessionStop', { sessionId: id })
+    expect(stopped.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'EVENTS_INVALID' })
+    expect((await call(owner, 'telemetry:prepareReview', id)).ok).toBe(false)
+  })
+
+  it.each(['empty', 'stale', 'recovered'] as const)('Retry Save after a restart clears only pending events it settles (%s outbox)', async (outboxKind) => {
+    const owner = new FakeOwner()
+    const id = await start(owner)
+    const store = mod.getTelemetryStore()!
+    const append = store.appendEvents.bind(store)
+    // The terminal event lands; the synthetic clicks never do.
+    vi.spyOn(store, 'appendEvents').mockImplementation(async (sid, batch) => {
+      const lost = batch.filter((e) => e.data?.elementLabel === 'Lost')
+      if (!lost.length) return append(sid, batch)
+      await append(sid, batch.filter((e) => !lost.includes(e)))
+      throw new Error('Invalid session (synthetic permanent failure)')
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    for (let i = 0; i < 3; i++) h.ix.cb?.({ type: 'click', data: { appName: 'FixtureApp', elementLabel: 'Lost' } })
+    const stopped = await call(owner, 'telemetry:sessionStop', { sessionId: id })
+    expect(stopped.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'EVENTS_NOT_PERSISTED' })
+    const pendingAtStop = meta(id).delivery.save.pendingEvents
+    expect(pendingAtStop).toBeGreaterThanOrEqual(3)
+    // empty: the last completed snapshot never held them. stale: it holds only already-saved
+    // events (later snapshots failed). recovered: it holds the pending events themselves.
+    const savedEvents = events(id).map((event) => ({ event, attempts: 0 }))
+    const lostIds = JSON.parse(readFileSync(store.outboxPath!(), 'utf8'))
+      .events.filter((q: any) => q.event.data?.elementLabel === 'Lost')
+      .map((q: any) => q.event.eventId)
+    expect(lostIds).toHaveLength(3)
+    if (outboxKind !== 'recovered') {
+      const snapshot = outboxKind === 'stale' ? savedEvents : []
+      writeFileSync(store.outboxPath!(), JSON.stringify({ version: 2, events: snapshot }))
+    }
+    vi.restoreAllMocks()
+    vi.resetModules()
+    h.handlers.clear()
+    mod = await import('./index')
+    await mod.initTelemetry()
+    mod.registerTelemetryIpc()
+    if (outboxKind === 'recovered') {
+      const retried = await call(owner, 'telemetry:retrySave', id)
+      expect(retried.recording).toMatchObject({ saveState: 'complete' })
+      expect(meta(id).delivery.save.pendingEvents).toBe(0)
+      expect(events(id).filter((e) => e.data?.elementLabel === 'Lost')).toHaveLength(3)
+      return
+    }
+    for (let i = 0; i < 2; i++) {
+      const retried = await call(owner, 'telemetry:retrySave', id)
+      expect(retried.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'EVENTS_NOT_PERSISTED' })
+      // Replayed duplicates settle only themselves; the lost inputs stay outstanding by id.
+      const save = meta(id).delivery.save
+      expect(save.pendingEventIds).toEqual(expect.arrayContaining(lostIds))
+      expect(save.pendingEvents).toBe(outboxKind === 'empty' ? pendingAtStop : lostIds.length)
+    }
+    expect((await call(owner, 'telemetry:prepareReview', id)).ok).toBe(false)
   })
 })
 

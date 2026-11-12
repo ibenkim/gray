@@ -83,6 +83,10 @@ type SaveInputs = {
   stopReason?: StopReason
   /** A source did not confirm shutdown; never complete. */
   teardownFailed?: boolean
+  /** Pending ids a prior process recorded that this process has not settled; never cleared by count. */
+  unrecoveredIds?: string[]
+  /** A pre-id manifest's pending count: unprovable, so it stays outstanding. */
+  legacyPending?: number
 }
 
 /**
@@ -522,9 +526,14 @@ async function writeSaveOutcome(
     ...inputs.events,
     rejected: (inputs.events?.rejected ?? 0) + (inputs.rendererLosses?.rejected ?? 0),
     dropped: (inputs.events?.dropped ?? 0) + (inputs.rendererLosses?.dropped ?? 0),
-    filtered: (inputs.events?.filtered ?? 0) + (inputs.rendererLosses?.filtered ?? 0)
+    filtered: (inputs.events?.filtered ?? 0) + (inputs.rendererLosses?.filtered ?? 0),
+    pending:
+      (inputs.events?.pending ?? 0) +
+      (inputs.unrecoveredIds?.length ?? 0) +
+      (inputs.legacyPending ?? 0)
   }
-  const { events: stored } = await s.readSessionEventsChecked(sessionId)
+  const pendingIds = [...(inputs.events?.pendingIds ?? []), ...(inputs.unrecoveredIds ?? [])]
+  const { events: stored, invalidLines } = await s.readSessionEventsChecked(sessionId)
   const terminalStored =
     inputs.finalSequence != null && stored.some((e) => e.sequence === inputs.finalSequence)
   const errorCode =
@@ -534,6 +543,8 @@ async function writeSaveOutcome(
       ? 'EVENTS_REJECTED'
       : (ev?.dropped ?? 0) > 0
         ? 'EVENTS_DROPPED'
+        : invalidLines > 0
+          ? 'EVENTS_INVALID'
         : inputs.artifacts.failed + inputs.artifacts.missing > 0
           ? 'ARTIFACT_FAILED'
           : inputs.audio.state === 'incomplete'
@@ -555,6 +566,7 @@ async function writeSaveOutcome(
     ...(inputs.finalSequence != null ? { finalSequence: inputs.finalSequence } : {}),
     storedEvents: stored.length,
     pendingEvents: ev?.pending ?? 0,
+    ...(pendingIds.length && !inputs.legacyPending ? { pendingEventIds: pendingIds } : {}),
     rejectedEvents: ev?.rejected ?? 0,
     droppedEvents: ev?.dropped ?? 0,
     filteredEvents: ev?.filtered ?? 0,
@@ -1131,16 +1143,24 @@ export function registerTelemetryIpc(): void {
       }
     }
     const drained = await recorder.retrySessionDrain(sessionId)
-    const events: DrainResult | undefined = drained
-      ? remembered
-        ? drained
-        : {
-            ...drained,
-            rejected: drained.rejected + (save?.rejectedEvents ?? 0),
-            dropped: drained.dropped + (save?.droppedEvents ?? 0)
-          }
-      : base.events
-    return writeSaveOutcome(store, sessionId, { ...base, events })
+    if (!drained) return writeSaveOutcome(store, sessionId, base)
+    if (remembered) return writeSaveOutcome(store, sessionId, { ...remembered, events: drained })
+    // After a restart the queue only knows what its outbox restored. Each event pending at Stop
+    // stays outstanding until this process settles that same id; a stale, empty or quarantined
+    // outbox (or replayed duplicates of other events) therefore never clears it.
+    const settled = new Set(drained.settledIds)
+    const queued = new Set(drained.pendingIds)
+    const prior = save?.pendingEventIds
+    return writeSaveOutcome(store, sessionId, {
+      ...base,
+      unrecoveredIds: prior?.filter((id) => !settled.has(id) && !queued.has(id)),
+      legacyPending: prior ? 0 : (save?.pendingEvents ?? 0),
+      events: {
+        ...drained,
+        rejected: drained.rejected + (save?.rejectedEvents ?? 0),
+        dropped: drained.dropped + (save?.droppedEvents ?? 0)
+      }
+    })
   })
 
   ipcMain.handle(
