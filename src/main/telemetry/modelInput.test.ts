@@ -150,7 +150,19 @@ describe('createWorkflowModelInput / prepareWorkflowModelInput', () => {
     expect(input.acts[0]).not.toHaveProperty('inf')
     expect(input.acts[0]).not.toHaveProperty('v')
     expect(input.mode).toBe('full-screen')
-    expect(typeof input.dur).toBe('number')
+    // No monotonic timing on this fixture: duration is not claimed from wall start/stop.
+    expect(input).not.toHaveProperty('dur')
+  })
+
+  it('takes duration from the monotonic timeline, not wall start/stop (M6)', () => {
+    const timed: PolishedSession = {
+      ...polished,
+      timing: 'monotonic',
+      actions: [{ ...polished.actions[0], elapsedMs: 4200 }]
+    }
+    // Wall start/stop are 5.3s apart; the monotonic timeline says 4.2s.
+    expect(createWorkflowModelInput(session, timed).dur).toBe(4200)
+    expect(createWorkflowModelInput(session, { ...timed, timing: 'legacy_unverified' })).not.toHaveProperty('dur')
   })
 
   it('packs segments/screens and elides low-value focus noise under budget', () => {

@@ -23,6 +23,10 @@ export function formatWatchEntry(event: TelemetryEvent): WatchLogLine | null {
       return { time, text: 'Started recording' }
     case 'session_stopped':
       return { time, text: 'Stopped recording' }
+    case 'session_paused':
+      return { time, text: 'Paused recording' }
+    case 'session_resumed':
+      return { time, text: 'Resumed recording' }
     case 'navigation': {
       const doc = event.data?.documentTitle || event.data?.windowTitle
       const label = doc || event.data?.appName || event.page || 'a page'

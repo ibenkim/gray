@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { reportBuild } from './reportBuild'
-import { BUILD } from '@shared/build'
+import { BUILD } from '../../shared/build'
 
 describe('M4-R4 renderer build report', () => {
   it('never throws when the preload bridge is missing, stale or failing', () => {

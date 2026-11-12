@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { SCHEMA_VERSION, type TelemetryEvent } from '../../shared/telemetry/schema'
+import { EVENT_SCHEMA_VERSION, type TelemetryEvent } from '../../shared/telemetry/schema'
 import type { TelemetryConfig } from './config'
 import { FileTelemetryStore } from './store/FileTelemetryStore'
 
@@ -48,7 +48,7 @@ const BASE_MS = Date.now() + 1_000
 
 function evt(sequence: number, partial: Partial<TelemetryEvent>): TelemetryEvent {
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: EVENT_SCHEMA_VERSION,
     eventId: `tevt_rv_${sequence}`,
     sessionId: SID,
     sequence,

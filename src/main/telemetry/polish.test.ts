@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SCHEMA_VERSION, type TelemetryEvent } from '../../shared/telemetry/schema'
+import { EVENT_SCHEMA_VERSION, type TelemetryEvent } from '../../shared/telemetry/schema'
 import { polishSession } from './polish'
 import { InMemoryTelemetryStore } from './store/InMemoryTelemetryStore'
 
@@ -7,7 +7,7 @@ function evt(
   partial: Partial<TelemetryEvent> & Pick<TelemetryEvent, 'type' | 'eventId' | 'sequence'>
 ): TelemetryEvent {
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: EVENT_SCHEMA_VERSION,
     sessionId: 'tsess_polish',
     timestamp: new Date(Date.UTC(2026, 6, 29, 12, 0, partial.sequence)).toISOString(),
     elapsedMs: partial.sequence * 1000,

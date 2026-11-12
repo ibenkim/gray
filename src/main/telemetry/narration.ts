@@ -8,14 +8,11 @@ import {
 } from 'fs'
 import { resolve, sep } from 'path'
 import OpenAI, { toFile } from 'openai'
-import { newId } from '../../shared/id'
 import {
-  SCHEMA_VERSION,
   SessionIdSchema,
   type NarrationMarker,
   type PolishedAction,
-  type PolishedSession,
-  type TelemetryEvent
+  type PolishedSession
 } from '../../shared/telemetry/schema'
 import type { StoredNarration } from './store/TelemetryStore'
 
@@ -47,46 +44,39 @@ export function parseMarkers(text: string): NarrationMarker | null {
 }
 
 /**
- * Normalize spans to session-relative elapsedMs. Absolute wall-clock values
- * (when startMs looks like epoch ms) are converted using sessionStartedAtMs.
- * Also backfills markers from text when missing.
+ * Normalize audio-relative spans (ms from the start of the recording's audio) and backfill
+ * markers from text. Never converts by subtracting a wall-clock origin: audio and session
+ * clocks are not comparable, so a span that is not audio-relative is dropped, not guessed.
  */
 export function alignNarration(
-  spans: Array<{ text: string; startMs: number; endMs: number; marker?: NarrationMarker }>,
-  sessionStartedAtMs: number
+  spans: Array<{ text: string; startMs: number; endMs: number; marker?: NarrationMarker }>
 ): NarrationSpan[] {
-  return spans.map((s) => {
-    const looksAbsolute =
-      sessionStartedAtMs >= ABSOLUTE_MS_FLOOR && s.startMs >= ABSOLUTE_MS_FLOOR
-    const startMs = looksAbsolute
-      ? Math.max(0, Math.round(s.startMs - sessionStartedAtMs))
-      : Math.max(0, Math.round(s.startMs))
-    const endMs = looksAbsolute
-      ? Math.max(startMs, Math.round(s.endMs - sessionStartedAtMs))
-      : Math.max(startMs, Math.round(s.endMs))
-    const text = s.text.trim()
-    const marker = s.marker ?? parseMarkers(text) ?? undefined
-    return { text, startMs, endMs, ...(marker ? { marker } : {}) }
-  })
+  return spans
+    .filter((s) => s.startMs < ABSOLUTE_MS_FLOOR && s.endMs < ABSOLUTE_MS_FLOOR)
+    .map((s) => {
+      const startMs = Math.max(0, Math.round(s.startMs))
+      const endMs = Math.max(startMs, Math.round(s.endMs))
+      const text = s.text.trim()
+      const marker = s.marker ?? parseMarkers(text) ?? undefined
+      return { text, startMs, endMs, ...(marker ? { marker } : {}) }
+    })
 }
 
 /**
- * Attach overlapping narration spans onto polished actions by elapsedMs.
- * Action window is [actionElapsed, nextActionElapsed) (last action +5s).
+ * Attach overlapping narration spans onto polished actions by monotonic elapsedMs.
+ * Action window is [actionElapsed, nextActionElapsed) (last action +5s). Narration is an
+ * annotation on existing actions, never a new observation. The audio's real start offset is
+ * not recorded yet, so spans are assumed to start at session start and the result is marked
+ * `narrationTiming: 'audio_offset_unverified'`. Actions without elapsedMs get no narration.
  */
-export function attachNarration(
-  polished: PolishedSession,
-  spans: NarrationSpan[],
-  sessionStartedAtMs: number
-): PolishedSession {
+export function attachNarration(polished: PolishedSession, spans: NarrationSpan[]): PolishedSession {
   if (!spans.length || !polished.actions.length) return polished
 
   const actions: PolishedAction[] = polished.actions.map((action, i) => {
-    const start = Math.max(0, Date.parse(action.timestamp) - sessionStartedAtMs)
-    const next = polished.actions[i + 1]
-    const end = next
-      ? Math.max(start, Date.parse(next.timestamp) - sessionStartedAtMs)
-      : start + 5_000
+    if (action.elapsedMs === undefined) return action
+    const start = action.elapsedMs
+    const nextMs = polished.actions[i + 1]?.elapsedMs
+    const end = nextMs !== undefined ? Math.max(start, nextMs) : start + 5_000
     const overlapping = spans.filter((s) => s.startMs < end && s.endMs > start)
     if (!overlapping.length) return action
 
@@ -107,53 +97,7 @@ export function attachNarration(
     }
   })
 
-  return { ...polished, actions }
-}
-
-/** Build narration_span (+ marker) events for the session stream. */
-export function narrationSpansToEvents(
-  sessionId: string,
-  spans: NarrationSpan[],
-  sequenceStart: number,
-  sessionStartedAtMs: number
-): TelemetryEvent[] {
-  const events: TelemetryEvent[] = []
-  let sequence = sequenceStart
-  for (const span of spans) {
-    const text = span.text.slice(0, 800)
-    const timestamp = new Date(sessionStartedAtMs + span.startMs).toISOString()
-    events.push({
-      schemaVersion: SCHEMA_VERSION,
-      eventId: newId('tevt'),
-      sessionId,
-      sequence: sequence++,
-      timestamp,
-      elapsedMs: span.startMs,
-      type: 'narration_span',
-      data: {
-        narrationText: text,
-        narrationStartMs: span.startMs,
-        narrationEndMs: span.endMs,
-        ...(span.marker ? { marker: span.marker } : {})
-      }
-    })
-    if (span.marker) {
-      events.push({
-        schemaVersion: SCHEMA_VERSION,
-        eventId: newId('tevt'),
-        sessionId,
-        sequence: sequence++,
-        timestamp,
-        elapsedMs: span.startMs,
-        type: 'marker',
-        data: {
-          marker: span.marker,
-          narrationText: text
-        }
-      })
-    }
-  }
-  return events
+  return { ...polished, actions, narrationTiming: 'audio_offset_unverified' }
 }
 
 /**
@@ -375,7 +319,6 @@ export class NarrationRecorder {
    */
   async finalize(opts: {
     apiKey: string | null
-    sessionStartedAtMs: number
     sessionId?: string
     /** Override / inject spans (also used by tests). */
     spans?: NarrationSpan[]
@@ -388,7 +331,7 @@ export class NarrationRecorder {
     if (spans.length === 0 && audioPath && hadChunks && opts.apiKey) {
       spans = await transcribeNarration(audioPath, opts.apiKey)
     }
-    const aligned = alignNarration(spans, opts.sessionStartedAtMs)
+    const aligned = alignNarration(spans)
     this.injectedSpans = null
     this.chunkCount = 0
     return aligned
@@ -463,29 +406,14 @@ export function buildStoredNarration(
   }
 }
 
-/** Persist narration events + JSON; safe to call with empty spans. */
+/** Persist narration as source-linked annotations (narration JSON only, no session events). */
 export async function persistNarrationResult(
-  store: {
-    saveNarration?(sessionId: string, narration: StoredNarration): Promise<void>
-    appendEvents(sessionId: string, events: TelemetryEvent[]): Promise<unknown>
-    readSessionEvents(sessionId: string): Promise<TelemetryEvent[]>
-  },
+  store: { saveNarration?(sessionId: string, narration: StoredNarration): Promise<void> },
   sessionId: string,
   spans: NarrationSpan[],
-  sessionStartedAtMs: number,
   audioPath?: string | null
 ): Promise<StoredNarration> {
   const stored = buildStoredNarration(sessionId, spans, audioPath)
-  if (store.saveNarration) {
-    await store.saveNarration(sessionId, stored)
-  }
-  if (spans.length > 0) {
-    const existing = await store.readSessionEvents(sessionId)
-    const maxSeq = existing.reduce((m, e) => Math.max(m, e.sequence), -1)
-    const events = narrationSpansToEvents(sessionId, spans, maxSeq + 1, sessionStartedAtMs)
-    if (events.length > 0) {
-      await store.appendEvents(sessionId, events)
-    }
-  }
+  if (store.saveNarration) await store.saveNarration(sessionId, stored)
   return stored
 }

@@ -240,7 +240,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   /** Baseline for AX valueTail diffs (fallback when NSEvent keys never arrive). */
   private lastValueLen: { contextKey: string; length: number } | null = null
   /** When key events are flowing, ignore valueTail to avoid double-counting. */
-  private lastKeyEventAt = 0
+  /** Monotonic ms of the last key event; null until one arrives. */
+  private lastKeyEventAt: number | null = null
   private pasteboard: number | undefined
 
   pasteboardCount(): number | undefined {
@@ -643,10 +644,10 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         label: elementLabel,
         role: elementRole,
         appName,
-        at: Date.now()
+        at: performance.now()
       }
     } else if (this.pendingActivation) {
-      const age = Date.now() - this.pendingActivation.at
+      const age = performance.now() - this.pendingActivation.at
       if (age <= ACTIVATION_WINDOW_MS) {
         const act = this.pendingActivation
         this.pendingActivation = null
@@ -678,14 +679,14 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           label: elementLabel,
           role: elementRole,
           length: valueLength,
-          at: Date.now(),
+          at: performance.now(),
           grew: false
         }
       } else if (valueLength > prev.length) {
         this.lastField = {
           ...prev,
           length: valueLength,
-          at: Date.now(),
+          at: performance.now(),
           grew: true
         }
         if (this.fieldSettleTimer) clearTimeout(this.fieldSettleTimer)
@@ -723,7 +724,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         this.lastField = {
           ...prev,
           length: valueLength,
-          at: Date.now(),
+          at: performance.now(),
           grew: false
         }
       }
@@ -747,7 +748,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.lastValueLen = { contextKey, length: sample.valueLength }
 
     // Key monitors own the buffer when they are delivering events.
-    if (this.lastKeyEventAt && Date.now() - this.lastKeyEventAt < 1500) return
+    if (this.lastKeyEventAt !== null && performance.now() - this.lastKeyEventAt < 1500) return
     if (!prev) return
 
     if (sample.valueLength < prev.length) {
@@ -793,7 +794,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
-      startedAt: Date.now()
+      startedAt: performance.now()
     }
     return this.typing
   }
@@ -819,7 +820,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   /** Exposed for tests — handle one observed key press. */
   handleKey(event: JxaKeyEvent): void {
     if (!this.onEvent) return
-    this.lastKeyEventAt = Date.now()
+    this.lastKeyEventAt = performance.now()
 
     const secure = event.secure === true || this.context.secure
     const isChord = event.cmd === true || event.ctrl === true
@@ -1133,7 +1134,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
-      startedAt: Date.now()
+      startedAt: performance.now()
     }
     return this.typing
   }

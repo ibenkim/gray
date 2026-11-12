@@ -47,8 +47,9 @@ export function segmentActions(actions: PolishedAction[]): {
   flush()
 
   const segments: ActivitySegment[] = groups.map((group, index) => {
-    const startMs = Date.parse(group[0].timestamp) || 0
-    const endMs = Date.parse(group[group.length - 1].timestamp) || startMs
+    // Session-relative monotonic ms; older polished actions without elapsedMs count as 0.
+    const startMs = group[0].elapsedMs ?? 0
+    const endMs = group[group.length - 1].elapsedMs ?? startMs
     return {
       id: `seg_${index + 1}`,
       index,
@@ -173,10 +174,8 @@ function isInputLike(a: PolishedAction): boolean {
 
 function gapMs(prev: PolishedAction, next: PolishedAction): number {
   if (next.waitedMs != null) return next.waitedMs
-  const a = Date.parse(prev.timestamp)
-  const b = Date.parse(next.timestamp)
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0
-  return Math.max(0, b - a)
+  if (prev.elapsedMs === undefined || next.elapsedMs === undefined) return 0
+  return Math.max(0, next.elapsedMs - prev.elapsedMs)
 }
 
 function dominant(values: Array<string | undefined>): string | undefined {

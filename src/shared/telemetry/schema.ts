@@ -2,9 +2,20 @@ import { z } from 'zod'
 
 export const SCHEMA_VERSION = 1 as const
 
+/**
+ * Telemetry event versions. v2: `elapsedMs` comes from main's monotonic clock (session-relative,
+ * immune to wall-clock changes); `timestamp` is wall time for display only. v1 (legacy): `elapsedMs`
+ * was derived from Date.now, so its durations and order are unverified. Only v2 is written.
+ */
+export const EVENT_SCHEMA_VERSION = 2 as const
+export const LEGACY_EVENT_SCHEMA_VERSION = 1 as const
+
 export const TelemetryEventTypeSchema = z.enum([
   'session_started',
   'session_stopped',
+  /** Pause and resume boundaries: the gap between them is on the timeline, not user waiting. */
+  'session_paused',
+  'session_resumed',
   'navigation',
   'app_switch',
   'window_switch',
@@ -372,7 +383,7 @@ export type TelemetryEventData = z.infer<typeof TelemetryEventDataSchema>
 
 export const TelemetryEventSchema = z
   .object({
-    schemaVersion: z.literal(SCHEMA_VERSION),
+    schemaVersion: z.union([z.literal(LEGACY_EVENT_SCHEMA_VERSION), z.literal(EVENT_SCHEMA_VERSION)]),
     eventId: z.string().min(1).max(80),
     sessionId: z.string().min(1).max(80),
     sequence: z.number().int().nonnegative(),
@@ -389,6 +400,17 @@ export const TelemetryEventSchema = z
   .strict()
 
 export type TelemetryEvent = z.infer<typeof TelemetryEventSchema>
+
+/** True only for events whose elapsedMs came from the monotonic clock (never upgrades v1). */
+export function eventTimingVerified(event: Pick<TelemetryEvent, 'schemaVersion'>): boolean {
+  return event.schemaVersion === EVENT_SCHEMA_VERSION
+}
+
+/** Session timing: `monotonic` only when every event is v2. */
+export type SessionTiming = 'monotonic' | 'legacy_unverified'
+export function sessionTiming(events: Array<Pick<TelemetryEvent, 'schemaVersion'>>): SessionTiming {
+  return events.every(eventTimingVerified) ? 'monotonic' : 'legacy_unverified'
+}
 
 export const CaptureStatusSchema = z.enum(['recording', 'stopped', 'failed'])
 export type CaptureStatus = z.infer<typeof CaptureStatusSchema>
@@ -734,6 +756,8 @@ export const PolishedActionSchema = z
       'clipboard'
     ]),
     timestamp: z.string().datetime(),
+    /** Session-relative time of the first source event (absent in older polished files). */
+    elapsedMs: z.number().int().nonnegative().optional(),
     sourceEventIds: z.array(z.string()).min(1),
     appName: z.string().max(120).optional(),
     documentTitle: z.string().max(200).optional(),
@@ -799,6 +823,13 @@ export const PolishedSessionSchema = z
       max: z.number().int().nonnegative()
     }),
     actions: z.array(PolishedActionSchema),
+    /** Clock behind action elapsedMs; absent in older polished files (treat as unverified). */
+    timing: z.enum(['monotonic', 'legacy_unverified']).optional(),
+    /**
+     * Narration was attached assuming audio started at session start; the real audio offset is
+     * not recorded yet, so narration-to-action alignment is approximate.
+     */
+    narrationTiming: z.literal('audio_offset_unverified').optional(),
     /** Activity groups for hierarchical model packing. */
     segments: z.array(ActivitySegmentSchema).optional(),
     /** Compact screen-state reference table used by segments/actions. */

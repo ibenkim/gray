@@ -87,7 +87,7 @@ export class ClipboardWatcher {
       text: persistedText
     }
 
-    this.latest = { at: Date.now(), clipboard: clipboardData, pasteboard }
+    this.latest = { at: performance.now(), clipboard: clipboardData, pasteboard }
     return { clipboard: clipboardData }
   }
 }

@@ -1,7 +1,7 @@
 import { globalShortcut, screen } from 'electron'
 import { newId } from '../../shared/id'
 import {
-  SCHEMA_VERSION,
+  EVENT_SCHEMA_VERSION,
   type ScreenshotCaptureStatus,
   type TelemetryEvent,
   type TelemetryEventType
@@ -141,7 +141,8 @@ const SHORTCUTS: Array<{ accelerator: string; label: string }> = [
 export class TelemetryRecorder {
   private sessionId: string | null = null
   private sequence = 0
-  private startedAtMs = 0
+  /** Monotonic clock reading at session start; elapsedMs is measured from it. */
+  private startedAtMono = 0
   private startedAtIso: string | null = null
   private recording = false
   private paused = false
@@ -175,6 +176,7 @@ export class TelemetryRecorder {
   private opts: CaptureOptions = {}
   private onEventListeners = new Set<(event: TelemetryEvent) => void>()
   private onStatusListeners = new Set<(status: RecordingStatus) => void>()
+  private readonly clock: () => number
   private interaction: InteractionProvider
   private screenshot: ScreenshotProvider
   private screenStates: ScreenStateTracker
@@ -195,8 +197,11 @@ export class TelemetryRecorder {
       interaction?: InteractionProvider
       screenshot?: ScreenshotProvider
       clipboard?: ClipboardWatcher
+      /** Monotonic milliseconds (default performance.now). Wall time is for display only. */
+      clock?: () => number
     }
   ) {
+    this.clock = providers?.clock ?? (() => performance.now())
     this.interaction = providers?.interaction ?? new NoopInteractionProvider()
     this.screenshot = providers?.screenshot ?? new DisabledScreenshotProvider()
     this.screenStates = new ScreenStateTracker(this.screenshot)
@@ -235,6 +240,7 @@ export class TelemetryRecorder {
       await this.drainSources()
       // A Stop that arrived meanwhile owns the recorder now.
       if (this.phase === 'pausing') {
+        this.recordEvent('session_paused')
         this.paused = true
         this.phase = 'paused'
       }
@@ -252,6 +258,7 @@ export class TelemetryRecorder {
       this.phase = 'resuming'
       this.paused = false
       this.finalizing = false
+      this.recordEvent('session_resumed')
       this.startSources()
       this.phase = 'recording'
       this.emitStatus()
@@ -366,8 +373,8 @@ export class TelemetryRecorder {
     this.teardownFailed = false
     this.sessionId = newId('tsess')
     this.sequence = 0
-    this.startedAtMs = Date.now()
-    this.startedAtIso = new Date(this.startedAtMs).toISOString()
+    this.startedAtMono = this.clock()
+    this.startedAtIso = new Date().toISOString()
     this.phase = 'starting'
     this.recording = false
     this.paused = false
@@ -544,7 +551,10 @@ export class TelemetryRecorder {
     if (!this.sessionId) return null
     if (!this.recording && type !== 'session_stopped') return null
     if (this.paused && type !== 'session_stopped') return null
-    if (this.finalizing && type !== 'session_stopped') this.ingress.drainedAfterBoundary += 1
+    // Boundary markers are the recorder's own, not late source input.
+    if (this.finalizing && type !== 'session_stopped' && type !== 'session_paused') {
+      this.ingress.drainedAfterBoundary += 1
+    }
 
     const display = this.displayInfo()
     const windowBounds = this.windowBounds()
@@ -555,13 +565,14 @@ export class TelemetryRecorder {
     }
 
     const event: TelemetryEvent = redactEvent({
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: EVENT_SCHEMA_VERSION,
       eventId: newId('tevt'),
       sessionId: this.sessionId,
       sequence: this.sequence++,
+      // Wall time, display only. elapsedMs (monotonic, session-relative) is the only legal
+      // duration and order source; it keeps running through pauses, so gaps stay explicit.
       timestamp: new Date().toISOString(),
-      // elapsedMs is monotonic (session-relative) — the only legal duration source.
-      elapsedMs: Math.max(0, Date.now() - this.startedAtMs),
+      elapsedMs: Math.max(0, Math.round(this.clock() - this.startedAtMono)),
       type,
       page: partial.page,
       route: partial.route,
@@ -1075,7 +1086,7 @@ export class TelemetryRecorder {
             fieldCharCountAfter: len,
             clipboard: latest.clipboard,
             clipboardAt: latest.at,
-            now: Date.now()
+            now: performance.now()
           })
           if (result.matched) {
             const pairId = this.pendingClipboardPairId ?? latest.clipboard.pairId

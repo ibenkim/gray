@@ -46,8 +46,7 @@ describe('alignNarration', () => {
       [
         { text: 'optional confirmation', startMs: 100, endMs: 400 },
         { text: 'click save', startMs: 500, endMs: 800 }
-      ],
-      Date.parse('2026-01-01T00:00:00.000Z')
+      ]
     )
     expect(aligned[0]).toMatchObject({
       text: 'optional confirmation',
@@ -58,25 +57,20 @@ describe('alignNarration', () => {
     expect(aligned[1].marker).toBeUndefined()
   })
 
-  it('converts absolute wall-clock times to elapsedMs', () => {
-    const start = Date.parse('2026-06-01T12:00:00.000Z')
-    const aligned = alignNarration(
-      [
-        {
-          text: 'hello',
-          startMs: start + 1500,
-          endMs: start + 2500
-        }
-      ],
-      start
-    )
-    expect(aligned[0].startMs).toBe(1500)
-    expect(aligned[0].endMs).toBe(2500)
+  it('drops wall-clock spans instead of subtracting an incomparable origin (M6)', () => {
+    const wall = Date.parse('2026-06-01T12:00:01.500Z')
+    const aligned = alignNarration([
+      { text: 'wall clock', startMs: wall, endMs: wall + 1000 },
+      { text: 'audio relative', startMs: 1500, endMs: 2500 }
+    ])
+    expect(aligned.map((a) => a.text)).toEqual(['audio relative'])
   })
 })
 
 describe('attachNarration', () => {
   const sessionStartedAtMs = Date.parse('2026-06-01T12:00:00.000Z')
+  // Wall timestamps deliberately disagree with elapsedMs: only elapsedMs may be used.
+  const wall = (ms: number) => new Date(sessionStartedAtMs + 3_600_000 - ms).toISOString()
 
   function polished(actions: PolishedSession['actions']): PolishedSession {
     return {
@@ -94,7 +88,8 @@ describe('attachNarration', () => {
         order: 1,
         text: 'Clicked Submit',
         category: 'interaction',
-        timestamp: new Date(sessionStartedAtMs + 1000).toISOString(),
+        timestamp: wall(1000),
+        elapsedMs: 1000,
         sourceEventIds: ['e1'],
         appName: 'Safari'
       },
@@ -102,7 +97,8 @@ describe('attachNarration', () => {
         order: 2,
         text: 'Typed email',
         category: 'input',
-        timestamp: new Date(sessionStartedAtMs + 5000).toISOString(),
+        timestamp: wall(5000),
+        elapsedMs: 5000,
         sourceEventIds: ['e2'],
         appName: 'Safari'
       }
@@ -123,7 +119,8 @@ describe('attachNarration', () => {
       }
     ]
 
-    const next = attachNarration(session, spans, sessionStartedAtMs)
+    const next = attachNarration(session, spans)
+    expect(next.narrationTiming).toBe('audio_offset_unverified')
     expect(next.actions[0].narrationText).toBe('only if the field is empty')
     expect(next.actions[0].marker).toBe('decision_point')
     expect(next.actions[1].narrationText).toBe('check here for typos')
@@ -136,22 +133,19 @@ describe('attachNarration', () => {
         order: 1,
         text: 'Clicked Submit',
         category: 'interaction',
-        timestamp: new Date(sessionStartedAtMs + 1000).toISOString(),
+        timestamp: wall(1000),
+        elapsedMs: 1000,
         sourceEventIds: ['e1']
       }
     ])
-    const next = attachNarration(
-      session,
-      [{ text: 'later note', startMs: 20_000, endMs: 21_000 }],
-      sessionStartedAtMs
-    )
+    const next = attachNarration(session, [{ text: 'later note', startMs: 20_000, endMs: 21_000 }])
     expect(next.actions[0].narrationText).toBeUndefined()
     expect(next.actions[0].marker).toBeUndefined()
   })
 })
 
 describe('NarrationRecorder + persist', () => {
-  it('finalizes injected transcript without Whisper and writes store events', async () => {
+  it('finalizes injected transcript without Whisper; narration stays an annotation (M6)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'narration-'))
     const recorder = new NarrationRecorder(dir)
     const store = new InMemoryTelemetryStore()
@@ -163,22 +157,17 @@ describe('NarrationRecorder + persist', () => {
       { text: 'skip this field', startMs: 0, endMs: 1200 },
       { text: 'click continue', startMs: 1200, endMs: 2400 }
     ])
-    const started = Date.parse('2026-06-01T12:00:00.000Z')
-    const spans = await recorder.finalize({
-      apiKey: null,
-      sessionStartedAtMs: started,
-      sessionId: 'tsess_narr'
-    })
+    const spans = await recorder.finalize({ apiKey: null, sessionId: 'tsess_narr' })
     expect(spans[0].marker).toBe('skip_this')
 
-    await persistNarrationResult(store, 'tsess_narr', spans, started)
+    await persistNarrationResult(store, 'tsess_narr', spans)
     const saved = await store.getNarration('tsess_narr')
     expect(saved?.spans).toHaveLength(2)
     expect(saved?.transcribedAt).toBeTruthy()
 
     const events = await store.readSessionEvents('tsess_narr')
-    expect(events.some((e) => e.type === 'narration_span')).toBe(true)
-    expect(events.some((e) => e.type === 'marker' && e.data?.marker === 'skip_this')).toBe(true)
+    // Not backdated into the action stream as new chronological observations.
+    expect(events.some((e) => e.type === 'narration_span' || e.type === 'marker')).toBe(false)
   })
 })
 

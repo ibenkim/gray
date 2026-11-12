@@ -1,5 +1,6 @@
 import {
   SCHEMA_VERSION,
+  sessionTiming,
   type ClipboardData,
   type PolishedAction,
   type PolishedSession,
@@ -74,9 +75,14 @@ export async function polishSession(
   }
 
   const events = [...byId.values()].sort((a, b) => {
+    // Emitted order is the sequence; wall timestamps never order events.
     if (a.sequence !== b.sequence) return a.sequence - b.sequence
-    return a.timestamp.localeCompare(b.timestamp)
+    return a.elapsedMs - b.elapsedMs || a.eventId.localeCompare(b.eventId)
   })
+  // Legacy (v1) elapsed came from the wall clock: it may still order local folds, but no
+  // timing-derived fact (waits, action times, time-based grouping) leaves polish for it.
+  const timing = sessionTiming(events)
+  const timingVerified = timing === 'monotonic'
 
   const drafts: ActionDraft[] = []
   let lastClickKey: string | null = null
@@ -84,7 +90,8 @@ export async function polishSession(
   let pendingField: TelemetryEvent | null = null
   let lastNav: TelemetryEvent | null = null
   let lastDocKey: string | null = null
-  let lastTs = 0
+  /** Session-relative ms of the previous event; null at start and after a resume. */
+  let lastTs: number | null = null
   let pendingWaitMs = 0
   let lastScreenId: string | undefined
   let lastScreenDelta: ScreenAfterDelta | undefined
@@ -101,6 +108,7 @@ export async function polishSession(
     if (lastScreenId && !draft.screenBeforeId && draft.category !== 'session') {
       draft.screenBeforeId = lastScreenId
     }
+    draft.elapsedMs ??= byId.get(draft.sourceEventIds[0])?.elapsedMs
     drafts.push(draft)
   }
 
@@ -265,12 +273,13 @@ export async function polishSession(
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i]
-    const ts = Date.parse(event.timestamp)
-    if (lastTs && ts - lastTs >= IDLE_GAP_MS) {
+    // Monotonic session time; a paused span is not user waiting.
+    const ts = event.elapsedMs
+    if (timingVerified && lastTs !== null && ts - lastTs >= IDLE_GAP_MS) {
       // Preserve wait semantics on the next real action instead of a dropped idle row.
       pendingWaitMs += ts - lastTs
     }
-    lastTs = ts || lastTs
+    lastTs = event.type === 'session_paused' ? null : ts
 
     switch (event.type) {
       case 'session_started':
@@ -406,7 +415,8 @@ export async function polishSession(
             prior &&
             (prior.l1Op === 'fill_field' || prior.category === 'input') &&
             ((!label && !prior.elementLabel) || label === prior.elementLabel) &&
-            ts - Date.parse(prior.timestamp) < FOCUS_FOLD_MS
+            prior.elapsedMs !== undefined &&
+            ts - prior.elapsedMs < FOCUS_FOLD_MS
           ) {
             if (!prior.sourceEventIds.includes(event.eventId)) {
               prior.sourceEventIds.push(event.eventId)
@@ -483,7 +493,8 @@ export async function polishSession(
           prior.category === 'interaction' &&
           isTextFieldRole(prior.elementRole) &&
           ((!label && !prior.elementLabel) || label === prior.elementLabel) &&
-          ts - Date.parse(prior.timestamp) < FOCUS_FOLD_MS
+          prior.elapsedMs !== undefined &&
+          ts - prior.elapsedMs < FOCUS_FOLD_MS
         ) {
           for (const id of prior.sourceEventIds) {
             if (!draft.sourceEventIds.includes(id)) draft.sourceEventIds.push(id)
@@ -953,8 +964,9 @@ export async function polishSession(
     }
   }
 
-  const actions: PolishedAction[] = drafts.map((d, i) => ({
+  const actions: PolishedAction[] = drafts.map(({ elapsedMs, ...d }, i) => ({
     ...d,
+    ...(timingVerified && elapsedMs !== undefined ? { elapsedMs } : {}),
     order: i + 1
   }))
 
@@ -971,6 +983,7 @@ export async function polishSession(
     polishedAt: new Date().toISOString(),
     sequenceRange,
     actions,
+    timing,
     segments,
     screens
   }
@@ -980,20 +993,15 @@ export async function polishSession(
     try {
       const narration = await store.getNarration(sessionId)
       if (narration?.spans?.length) {
-        const meta = await store.getSessionMeta(sessionId)
-        const startedAtMs = meta ? Date.parse(meta.startedAt) : 0
-        if (Number.isFinite(startedAtMs) && startedAtMs > 0) {
-          polished = attachNarration(
-            polished,
-            narration.spans.map((s) => ({
-              text: s.text,
-              startMs: s.startMs,
-              endMs: s.endMs,
-              ...(s.marker ? { marker: s.marker } : {})
-            })),
-            startedAtMs
-          )
-        }
+        polished = attachNarration(
+          polished,
+          narration.spans.map((s) => ({
+            text: s.text,
+            startMs: s.startMs,
+            endMs: s.endMs,
+            ...(s.marker ? { marker: s.marker } : {})
+          }))
+        )
       }
     } catch (err) {
       console.error(
@@ -1061,11 +1069,9 @@ function sameScreen(a: TelemetryEvent, b: TelemetryEvent): boolean {
 /** Look ahead briefly for corroborating state after a submit/send. */
 function detectVerified(events: TelemetryEvent[], index: number): boolean {
   const base = events[index]
-  const baseTs = Date.parse(base.timestamp)
   for (let j = index + 1; j < Math.min(events.length, index + 6); j++) {
     const e = events[j]
-    const ts = Date.parse(e.timestamp)
-    if (ts - baseTs > 4000) break
+    if (e.elapsedMs - base.elapsedMs > 4000) break
     if (
       e.type === 'focus_changed' &&
       e.data?.field?.valueLength === 0 &&

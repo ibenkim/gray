@@ -179,12 +179,15 @@ export function prepareWorkflowModelInput(
     return s
   }
 
-  const started = Date.parse(session.startedAt)
-  const stopped = session.stoppedAt ? Date.parse(session.stoppedAt) : NaN
-  const dur =
-    Number.isFinite(started) && Number.isFinite(stopped)
-      ? Math.max(0, stopped - started)
-      : undefined
+  // Duration from the monotonic session timeline only (last action's elapsedMs, which includes
+  // paused spans); wall start/stop times can jump, and legacy timing is not claimed.
+  // A loop, not Math.max(...): source logs are uncapped until the action budget below.
+  let dur: number | undefined
+  if (polishedSession.timing === 'monotonic') {
+    for (const a of polishedSession.actions) {
+      if (a.elapsedMs !== undefined && (dur === undefined || a.elapsedMs > dur)) dur = a.elapsedMs
+    }
+  }
 
   const filtered = filterAndCollapse(polishedSession.actions)
   const budget = extras.maxActions ?? MAX_ACTIONS
@@ -546,7 +549,7 @@ export function selectByImportance(
       .slice(0, Math.max(0, maxActions - mustActions.length))
       .map((s) => s.a)
     kept = [...mustActions, ...rest].sort(
-      (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.order - b.order
+      (a, b) => a.order - b.order
     )
   }
 
