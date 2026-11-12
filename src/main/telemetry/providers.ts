@@ -46,6 +46,7 @@ export type InteractionPartial = {
     | 'click'
     | 'scroll'
     | 'text_input'
+    | 'credential_entered'
     | 'keyboard_shortcut'
     | 'key_pressed'
     | 'field_completed'

@@ -384,15 +384,31 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
     data.elementIdentifier = sanitizeLabel(data.elementIdentifier)
     data.urlQuery = truncate(data.urlQuery, 300)
 
+    // Key counts are never exported (legacy rows may still carry them).
+    delete data.keyCount
+    const secureTarget =
+      event.type === 'credential_entered' ||
+      data.elementRole === 'AXSecureTextField' ||
+      data.elementSubrole === 'AXSecureTextField' ||
+      target?.role === 'AXSecureTextField' ||
+      target?.fieldType === 'password' ||
+      data.field?.fieldType === 'password'
+    if (secureTarget) {
+      // A paste into a secure field: no length or content hash of what was pasted.
+      delete data.charCountDelta
+      delete data.matchedClipboardHash
+      delete data.clipboard
+    }
+
     // Typed text: drop outright for sensitive targets, otherwise re-redact.
     if (data.typedText != null) {
       const targetSensitive =
+        secureTarget ||
         isSensitiveField({
           label: data.elementLabel ?? target?.accessibleLabel ?? target?.visibleLabel,
           fieldType: data.field?.fieldType ?? target?.fieldType,
           analyticsId: target?.analyticsId
         }) ||
-        data.elementRole === 'AXSecureTextField' ||
         data.field?.valueCategory === 'sensitive' ||
         data.field?.valueCategory === 'redacted'
 
@@ -421,9 +437,12 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
           fieldType: field.fieldType,
           analyticsId: target?.analyticsId
         })
-      if (sensitive) {
+      if (sensitive || secureTarget) {
+        // No value, length or completion signal for a secure/sensitive field.
         field.valueCategory = 'redacted'
         delete field.sanitizedValue
+        delete field.valueLength
+        delete field.completed
       } else if (field.sanitizedValue && !isValueAllowlisted(target?.analyticsId)) {
         delete field.sanitizedValue
       }

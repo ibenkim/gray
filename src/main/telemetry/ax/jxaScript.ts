@@ -14,8 +14,9 @@
  *   {k:'stats', keys, clicks}        — monitor callback counters (debug heartbeat)
  *
  * Non-secure text fields include `valueTail` (last ≤160 chars of AXValue) so the
- * host can recover typing when NSEvent monitors are silent. Secure fields never
- * include a tail. The host aggregates and redacts before storage.
+ * host can recover typing when NSEvent monitors are silent. Secure fields (role or subrole
+ * AXSecureTextField, or global secure input) never include a value, tail, length or chars;
+ * an unavailable secure-input check counts as secure. The host aggregates and redacts.
  */
 /**
  * Parent lifetime (M2). The sensor must stop reading once the host is gone: after the
@@ -82,7 +83,7 @@ var SAMPLE_MS = 400;
 var PUMP_SECONDS = 0.016;
 var MAX_ANCESTORS = 3;
 
-/* Roles whose AXValue is user-entered text. Secure fields: length only. Others: length + tail. */
+/* Roles whose AXValue is user-entered text. Secure fields: nothing. Others: length + tail. */
 var TEXT_ROLES = {
   AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1, AXSecureTextField: 1
 };
@@ -99,9 +100,52 @@ try {
   secureBound = true;
 } catch (e) {}
 
+/* Fail closed: without a working check, input counts as secure. */
 function secureInputActive() {
-  if (!secureBound) return false;
-  try { return $.IsSecureEventInputEnabled() ? true : false; } catch (e) { return false; }
+  if (!secureBound) return true;
+  try { return $.IsSecureEventInputEnabled() ? true : false; } catch (e) { return true; }
+}
+
+function isSecureRole(role, subrole) {
+  return role === 'AXSecureTextField' || subrole === 'AXSecureTextField';
+}
+
+/* AX errors that prove an attribute is absent (an ordinary field has no subrole). Any other
+   failure leaves the element's security unproven. */
+var AX_NO_VALUE = -25212;
+var AX_ATTRIBUTE_UNSUPPORTED = -25205;
+function axProbe(el, name) {
+  if (!el) return { ok: false };
+  try {
+    var out = Ref();
+    var err = $.AXUIElementCopyAttributeValue(el, cfstr(name), out);
+    if (err === 0) return { ok: true, value: out[0] };
+    if (err === AX_NO_VALUE || err === AX_ATTRIBUTE_UNSUPPORTED) return { ok: true, value: null };
+  } catch (e) {}
+  return { ok: false };
+}
+
+/* Fail closed: an element is ordinary only when its role is known and its subrole is either
+   known or provably absent. Unknown, unreadable or missing context counts as secure. */
+function elementSecure(el) {
+  var role = axProbe(el, 'AXRole');
+  var roleText = role.ok && role.value != null ? jsString(role.value) : null;
+  if (roleText == null) return true;
+  var subrole = axProbe(el, 'AXSubrole');
+  if (!subrole.ok) return true;
+  if (subrole.value == null) return isSecureRole(roleText, null);
+  // Present but unconvertible is not evidence of an ordinary field.
+  var subroleText = jsString(subrole.value);
+  if (subroleText == null) return true;
+  return isSecureRole(roleText, subroleText);
+}
+
+/* The focused element itself, not the last sample (focus race). No focus = unproven. */
+function focusedSecure() {
+  if (secureInputActive()) return true;
+  var focus = axProbe(systemWide(), 'AXFocusedUIElement');
+  if (!focus.ok || focus.value == null) return true;
+  return elementSecure(focus.value);
 }
 
 /* ── frontmost app via NSWorkspace (no Apple Events, safe per-keystroke) ── */
@@ -288,7 +332,7 @@ function describeElement(el) {
   }
 
   var valueLength = null;
-  if (TEXT_ROLES[role]) {
+  if (TEXT_ROLES[role] && !elementSecure(el) && !secureInputActive()) {
     var val = axString(el, 'AXValue');
     valueLength = val ? val.length : 0;
   }
@@ -545,21 +589,19 @@ function sample() {
     } catch (e3) {}
 
     var role = focused ? attr(focused, 'AXRole') : null;
-    var secure = role === 'AXSecureTextField' || secureInputActive();
+    var subrole = focused ? attr(focused, 'AXSubrole') : null;
+    // System Events identity plus the native fail-closed check, before any value read.
+    var secure = isSecureRole(role, subrole) || focusedSecure();
     var valueLength = null;
     var valueTail = null;
-    if (focused && TEXT_ROLES[role]) {
-      if (secure) {
-        valueLength = attrLen(focused, 'AXValue');
+    if (focused && TEXT_ROLES[role] && !secure) {
+      valueTail = attrTail(focused, 'AXValue');
+      if (valueTail == null) {
+        valueLength = null;
+      } else if (valueTail.length < VALUE_TAIL_MAX) {
+        valueLength = valueTail.length;
       } else {
-        valueTail = attrTail(focused, 'AXValue');
-        if (valueTail == null) {
-          valueLength = null;
-        } else if (valueTail.length < VALUE_TAIL_MAX) {
-          valueLength = valueTail.length;
-        } else {
-          valueLength = attrLen(focused, 'AXValue');
-        }
+        valueLength = attrLen(focused, 'AXValue');
       }
     }
 
@@ -576,7 +618,7 @@ function sample() {
       windowTitle: windowTitle,
       documentTitle: documentTitle,
       elementRole: role,
-      elementSubrole: focused ? attr(focused, 'AXSubrole') : null,
+      elementSubrole: subrole,
       elementLabel: focused ? labelOf(focused) : null,
       valueLength: valueLength,
       valueTail: secure ? null : valueTail,
@@ -654,7 +696,7 @@ function onKey(evt) {
     if (!appAllowed(front.name)) return;
     var flags = 0;
     try { flags = evt.modifierFlags; } catch (e) {}
-    var secure = secureInputActive();
+    var secure = focusedSecure();
 
     var chars = null;
     var base = null;

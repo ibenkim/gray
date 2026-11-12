@@ -14,8 +14,25 @@ const CMD = 1 << 20
 
 class Exit extends Error {}
 
-function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = []) {
+type SecureOpts = {
+  /** Focused / clicked element identity (both bridges); defaults keep earlier tests unchanged. */
+  role?: string
+  subrole?: string
+  secureInput?: boolean
+  /** IsSecureEventInputEnabled cannot be bound: the check is unavailable. */
+  bindFails?: boolean
+  /** Native AX lookup of this attribute fails (kAXErrorCannotComplete). */
+  failAttr?: string
+  /** The element provably has no subrole (kAXErrorNoValue), like most ordinary fields. */
+  noSubrole?: boolean
+  /** Native AX read succeeds but returns a value that cannot be converted to a string. */
+  opaqueAttr?: string
+}
+
+function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = [], opts: SecureOpts = {}) {
   const env = {
+    /** AXValue reads through either bridge (content of a text field). */
+    valueReads: 0,
     front,
     /** Pasteboard: changeCount is metadata; stringForType/types are content reads. */
     pb: 7,
@@ -40,7 +57,7 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
     },
     NSFileHandle: { fileHandleWithStandardOutput: { writeData: (t: string) => env.lines.push(JSON.parse(t)) } },
     NSString: { alloc: { initWithUTF8String: (t: string) => ({ dataUsingEncoding: () => t.trim() }) } },
-    IsSecureEventInputEnabled: () => false,
+    IsSecureEventInputEnabled: () => opts.secureInput === true,
     NSPasteboardTypeString: 'public.utf8-plain-text',
     NSPasteboard: {
       generalPasteboard: {
@@ -82,7 +99,15 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
     AXUIElementCopyAttributeValue: (_el: unknown, name: string, out: unknown[]) => {
       env.reads += 1
       if (name === 'AXParent' || name === 'AXFrame' || name === 'AXEnabled') return -1
-      out[0] = name === 'AXRole' ? 'AXButton' : 'Synthetic label'
+      if (name === opts.failAttr) return -25204
+      if (name === opts.opaqueAttr) {
+        out[0] = {}
+        return 0
+      }
+      if (name === 'AXSubrole' && opts.noSubrole) return -25212
+      if (name === 'AXValue') env.valueReads += 1
+      if (name === 'AXSubrole' && opts.subrole) out[0] = opts.subrole
+      else out[0] = name === 'AXRole' ? (opts.role ?? 'AXButton') : 'Synthetic label'
       return 0
     },
     NSEvent: {
@@ -115,7 +140,13 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
     }
   }
   const $: any = new Proxy(function () {}, { get: (_t, p: string) => (p in known ? known[p] : deep), apply: () => deep })
-  const ObjC = { import: () => {}, bindFunction: () => {}, unwrap: (v: unknown) => v }
+  const ObjC = {
+    import: () => {},
+    bindFunction: () => {
+      if (opts.bindFails) throw new Error('unavailable')
+    },
+    unwrap: (v: unknown) => v
+  }
   const Ref = () => [] as unknown[]
   /** System Events: process metadata is free; windows and attributes are content reads. */
   const element = (): any => ({
@@ -123,7 +154,9 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
       byName: (n: string) => {
         env.reads += 1
         if (n === 'AXParent' || n === 'AXSelectedRows' || n === 'AXSelectedChildren' || n === 'AXChildren') return null
-        return { value: () => (n === 'AXRole' ? 'AXTextField' : n === 'AXValue' ? 'synthetic typed value' : 'Synthetic title') }
+        if (n === 'AXValue') env.valueReads += 1
+        if (n === 'AXSubrole' && opts.subrole) return { value: () => opts.subrole }
+        return { value: () => (n === 'AXRole' ? (opts.role ?? 'AXTextField') : n === 'AXValue' ? 'synthetic typed value' : 'Synthetic title') }
       }
     }
   })
@@ -378,5 +411,51 @@ describe('M3-B copy provenance (actual JXA sensor source, synthetic pasteboard)'
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('M8-A secure fields (actual JXA sensor source, synthetic bridge)', () => {
+  /** A sample, a key and a click on the focused element; what was read and emitted. */
+  function secureRun(opts: SecureOpts) {
+    const s = sensor(FULL_SCREEN, CHROME, [], opts)
+    s.env.elementApp = 'Google Chrome'
+    s.key()
+    s.click()
+    const line = (k: string) => s.env.lines.find((l) => l.k === k)!
+    return { s, ax: line('ax'), key: line('key'), click: line('click') }
+  }
+
+  it.each([
+    ['secure subrole on an ordinary text field', { role: 'AXTextField', subrole: 'AXSecureTextField' }],
+    ['secure role', { role: 'AXSecureTextField' }],
+    ['global secure input', { secureInput: true }],
+    ['unavailable secure-input check (fails closed)', { bindFails: true }],
+    ['focused element lookup fails', { role: 'AXTextField', failAttr: 'AXFocusedUIElement' }],
+    ['role lookup fails', { role: 'AXTextField', failAttr: 'AXRole' }],
+    ['subrole lookup fails', { role: 'AXTextField', failAttr: 'AXSubrole' }],
+    ['role read succeeds but cannot be converted', { role: 'AXTextField', opaqueAttr: 'AXRole' }],
+    ['subrole read succeeds but cannot be converted', { role: 'AXTextField', opaqueAttr: 'AXSubrole' }]
+  ] as Array<[string, SecureOpts]>)('%s: no value, length, tail or key characters are read', (_name, opts) => {
+    const { s, ax, key, click } = secureRun(opts)
+    expect(s.charReads).toBe(0)
+    expect(ax).toMatchObject({ secure: true, valueLength: null, valueTail: null })
+    expect(key).toMatchObject({ secure: true, chars: null, base: null })
+    if (opts.failAttr === 'AXFocusedUIElement') {
+      // Only focus is unknown; the clicked element's own role/subrole prove it ordinary.
+      expect(s.env.valueReads).toBe(1)
+    } else {
+      expect(s.env.valueReads).toBe(0)
+      expect(click.valueLength).toBeNull()
+    }
+  })
+
+  it.each([
+    ['with a subrole', {}],
+    ['with no subrole (provably absent)', { noSubrole: true }]
+  ])('an ordinary text field %s is still read (non-hollow)', (_n, extra) => {
+    const { s, ax, key } = secureRun({ role: 'AXTextField', ...extra })
+    expect(s.env.valueReads).toBeGreaterThan(0)
+    expect(ax).toMatchObject({ secure: false, valueTail: 'synthetic typed value' })
+    expect(key).toMatchObject({ secure: false, chars: 'c' })
   })
 })

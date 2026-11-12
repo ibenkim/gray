@@ -402,6 +402,30 @@ export async function polishSession(
         }
         break
       }
+      case 'credential_entered': {
+        // Only that a credential was entered: no value to replay, so it is never a literal fill.
+        const label =
+          event.data?.elementLabel ||
+          event.target?.accessibleLabel ||
+          event.target?.visibleLabel
+        const submitKey = event.data?.submitKey
+        const draft: ActionDraft = {
+          text: label ? `Entered a password in ${label}` : 'Entered a password',
+          category: 'input',
+          timestamp: event.timestamp,
+          sourceEventIds: [event.eventId],
+          appName: event.data?.appName,
+          documentTitle: event.data?.documentTitle,
+          elementLabel: label,
+          elementRole: event.data?.elementRole,
+          inputKind: 'sensitive',
+          semanticOp: submitKey === 'Return' ? 'submit' : undefined,
+          targetResolution: resolveTargetResolution({ role: event.data?.elementRole, label })
+        }
+        foldPendingFocus(draft, ts)
+        push(draft)
+        break
+      }
       case 'text_input': {
         const typed = event.data?.typedText
         const label =

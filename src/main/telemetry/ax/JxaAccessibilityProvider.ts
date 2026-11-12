@@ -174,7 +174,10 @@ const NAVIGATION_KEYS = new Set([115, 116, 119, 121, 123, 124, 125, 126])
 
 type TypingBuffer = {
   chars: string[]
+  /** Internal "entry is non-empty" gate (includes edits); never emitted. */
   keyCount: number
+  /** A secure-field entry: holds no characters and flushes as credential_entered. */
+  secure?: boolean
   contextKey: string
   appName?: string
   appBundleId?: string
@@ -526,8 +529,13 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       .slice(0, 8)
     const errorState = sanitizeLabel(sample.errorState ?? undefined)
     const elementBounds = sanitizeBounds(sample.bounds)
+    const secure =
+      sample.secure === true ||
+      elementRole === 'AXSecureTextField' ||
+      elementSubrole === 'AXSecureTextField'
+    // A secure field never yields a length, even if a sensor reported one.
     const valueLength =
-      typeof sample.valueLength === 'number' && sample.valueLength >= 0
+      !secure && typeof sample.valueLength === 'number' && sample.valueLength >= 0
         ? sample.valueLength
         : undefined
 
@@ -559,8 +567,10 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       documentTitle,
       elementRole,
       elementLabel,
-      secure: sample.secure === true || elementRole === 'AXSecureTextField'
+      secure
     }
+    // The open entry belongs to this same target (a different one was flushed above).
+    if (secure) this.secureOpenEntry()
 
     if (nextContextKey !== this.lastFocusKey) {
       this.lastFocusKey = nextContextKey
@@ -573,12 +583,13 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           visibleLabel: elementLabel,
           appName,
           appBundleId,
-          fieldType: elementRole && TEXT_ROLES.has(elementRole) ? 'text' : undefined
+          fieldType: secure ? 'password' : elementRole && TEXT_ROLES.has(elementRole) ? 'text' : undefined
         },
         data: {
           ...baseData,
-          field:
-            elementRole && TEXT_ROLES.has(elementRole)
+          field: secure
+            ? { label: elementLabel, fieldType: 'password', valueCategory: 'redacted' }
+            : elementRole && TEXT_ROLES.has(elementRole)
               ? {
                   label: elementLabel,
                   fieldType: 'text',
@@ -831,6 +842,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     const secure = event.secure === true || this.context.secure
     const isChord = event.cmd === true || event.ctrl === true
     const code = typeof event.code === 'number' ? event.code : -1
+    // Before any path (chord, submit, idle, Stop) can flush the open entry as text.
+    if (secure) this.secureOpenEntry()
 
     if (isChord) {
       // A chord usually ends an entry (Cmd+Enter sends, Cmd+S saves).
@@ -857,11 +870,15 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     }
 
     if (secure) {
-      // Never buffer characters typed into a password field.
-      if (this.typing) {
-        this.typing.redacted = true
-        this.flushTyping()
-      }
+      // Never buffer characters typed into a password field: only that a credential was entered.
+      // Characters already buffered for this same field (focus race) are discarded, not emitted.
+      const buffer = this.ensureTyping(event)
+      buffer.secure = true
+      buffer.chars = []
+      buffer.keyCount += 1
+      if (code === KEY_RETURN || code === KEY_KEYPAD_ENTER) this.flushTyping('Return')
+      else if (code === KEY_TAB) this.flushTyping('Tab')
+      else this.armTypingTimer()
       return
     }
 
@@ -1112,6 +1129,13 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     })
   }
 
+  /** Evidence the open entry is secure: discard its characters; it flushes as credential_entered. */
+  private secureOpenEntry(): void {
+    if (!this.typing || this.typing.secure) return
+    this.typing.secure = true
+    this.typing.chars = []
+  }
+
   private countKey(event: JxaKeyEvent): void {
     if (!this.typing) return
     if (event.repeat === true) return
@@ -1165,6 +1189,31 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     if (!buffer || !this.onEvent) return
     if (buffer.keyCount === 0) return
 
+    if (buffer.secure) {
+      this.onEvent({
+        type: 'credential_entered',
+        startedAt: buffer.startedAt,
+        occurredAt: submitKey ? this.now() : buffer.lastAt,
+        target: {
+          role: buffer.elementRole,
+          accessibleLabel: buffer.elementLabel,
+          visibleLabel: buffer.elementLabel,
+          appName: buffer.appName,
+          appBundleId: buffer.appBundleId,
+          fieldType: 'password'
+        },
+        data: {
+          appName: buffer.appName,
+          appBundleId: buffer.appBundleId,
+          documentTitle: buffer.documentTitle,
+          elementRole: buffer.elementRole,
+          elementLabel: buffer.elementLabel,
+          submitKey
+        }
+      })
+      return
+    }
+
     const { text, redacted } = sanitizeTypedText(buffer.chars.join(''))
     if (!text && !submitKey) return
 
@@ -1190,7 +1239,6 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         elementLabel: buffer.elementLabel,
         typedText: text,
         typedTextRedacted: redacted || buffer.redacted ? true : undefined,
-        keyCount: buffer.keyCount,
         submitKey
       }
     })

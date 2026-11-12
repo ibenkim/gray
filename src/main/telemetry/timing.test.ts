@@ -28,7 +28,7 @@ const { InMemoryTelemetryStore } = await import('./store/InMemoryTelemetryStore'
 const { FileTelemetryStore } = await import('./store/FileTelemetryStore')
 const { createWorkflowModelInput } = await import('./modelInput')
 const { JxaAccessibilityProvider } = await import('./ax/JxaAccessibilityProvider')
-const { prepareReview } = await import('./uploadReview')
+const { prepareReview, reviewDigest, validateApproval, REVIEW_POLICY_VERSION } = await import('./uploadReview')
 
 afterEach(() => {
   vi.useRealTimers()
@@ -361,5 +361,73 @@ describe('M6-B: occurrence time, sequencing owner, audio window, candidates', ()
     expect(p.segments).toHaveLength(1)
     const legacy = await polish(events.map((e) => ({ ...e, schemaVersion: LEGACY_EVENT_SCHEMA_VERSION })))
     expect(legacy.segmentCandidates).toBeUndefined()
+  })
+})
+
+describe('M8-A: secure evidence through persistence and prepared review', () => {
+  function fakeSensor() {
+    const provider = new JxaAccessibilityProvider()
+    provider.start = (onEvent, _scope, clock) => {
+      provider['onEvent'] = onEvent
+      if (clock) provider['now'] = clock
+    }
+    provider.stop = async () => {}
+    return provider
+  }
+  const ENTRY = { appName: 'FixtureApp', elementRole: 'AXTextField', elementLabel: 'Entry', selectedLabels: [] }
+
+  async function record(after: (s: InstanceType<typeof JxaAccessibilityProvider>) => void) {
+    const sensor = fakeSensor()
+    const store = new FileTelemetryStore(mkdtempSync(join(tmpdir(), 'gray-m8a-')), { isPackaged: false, isDev: true })
+    const recorder = new TelemetryRecorder(store, { interaction: sensor })
+    const { sessionId } = await recorder.startRecording({})
+    sensor.emitFromSample(ENTRY)
+    for (const ch of 'fixture') sensor.handleKey({ code: 0, chars: ch, base: ch, app: 'FixtureApp' })
+    after(sensor)
+    await recorder.stopRecording()
+    await store.updateDelivery(sessionId!, (d) => ({ ...d!, save: { state: 'complete' } }), { captureStatus: 'stopped' })
+    return { store, sessionId: sessionId! }
+  }
+
+  it.each([
+    ['a later sample shows the same target is secure, then Stop', (s: InstanceType<typeof JxaAccessibilityProvider>) =>
+      s.emitFromSample({ ...ENTRY, elementSubrole: 'AXSecureTextField', secure: true })],
+    ['a secure chord (Cmd+Return)', (s: InstanceType<typeof JxaAccessibilityProvider>) =>
+      s.handleKey({ code: 36, chars: null, base: null, cmd: true, secure: true, app: 'FixtureApp' })]
+  ] as const)('%s: characters never reach storage or the review', async (_name, after) => {
+    const { store, sessionId } = await record(after)
+    const events = await store.readSessionEvents(sessionId)
+    expect(events.some((e) => e.type === 'text_input')).toBe(false)
+    expect(events.filter((e) => e.type === 'credential_entered')).toHaveLength(1)
+    const review = await prepareReview(store, sessionId, 'test-model')
+    expect(review).toMatchObject({ ok: true })
+    const all = JSON.stringify({ events, review })
+    expect(all).not.toContain('fixture')
+    // The review keeps the step, as a sensitive input with no literal.
+    expect((review as { review: { body: { acts: unknown[] } } }).review.body.acts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ e: 'Entry', k: 'sensitive' })])
+    )
+  })
+
+  it('ordinary input is still recorded and reviewed (control)', async () => {
+    const { store, sessionId } = await record(() => {})
+    const review = await prepareReview(store, sessionId, 'test-model')
+    expect(JSON.stringify(review)).toContain('fixture')
+  })
+
+  it('a review prepared under the previous privacy policy is stale at approval and is re-prepared', async () => {
+    const { store, sessionId } = await record(() => {})
+    const current = (await prepareReview(store, sessionId, 'test-model')) as { ok: true; review: any }
+    expect(await validateApproval(store, sessionId, current.review.revision, current.review.digest, 'test-model'))
+      .toMatchObject({ ok: true })
+    // The same immutable review as an older build wrote it: valid digest, older policy.
+    const { digest: _d, revision, preparedAt, ...content } = current.review
+    const old = { ...content, policyVersion: 'm1hf-text-1' }
+    const oldReview = { ...old, revision, preparedAt, digest: reviewDigest(old) }
+    await store.saveDeliveryArtifact(sessionId, 'review', oldReview)
+    expect(await validateApproval(store, sessionId, revision, oldReview.digest, 'test-model'))
+      .toMatchObject({ ok: false, code: 'REVIEW_STALE' })
+    const again = (await prepareReview(store, sessionId, 'test-model')) as { ok: true; review: any }
+    expect(again.review).toMatchObject({ policyVersion: REVIEW_POLICY_VERSION, revision: revision + 1 })
   })
 })

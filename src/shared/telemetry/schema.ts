@@ -27,6 +27,11 @@ export const TelemetryEventTypeSchema = z.enum([
   'click',
   'scroll',
   'text_input',
+  /**
+   * Input into a secure field (password role/subrole or global secure input). Target only:
+   * never a value, length, hash or key count.
+   */
+  'credential_entered',
   'field_completed',
   'selection_changed',
   'form_submitted',
@@ -352,7 +357,7 @@ export const TelemetryEventDataSchema = z
     typedText: z.string().max(500).optional(),
     /** True when redaction removed part of the typed text. */
     typedTextRedacted: z.boolean().optional(),
-    /** Physical key presses behind a text_input event (includes edits). */
+    /** Legacy (pre-M8) only: never written now and stripped on every read and export. */
     keyCount: z.number().int().nonnegative().optional(),
     /** Key that ended the entry, e.g. "Return" or "Tab". */
     submitKey: z.string().max(24).optional(),

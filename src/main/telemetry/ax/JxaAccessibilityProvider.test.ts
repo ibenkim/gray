@@ -190,8 +190,8 @@ describe('JxaAccessibilityProvider typing capture', () => {
 
     const typed = events.find((e) => e.type === 'text_input')
     expect(typed?.data?.typedText).toBe('hello')
-    // keyCount counts physical presses, including the correction.
-    expect(typed?.data?.keyCount).toBe(7)
+    // M8: key counts are never emitted.
+    expect(typed?.data).not.toHaveProperty('keyCount')
   })
 
   it('never buffers characters typed into a secure field', () => {
@@ -215,6 +215,56 @@ describe('JxaAccessibilityProvider typing capture', () => {
     provider.handleKey({ code: 0, chars: 's', base: 's', secure: true })
     provider.flush()
     expect(events.some((e) => e.type === 'text_input')).toBe(false)
+  })
+
+  describe('M8-A credential_entered', () => {
+    const SAFE_DATA_KEYS = ['appBundleId', 'appName', 'documentTitle', 'elementLabel', 'elementRole', 'submitKey']
+
+    it.each([
+      ['secure role', { elementRole: 'AXSecureTextField' }],
+      ['secure subrole', { elementRole: 'AXTextField', elementSubrole: 'AXSecureTextField' }],
+      ['sensor secure flag', { elementRole: 'AXTextField', secure: true }]
+    ])('%s: one target-only event, no value/length/count anywhere', (_n, field) => {
+      const { provider, events } = harness()
+      provider.emitFromSample({ appName: 'Safari', elementLabel: 'Password', valueLength: 7, selectedLabels: [], ...field })
+      for (const ch of 'hunter2') provider.handleKey(char(ch))
+      provider.handleKey(key({ code: 36 })) // Return
+      const focus = events.find((e) => e.type === 'focus_changed')!
+      expect(focus.data?.field).toEqual({ label: 'Password', fieldType: 'password', valueCategory: 'redacted' })
+      expect(events.some((e) => e.type === 'text_input')).toBe(false)
+      const creds = events.filter((e) => e.type === 'credential_entered')
+      expect(creds).toHaveLength(1)
+      expect(Object.keys(creds[0].data ?? {}).filter((k) => creds[0].data?.[k as never] !== undefined).sort())
+        .toEqual(SAFE_DATA_KEYS.filter((k) => k !== 'documentTitle' && k !== 'appBundleId'))
+      expect(creds[0].data?.submitKey).toBe('Return')
+      expect(creds[0].target).toMatchObject({ accessibleLabel: 'Password', fieldType: 'password' })
+      const all = JSON.stringify(events)
+      expect(all).not.toContain('hunter')
+      expect(all).not.toMatch(/"(valueLength|keyCount|charCountDelta)"/)
+    })
+
+    it('focus race: characters buffered before the field is known secure are discarded, not emitted', () => {
+      const { provider, events } = harness()
+      provider.emitFromSample({ appName: 'Safari', elementRole: 'AXTextField', elementLabel: 'Password', selectedLabels: [] })
+      for (const ch of 'hun') provider.handleKey(char(ch))
+      // The sensor's per-key check now sees the secure field (no chars are sent).
+      for (let i = 0; i < 4; i++) provider.handleKey({ code: 0, chars: null, base: null, secure: true })
+      provider.flush()
+      expect(events.some((e) => e.type === 'text_input')).toBe(false)
+      expect(events.filter((e) => e.type === 'credential_entered')).toHaveLength(1)
+      expect(JSON.stringify(events)).not.toContain('hun')
+    })
+
+    it('typing in an ordinary field before a secure one stays a normal text_input', () => {
+      const { provider, events } = harness()
+      provider.emitFromSample({ appName: 'Safari', elementRole: 'AXTextField', elementLabel: 'Email', selectedLabels: [] })
+      for (const ch of 'ben') provider.handleKey(char(ch))
+      provider.emitFromSample({ appName: 'Safari', elementRole: 'AXSecureTextField', elementLabel: 'Password', selectedLabels: [] })
+      provider.handleKey({ code: 0, chars: null, base: null, secure: true })
+      provider.flush()
+      expect(events.find((e) => e.type === 'text_input')?.data?.typedText).toBe('ben')
+      expect(events.filter((e) => e.type === 'credential_entered')).toHaveLength(1)
+    })
   })
 
   it('starts a new entry when focus moves to another element', () => {

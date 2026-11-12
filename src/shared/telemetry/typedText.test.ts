@@ -113,3 +113,50 @@ describe('shouldDropEvent for text_input', () => {
     expect(shouldDropEvent(evt({ data: { typedText: 'hello' } }))).toBe(false)
   })
 })
+
+describe('M8-A: legacy key counts and secure lengths never leave redaction', () => {
+  it('strips keyCount from any event, including legacy rows', () => {
+    const e = redactEvent(evt({ data: { typedText: 'hello', keyCount: 7 } }))
+    expect(e.data).not.toHaveProperty('keyCount')
+    expect(e.data?.typedText).toBe('hello')
+  })
+
+  it.each([
+    ['secure role', { elementRole: 'AXSecureTextField' }],
+    ['secure subrole', { elementRole: 'AXTextField', elementSubrole: 'AXSecureTextField' }]
+  ])('%s: legacy field length, paste length and clipboard hash are removed', (_n, ident) => {
+    const focus = redactEvent(
+      evt({
+        type: 'focus_changed',
+        data: { ...ident, field: { label: 'Password', fieldType: 'text', completed: true, valueCategory: 'text', valueLength: 9 } }
+      })
+    )
+    expect(focus.data?.field).toEqual({ label: 'Password', fieldType: 'text', valueCategory: 'redacted' })
+    const paste = redactEvent(
+      evt({
+        type: 'paste_detected',
+        data: {
+          ...ident,
+          charCountDelta: 9,
+          matchedClipboardHash: 'abc123',
+          clipboard: { contentType: 'text', charCount: 9, contentHash: 'abc123' }
+        }
+      })
+    )
+    expect(paste.data).not.toHaveProperty('charCountDelta')
+    expect(paste.data).not.toHaveProperty('matchedClipboardHash')
+    expect(paste.data).not.toHaveProperty('clipboard')
+  })
+
+  it('credential_entered never carries typed text', () => {
+    const e = redactEvent(evt({ type: 'credential_entered', data: { elementLabel: 'PIN', typedText: '1234' } }))
+    expect(e.data).not.toHaveProperty('typedText')
+  })
+
+  it('an ordinary field keeps its length', () => {
+    const e = redactEvent(
+      evt({ type: 'focus_changed', data: { elementRole: 'AXTextField', field: { label: 'Subject', valueCategory: 'text', valueLength: 9 } } })
+    )
+    expect(e.data?.field?.valueLength).toBe(9)
+  })
+})

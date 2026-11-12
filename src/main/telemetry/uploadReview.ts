@@ -36,7 +36,11 @@ import { extractWorkflowVariables } from './variables'
 
 export const REVIEW_PURPOSE = 'interpretation_text' as const
 export const REVIEW_PROVIDER = 'openai' as const
-export const REVIEW_POLICY_VERSION = 'm1hf-text-1'
+/**
+ * Bump whenever what may be sent changes: a review prepared under an older policy is stale at
+ * approval and must be prepared again (M8-A: secure-field values, lengths and key counts).
+ */
+export const REVIEW_POLICY_VERSION = 'm8a-secure-1'
 export const PROMPT_VERSION = `c${CLASSIFY_INSTRUCTIONS_VERSION}-e${EXTRACT_INSTRUCTIONS_VERSION}-w${WORKFLOW_INSTRUCTIONS_VERSION}-${sha256(
   [CLASSIFY_INSTRUCTIONS, EXTRACT_INSTRUCTIONS, WORKFLOW_INSTRUCTIONS].join('\0')
 ).slice(0, 8)}`

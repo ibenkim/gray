@@ -1029,8 +1029,9 @@ export class TelemetryRecorder {
     if (!this.admits(gen)) return
     // Sequencing owner for provider input too: any buffered typing happened before this
     // partial (scroll, same-field click, …), so it is recorded first. The flush only emits
-    // text_input, which re-enters here without flushing again.
-    if (partial.type !== 'text_input' && !this.ingesting) this.flushInteraction()
+    // text_input / credential_entered, which re-enter here without flushing again.
+    const fromFlush = partial.type === 'text_input' || partial.type === 'credential_entered'
+    if (!fromFlush && !this.ingesting) this.flushInteraction()
     this.ingesting = true
     try {
       this.ingestAdmitted(partial)

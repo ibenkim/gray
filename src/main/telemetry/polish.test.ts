@@ -118,6 +118,27 @@ describe('polishSession', () => {
     expect(input?.elementLabel).toBe('Message')
   })
 
+  it('M8-A: a credential entry is a sensitive step with no literal, and legacy key counts never reach it', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    await store.appendEvents('tsess_polish', [
+      evt({
+        type: 'credential_entered',
+        eventId: 'c1',
+        sequence: 0,
+        target: { accessibleLabel: 'Password', fieldType: 'password' },
+        data: { appName: 'Safari', elementLabel: 'Password', elementRole: 'AXSecureTextField', submitKey: 'Return' }
+      })
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    const step = polished.actions.find((a) => a.category === 'input')!
+    expect(step).toMatchObject({ text: 'Entered a password in Password', inputKind: 'sensitive', semanticOp: 'submit' })
+    expect(step.typedText).toBeUndefined()
+    expect(step.l1Op).toBeUndefined()
+    expect(JSON.stringify(polished)).not.toMatch(/keyCount|valueLength/)
+  })
+
   it('records a bare submit keypress when the text redacted away', async () => {
     const store = new InMemoryTelemetryStore()
     await store.createSession({ sessionId: 'tsess_polish' })
