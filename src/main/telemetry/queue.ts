@@ -52,8 +52,9 @@ const DRAIN_ATTEMPTS = 3
  *
  * Durable outbox (M7): bound to the store's root, versioned, written off the enqueue path by
  * one serialized async writer that coalesces to the latest snapshot. Crash window: events
- * enqueued since the last completed snapshot. A crash always leaves its session without a
- * terminal event, so it is reported incomplete — never a successful save.
+ * enqueued since the last completed snapshot. A crash before Stop writes no save outcome, so the
+ * session is recovered incomplete; a later Retry Save completes it only once every event id
+ * recorded as pending has settled.
  */
 export class TelemetryQueue {
   private queue: Queued[] = []
