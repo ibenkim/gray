@@ -14,11 +14,17 @@ export function normalizeLiteral(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
-/** Literals the compiler may replay — only evidence, never model invention. */
+/** Typed text that may be replayed: the committed field value, never key reconstruction. */
+export function exactTypedText(a: PolishedAction): string | null {
+  return a.textQuality === 'exact' && a.typedText?.trim() ? a.typedText.trim() : null
+}
+
+/** Literals the compiler may replay — only exact evidence, never model invention. */
 export function allowedLiteralsFromPolished(polished: PolishedSession): Set<string> {
   const out = new Set<string>()
   for (const a of polished.actions) {
-    if (a.typedText?.trim()) out.add(a.typedText.trim())
+    const typed = exactTypedText(a)
+    if (typed) out.add(typed)
     const q = searchQueryFromTitle(a.documentTitle)
     if (q) out.add(q)
   }
@@ -47,7 +53,8 @@ export function pickLiteralFromEvidence(
   for (const id of evidenceIds) {
     const a = byEvent.get(id)
     if (!a) continue
-    if (a.typedText?.trim()) lastTyped = a.typedText.trim()
+    const typed = exactTypedText(a)
+    if (typed) lastTyped = typed
     const q = searchQueryFromTitle(a.documentTitle)
     if (q) searchQuery = q
   }

@@ -141,6 +141,8 @@ const ACTIVATION_WINDOW_MS = 1500
 const FIELD_SETTLE_MS = 800
 /** Typing is flushed into one text_input event after this much quiet. */
 const TYPING_IDLE_MS = 1200
+/** Bound on one entry's buffered characters; beyond it the entry is kept but uncertain. */
+const MAX_BUFFER_CHARS = 2000
 const MAX_CONSECUTIVE_FAULTS = 5
 
 /** macOS virtual key codes that are edits or navigation rather than characters. */
@@ -178,6 +180,17 @@ type TypingBuffer = {
   keyCount: number
   /** A secure-field entry: holds no characters and flushes as credential_entered. */
   secure?: boolean
+  /** Buffered character count (bounded by MAX_BUFFER_CHARS). */
+  size?: number
+  /** Input was dropped at the bound: the key text is incomplete. */
+  overflow?: boolean
+  /** Field identity (label + ancestor path + position) when the entry began; absent = unprovable. */
+  fieldId?: string
+  /** A sample showed a different field under the same label while the entry was open. */
+  identityBroken?: boolean
+  /** Characters came from key presses / from AX value deltas (no keys observed). */
+  fromKeys?: boolean
+  fromAx?: boolean
   contextKey: string
   appName?: string
   appBundleId?: string
@@ -235,6 +248,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     elementRole?: string
     elementLabel?: string
     secure: boolean
+    /** Label + ancestor path + position; absent when the sample has no bounds. */
+    fieldId?: string
   } = { secure: false }
 
   private typing: TypingBuffer | null = null
@@ -244,6 +259,11 @@ export class JxaAccessibilityProvider implements InteractionProvider {
   private readonly isAccessibilityTrusted: () => boolean
   /** Baseline for AX valueTail diffs (fallback when NSEvent keys never arrive). */
   private lastValueLen: { contextKey: string; length: number } | null = null
+  /**
+   * The focused ordinary field's complete AXValue (only when it fits the sensor's tail window),
+   * with when it was observed: the committed value an entry is checked against at flush.
+   */
+  private lastFieldValue: { fieldId?: string; value: string | null; at: number } | null = null
   /** When key events are flowing, ignore valueTail to avoid double-counting. */
   /** Monotonic ms of the last key event; null until one arrives. */
   private lastKeyEventAt: number | null = null
@@ -561,14 +581,20 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     if (this.typing && this.typing.contextKey !== nextContextKey) {
       this.flushTyping()
     }
+    const fieldId = elementBounds
+      ? [nextContextKey, elementPath.join('>'), elementBounds.x, elementBounds.y].join('|')
+      : undefined
     this.context = {
       appName,
       appBundleId,
       documentTitle,
       elementRole,
       elementLabel,
-      secure
+      secure,
+      fieldId
     }
+    // Same label, different field (path/position): the open entry can no longer be confirmed.
+    if (this.typing && (!fieldId || this.typing.fieldId !== fieldId)) this.typing.identityBroken = true
     // The open entry belongs to this same target (a different one was flushed above).
     if (secure) this.secureOpenEntry()
 
@@ -633,6 +659,16 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     }
 
     this.ingestValueTail(sample, nextContextKey)
+    const complete =
+      !secure &&
+      typeof sample.valueTail === 'string' &&
+      typeof sample.valueLength === 'number' &&
+      sample.valueTail.length === sample.valueLength
+    this.lastFieldValue = {
+      fieldId,
+      value: complete ? (sample.valueTail as string) : null,
+      at: this.now()
+    }
 
     const selectionKey = selectedLabels.join('|')
     if (selectionKey && selectionKey !== this.lastSelectionKey) {
@@ -783,7 +819,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     }
 
     const buffer = this.ensureTypingFromContext()
-    buffer.chars.push(appended)
+    buffer.fromAx = true
+    this.pushChars(buffer, appended)
     buffer.keyCount += Math.max(1, appended.length)
     this.armTypingTimer()
   }
@@ -810,6 +847,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
+      fieldId: this.context.fieldId,
       startedAt: this.now(),
       lastAt: this.now()
     }
@@ -882,6 +920,15 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       return
     }
 
+    // Shift+Return in a multi-line field is a newline, not a submit.
+    if (code === KEY_RETURN && event.shift === true && this.context.elementRole === 'AXTextArea') {
+      const buffer = this.ensureTyping(event)
+      buffer.keyCount += 1
+      buffer.fromKeys = true
+      this.pushChars(buffer, '\n')
+      this.armTypingTimer()
+      return
+    }
     if (code === KEY_RETURN || code === KEY_KEYPAD_ENTER) {
       this.countKey(event)
       if (this.typing && this.typing.keyCount > 0) {
@@ -912,7 +959,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     if (code === KEY_BACKSPACE) {
       const buffer = this.ensureTyping(event)
       buffer.keyCount += 1
-      buffer.chars.pop()
+      const popped = buffer.chars.pop()
+      if (popped) buffer.size = Math.max(0, (buffer.size ?? 0) - popped.length)
       this.armTypingTimer()
       return
     }
@@ -942,7 +990,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
 
     const buffer = this.ensureTyping(event)
     buffer.keyCount += 1
-    buffer.chars.push(printable)
+    buffer.fromKeys = true
+    this.pushChars(buffer, printable)
     this.armTypingTimer()
   }
 
@@ -1136,6 +1185,30 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     this.typing.chars = []
   }
 
+  /** Bounded append: past MAX_BUFFER_CHARS input is dropped and the entry marked incomplete. */
+  private pushChars(buffer: TypingBuffer, text: string): void {
+    const size = buffer.size ?? 0
+    if (size + text.length > MAX_BUFFER_CHARS) {
+      buffer.overflow = true
+      return
+    }
+    buffer.chars.push(text)
+    buffer.size = size + text.length
+  }
+
+  /**
+   * The same field's complete AXValue observed at or after the entry's last input. An entry is
+   * exact only when that committed value equals the key text: then the field held nothing else
+   * and nothing (IME, caret moves, selection replacement, autocomplete, overflow) changed it.
+   */
+  private committedValue(buffer: TypingBuffer): string | null {
+    // Only key input can be confirmed: an AX-delta entry would be compared with its own source.
+    if (!buffer.fromKeys || buffer.fromAx || buffer.identityBroken || !buffer.fieldId) return null
+    const field = this.lastFieldValue
+    if (!field || field.fieldId !== buffer.fieldId || field.at < buffer.lastAt) return null
+    return field.value ? field.value : null
+  }
+
   private countKey(event: JxaKeyEvent): void {
     if (!this.typing) return
     if (event.repeat === true) return
@@ -1164,6 +1237,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       elementRole: this.context.elementRole,
       elementLabel: this.context.elementLabel,
       redacted: false,
+      fieldId: this.context.fieldId,
       startedAt: this.now(),
       lastAt: this.now()
     }
@@ -1214,8 +1288,10 @@ export class JxaAccessibilityProvider implements InteractionProvider {
       return
     }
 
-    const { text, redacted } = sanitizeTypedText(buffer.chars.join(''))
+    const { text, redacted, truncated } = sanitizeTypedText(buffer.chars.join(''))
     if (!text && !submitKey) return
+    const committed = buffer.overflow || truncated ? null : this.committedValue(buffer)
+    const confirmed = committed != null && sanitizeTypedText(committed).text === text
 
     const role = buffer.elementRole
     this.onEvent({
@@ -1239,6 +1315,18 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         elementLabel: buffer.elementLabel,
         typedText: text,
         typedTextRedacted: redacted || buffer.redacted ? true : undefined,
+        ...(text
+          ? {
+              // Key text either way; the field value only ever confirms it.
+              textQuality: confirmed ? 'exact' : 'uncertain',
+              // Recorded only when known: mixed key/AX entries carry no method.
+              ...(buffer.fromKeys && !buffer.fromAx
+                ? { textSource: 'keys' }
+                : buffer.fromAx && !buffer.fromKeys
+                  ? { textSource: 'ax_value_delta' }
+                  : {})
+            }
+          : {}),
         submitKey
       }
     })

@@ -139,6 +139,24 @@ describe('polishSession', () => {
     expect(JSON.stringify(polished)).not.toMatch(/keyCount|valueLength/)
   })
 
+  it('M8-B: only an exact, unredacted, uncut entry is replayable text', async () => {
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_polish' })
+    await store.stopSession('tsess_polish')
+    const typed = (id: string, seq: number, typedText: string, extra: Record<string, unknown>) =>
+      evt({ type: 'text_input', eventId: id, sequence: seq * 10, data: { appName: 'TextEdit', elementLabel: `F${seq}`, elementRole: 'AXTextField', typedText, ...extra } })
+    await store.appendEvents('tsess_polish', [
+      typed('q1', 1, 'plain words', { textQuality: 'exact' }),
+      typed('q2', 2, 'mail ben@example.com', { textQuality: 'exact' }),
+      typed('q3', 3, 'y'.repeat(200), { textQuality: 'exact' }),
+      typed('q4', 4, 'helo', { textQuality: 'uncertain' }),
+      typed('q5', 5, 'legacy', {})
+    ])
+    const polished = await polishSession(store, 'tsess_polish')
+    const quality = polished.actions.filter((a) => a.typedText).map((a) => a.textQuality)
+    expect(quality).toEqual(['exact', 'uncertain', 'uncertain', 'uncertain', 'uncertain'])
+  })
+
   it('records a bare submit keypress when the text redacted away', async () => {
     const store = new InMemoryTelemetryStore()
     await store.createSession({ sessionId: 'tsess_polish' })

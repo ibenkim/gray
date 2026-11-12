@@ -267,6 +267,120 @@ describe('JxaAccessibilityProvider typing capture', () => {
     })
   })
 
+  describe('M8-B text quality', () => {
+    const BOUNDS = { x: 10, y: 10, width: 200, height: 20 }
+    const FIELD = { appName: 'TextEdit', elementRole: 'AXTextField', elementLabel: 'Name', selectedLabels: [], elementPath: ['Section A'], bounds: BOUNDS }
+    /** Provider on a controllable clock; `field(v)` is a sample of the same field's full value. */
+    function clocked() {
+      const h = harness()
+      let t = 0
+      h.provider['now'] = () => t
+      return {
+        ...h,
+        at: (ms: number) => void (t = ms),
+        field: (value: string, extra: Record<string, unknown> = {}) =>
+          h.provider.emitFromSample({ ...FIELD, valueTail: value, valueLength: value.length, ...extra }),
+        type: (text: string) => { for (const ch of text) h.provider.handleKey(char(ch)) },
+        entry: () => h.events.find((e) => e.type === 'text_input')?.data
+      }
+    }
+
+    it('exact when the field value read back after the last key equals the keys', () => {
+      const c = clocked()
+      c.field('')
+      c.at(100); c.type('hello')
+      c.at(300); c.field('hello')
+      c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: 'hello', textQuality: 'exact', textSource: 'keys' })
+    })
+
+    it.each([
+      ['the field shows something else (IME/autocomplete)', 'helo', 'hello'],
+      ['the field already held other text', 'there', 'Hi there']
+    ])('uncertain when %s; the key text is kept as evidence', (_n, keys, value) => {
+      const c = clocked()
+      c.field('')
+      c.at(100); c.type(keys)
+      c.at(300); c.field(value)
+      c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: keys, textQuality: 'uncertain' })
+    })
+
+    it('uncertain when the only field value was read before the last key', () => {
+      const c = clocked()
+      c.field('')
+      c.at(100); c.type('hell')
+      c.at(150); c.field('hell')
+      c.at(200); c.type('o')
+      c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: 'hello', textQuality: 'uncertain' })
+    })
+
+    it('uncertain when the value is unreadable (longer than the sensor window)', () => {
+      const c = clocked()
+      c.field('')
+      c.at(100); c.type('hello')
+      c.at(300); c.field('hello', { valueLength: 400 })
+      c.provider.flush()
+      expect(c.entry()?.textQuality).toBe('uncertain')
+    })
+
+    it('a long composition is bounded; the overflowing entry is uncertain', () => {
+      const c = clocked()
+      c.field('')
+      let maxBuffered = 0
+      for (let i = 0; i < 10_000; i++) {
+        c.provider.handleKey(char('x'))
+        maxBuffered = Math.max(maxBuffered, c.provider['typing']?.size ?? 0)
+      }
+      c.at(500); c.field('x'.repeat(100))
+      c.provider.flush()
+      console.log(`M8B-MEASURE ${JSON.stringify({ callbacks: 10_000, maxBufferedChars: maxBuffered })}`)
+      expect(maxBuffered).toBeLessThanOrEqual(2000)
+      expect(c.entry()?.textQuality).toBe('uncertain')
+    })
+
+    it('R1: a same-label field elsewhere cannot certify the entry (identity is path + position)', () => {
+      const c = clocked()
+      c.field('')
+      c.at(100); c.type('kan')
+      c.at(300); c.field('漢') // A's own committed value contradicts the keys
+      c.at(400); c.field('kan', { elementPath: ['Section B'], bounds: { ...BOUNDS, y: 200 } })
+      c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: 'kan', textQuality: 'uncertain' })
+    })
+
+    it('R1: without field bounds, identity is unprovable and nothing is exact', () => {
+      const c = clocked()
+      c.field('', { bounds: null })
+      c.at(100); c.type('hello')
+      c.at(300); c.field('hello', { bounds: null })
+      c.provider.flush()
+      expect(c.entry()?.textQuality).toBe('uncertain')
+    })
+
+    it('R2: an AX-only change (no keys) is never exact and records its real method', () => {
+      const c = clocked()
+      c.field('')
+      c.at(5_000); c.field('kan') // programmatic change; key monitors silent
+      c.at(9_000); c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: 'kan', textQuality: 'uncertain', textSource: 'ax_value_delta' })
+    })
+
+    it('Shift+Return in a multi-line field is a newline, kept through redaction', () => {
+      const c = clocked()
+      const area = { ...FIELD, elementRole: 'AXTextArea', elementLabel: 'Notes', bounds: BOUNDS }
+      c.provider.emitFromSample({ ...area, valueTail: '', valueLength: 0 })
+      c.at(100); c.type('one')
+      c.provider.handleKey(key({ code: 36, shift: true }))
+      c.type('two')
+      c.at(300); c.provider.emitFromSample({ ...area, valueTail: 'one\ntwo', valueLength: 7 })
+      c.provider.flush()
+      expect(c.entry()).toMatchObject({ typedText: 'one\ntwo', textQuality: 'exact' })
+      expect(c.entry()?.submitKey).toBeUndefined()
+    })
+  })
+
   it('starts a new entry when focus moves to another element', () => {
     const { provider, events } = harness()
     provider.emitFromSample({

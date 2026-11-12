@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   SCHEMA_VERSION,
   withWorkflowStepDefaults,
+  type AutomationOp,
   type ExtractedWorkflow,
   type PolishedSession
 } from '../../../shared/telemetry/schema'
@@ -1260,6 +1261,47 @@ describe('validateAndGroundScript', () => {
     expect(script.ops[0]?.literalText).toBe('how to use ai')
   })
 
+  it.each([
+    ['uncertain', 'uncertain' as const, null],
+    ['exact', 'exact' as const, 'quarterly report']
+  ])('M8-B: %s typed text %s', (_n, textQuality, expected) => {
+    const typedPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Typed into Name',
+          category: 'input',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_t'],
+          appName: 'TextEdit',
+          typedText: 'quarterly report',
+          textQuality
+        }
+      ]
+    }
+    // The extracted step quotes the captured text, as an interpretation model would.
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      variables: [],
+      steps: [{ order: 1, action: 'Type "quarterly report" into Name', category: 'data_entry', appName: 'TextEdit', evidenceEventIds: ['tevt_t'], confidence: 0.8 }]
+    }
+    const op = {
+      op: 'type_text' as const, stepOrder: 1, evidenceEventIds: ['tevt_t'], confidence: 0.8, timeoutMs: 10000,
+      label: 'Type name', appName: 'TextEdit', appBundleId: null, url: null, urlVariableKey: null, elementRole: null,
+      elementLabel: null, elementPath: null, chord: null, variableKey: null, literalText: 'quarterly report',
+      waitCondition: null, waitValue: null, prompt: null, clickX: null, clickY: null
+    }
+    const script = validateAndGroundScript({ ops: [op], warnings: [] }, wf, typedPolished)
+    if (expected) {
+      expect(script.ops[0]).toMatchObject({ op: 'type_text', literalText: expected })
+    } else {
+      // Never replayed as a literal (model-proposed or recovered); the user confirms it instead.
+      expect(script.ops[0]).toMatchObject({ op: 'manual', prompt: expect.stringContaining('Confirm the text') })
+      expect(script.ops.some((o) => o.op === 'type_text' || o.op === 'set_clipboard' || o.literalText)).toBe(false)
+    }
+  })
+
   it('fills set_clipboard literalText from in-memory clipboard map', () => {
     const clipPolished: PolishedSession = {
       ...polished,
@@ -1649,7 +1691,8 @@ describe('preferClickAtWhenGrounded / inject recorded inputs', () => {
           timestamp: '2026-07-29T04:28:47.000Z',
           sourceEventIds: ['tevt_type'],
           appName: 'Notes',
-          typedText: 'hello'
+          typedText: 'hello',
+          textQuality: 'exact'
         },
         {
           order: 2,
@@ -1744,5 +1787,82 @@ describe('preferClickAtWhenGrounded / inject recorded inputs', () => {
     expect(scrollIdx).toBeGreaterThanOrEqual(0)
     expect(clickIdx).toBeGreaterThan(scrollIdx)
     expect(withScroll[scrollIdx]?.scrollDelta).toBe(120)
+  })
+})
+
+describe('M8-B literal provenance through compile and save', () => {
+  const CONFIG = {
+    storage: 'file' as const,
+    devDir: '/tmp',
+    openaiApiKey: 'sk-abcdefghijklmnopqrstuvwxyz12',
+    openaiModel: 'gpt-test',
+    isDev: true,
+    isPackaged: false
+  }
+  const NULLS = {
+    confidence: 0.8, timeoutMs: 10000, appBundleId: null, url: null, urlVariableKey: null, elementRole: null,
+    elementLabel: null, elementPath: null, chord: null, variableKey: null, waitCondition: null, waitValue: null,
+    prompt: null, clickX: null, clickY: null
+  }
+
+  async function compileWith(opts: {
+    typedText: string
+    textQuality?: 'exact' | 'uncertain'
+    stepAction: string
+    op: 'type_text' | 'set_clipboard'
+    proposed: string
+  }) {
+    const p: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1, text: 'Typed into Name', category: 'input', timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_t'], appName: 'TextEdit', typedText: opts.typedText,
+          ...(opts.textQuality ? { textQuality: opts.textQuality } : {})
+        }
+      ]
+    }
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      variables: [],
+      steps: [wfStep({ order: 1, action: opts.stepAction, category: 'data_entry', appName: 'TextEdit', evidenceEventIds: ['tevt_t'], confidence: 0.8 })]
+    }
+    const store = new InMemoryTelemetryStore()
+    await store.createSession({ sessionId: 'tsess_auto' })
+    await store.stopSession('tsess_auto')
+    await store.savePolishedSession('tsess_auto', p)
+    const parse = vi.fn(async () => ({
+      output_parsed: {
+        ops: [{ ...NULLS, op: opts.op, stepOrder: 1, evidenceEventIds: ['tevt_t'], label: 'Enter', appName: 'TextEdit', literalText: opts.proposed }],
+        warnings: []
+      }
+    }))
+    await compileAutomationScript(store, CONFIG, 'tsess_auto', wf, p, { createClient: () => ({ responses: { parse } }) })
+    return store.automation.get('tsess_auto')!.script.ops
+  }
+  const literals = (ops: AutomationOp[]) => ops.filter((o) => o.literalText).map((o) => o.literalText)
+
+  it.each([
+    ['uncertain, generated quote changed', { textQuality: 'uncertain' as const, stepAction: 'Type "quarterly reports" into Name', op: 'type_text' as const, proposed: 'quarterly reports' }],
+    ['uncertain, changed quote as clipboard', { textQuality: 'uncertain' as const, stepAction: 'Type "quarterly reports" into Name', op: 'set_clipboard' as const, proposed: 'quarterly reports' }],
+    ['legacy (no quality), changed quote', { stepAction: 'Type "quarterly reports" into Name', op: 'type_text' as const, proposed: 'quarterly reports' }],
+    ['uncertain, rename recovery from step text', { textQuality: 'uncertain' as const, stepAction: 'Rename document to "quarterly report"', op: 'type_text' as const, proposed: 'quarterly report' }]
+  ])('R3 %s: no literal is saved; the step asks for confirmation', async (_n, o) => {
+    const ops = await compileWith({ typedText: 'quarterly report', ...o })
+    expect(literals(ops)).toEqual([])
+    expect(ops.some((op) => op.op === 'manual' && /Confirm the text/.test(op.prompt ?? ''))).toBe(true)
+  })
+
+  it.each([
+    ['newline changed', 'one\ntwo', 'one two'],
+    ['casing changed', 'CaseSensitive', 'casesensitive'],
+    ['trailing newline added', 'CaseSensitive', 'CaseSensitive\n'],
+    ['leading space added', 'CaseSensitive', ' CaseSensitive'],
+    ['control: exact proposal', 'one\ntwo', 'one\ntwo']
+  ])('R4 %s: the saved literal is the authoritative exact value', async (_n, typed, proposed) => {
+    for (const op of ['type_text', 'set_clipboard'] as const) {
+      const ops = await compileWith({ typedText: typed, textQuality: 'exact', stepAction: 'Enter Name', op, proposed })
+      expect(new Set(literals(ops)), op).toEqual(new Set([typed]))
+    }
   })
 })

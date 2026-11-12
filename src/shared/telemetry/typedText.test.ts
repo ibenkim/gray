@@ -22,9 +22,15 @@ describe('sanitizeTypedText', () => {
     expect(redacted).toBe(false)
   })
 
-  it('collapses newlines and control characters into spaces', () => {
-    const { text } = sanitizeTypedText('first line\nsecond\tline')
-    expect(text).toBe('first line second line')
+  it('keeps line breaks (M8-B); other controls and whitespace runs collapse to one space', () => {
+    expect(sanitizeTypedText('first line\r\nsecond\tline\u0007 end').text).toBe('first line\nsecond line end')
+    expect(sanitizeTypedText('a  \n\n\n\n  b').text).toBe('a\n\nb')
+    expect(sanitizeTypedText('café — naïve 日本語 ✓').text).toBe('café — naïve 日本語 ✓')
+  })
+
+  it('reports truncation', () => {
+    expect(sanitizeTypedText('x'.repeat(600))).toMatchObject({ truncated: true })
+    expect(sanitizeTypedText('short').truncated).toBeUndefined()
   })
 
   it('redacts email addresses', () => {

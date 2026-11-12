@@ -158,11 +158,14 @@ const DIGIT_GROUP_RE = /\d(?:[\d\s-]{7,}\d)?/g
 export function sanitizeTypedText(raw: string | undefined | null): {
   text?: string
   redacted: boolean
+  /** Cut at MAX_TYPED: the text is no longer the whole entry. */
+  truncated?: boolean
 } {
   if (raw == null) return { redacted: false }
 
-  // Normalize whitespace/control characters into single spaces.
-  let text = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+  // Keep line breaks (meaningful in multi-line fields); other controls become spaces and
+  // runs of horizontal whitespace collapse. Unicode is kept as typed.
+  let text = collapseSpaces(raw.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' '))
   if (!text) return { redacted: false }
 
   let redacted = false
@@ -184,14 +187,22 @@ export function sanitizeTypedText(raw: string | undefined | null): {
     return `${lead}[number]${tail}`
   })
 
-  text = text.replace(/\s+/g, ' ').trim()
+  text = collapseSpaces(text)
   if (!text) return { redacted }
 
   if (text.length > MAX_TYPED) {
-    text = `${text.slice(0, MAX_TYPED - 1)}…`
+    return { text: `${text.slice(0, MAX_TYPED - 1)}…`, redacted, truncated: true }
   }
 
   return { text, redacted }
+}
+
+function collapseSpaces(text: string): string {
+  return text
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 const TRACKING_PARAMS = new Set([

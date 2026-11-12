@@ -19,6 +19,7 @@ function action(partial: Partial<PolishedAction> & { order: number }): PolishedA
     elementLabel: partial.elementLabel,
     elementRole: partial.elementRole,
     typedText: partial.typedText,
+    textQuality: partial.textQuality,
     clipboard: partial.clipboard,
     inferred: partial.inferred,
     verified: partial.verified
@@ -36,14 +37,14 @@ describe('searchQueryFromTitle', () => {
 })
 
 describe('allowedLiteralsFromPolished', () => {
-  it('includes typedText and searchQuery, never invented strings', () => {
+  it('includes exact typedText and searchQuery, never invented strings', () => {
     const polished: PolishedSession = {
       sessionId: 'tsess_x',
       schemaVersion: 1,
       polishedAt: new Date().toISOString(),
       sequenceRange: { min: 0, max: 2 },
       actions: [
-        action({ order: 1, typedText: 'ai', documentTitle: 'New Tab' }),
+        action({ order: 1, typedText: 'ai', textQuality: 'exact', documentTitle: 'New Tab' }),
         action({
           order: 2,
           documentTitle: 'how to use ai - Google Search'
@@ -54,6 +55,22 @@ describe('allowedLiteralsFromPolished', () => {
     expect(allowed.has('ai')).toBe(true)
     expect(allowed.has('how to use ai')).toBe(true)
     expect(isAllowedLiteral('aiaiai', allowed)).toBe(false)
+  })
+
+  it('M8-B: uncertain or legacy (unqualified) typed text is never a replayable literal', () => {
+    const polished: PolishedSession = {
+      sessionId: 'tsess_x',
+      schemaVersion: 1,
+      polishedAt: new Date().toISOString(),
+      sequenceRange: { min: 0, max: 1 },
+      actions: [
+        action({ order: 1, typedText: 'helo wrld', textQuality: 'uncertain', sourceEventIds: ['u'] }),
+        action({ order: 2, typedText: 'legacy text', sourceEventIds: ['l'] })
+      ]
+    }
+    expect(allowedLiteralsFromPolished(polished).size).toBe(0)
+    const byEvent = new Map(polished.actions.map((a) => [a.sourceEventIds[0], a]))
+    expect(pickLiteralFromEvidence(['u', 'l'], byEvent)).toBeNull()
   })
 })
 

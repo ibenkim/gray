@@ -357,6 +357,14 @@ export const TelemetryEventDataSchema = z
     typedText: z.string().max(500).optional(),
     /** True when redaction removed part of the typed text. */
     typedTextRedacted: z.boolean().optional(),
+    /**
+     * exact: the field's committed value, read back after the entry, equals typedText.
+     * uncertain: not confirmed (IME, caret, selection, autocomplete, prior field content,
+     * truncation or no readable value) — intent evidence only, never an executable literal.
+     */
+    textQuality: z.enum(['exact', 'uncertain']).optional(),
+    /** How typedText was reconstructed; absent when unknown or mixed (and on legacy rows). */
+    textSource: z.enum(['keys', 'ax_value_delta']).optional(),
     /** Legacy (pre-M8) only: never written now and stripped on every read and export. */
     keyCount: z.number().int().nonnegative().optional(),
     /** Key that ended the entry, e.g. "Return" or "Tab". */
@@ -798,6 +806,8 @@ export const PolishedActionSchema = z
     verified: z.boolean().optional(),
     /** Redacted text the user typed during this action, when captured. */
     typedText: z.string().max(300).optional(),
+    /** Only 'exact' text may be replayed as a literal; anything else needs confirmation. */
+    textQuality: z.enum(['exact', 'uncertain']).optional(),
     clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
     clickX: z.number().int().optional(),

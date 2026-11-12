@@ -501,6 +501,11 @@ export async function polishSession(
         }
         pendingField = event
         const shown = typed.length > 120 ? `${typed.slice(0, 119)}…` : typed
+        // Replayable only if it is the committed value, unredacted and uncut.
+        const textQuality =
+          event.data?.textQuality === 'exact' && !event.data?.typedTextRedacted && shown === typed
+            ? 'exact'
+            : 'uncertain'
         const draft: ActionDraft = {
           text: label ? `Typed "${shown}" into ${label}` : `Typed "${shown}"`,
           category: 'input',
@@ -511,6 +516,7 @@ export async function polishSession(
           elementLabel: label,
           elementRole: role,
           typedText: shown,
+          textQuality,
           inputKind,
           semanticOp:
             submitKey === 'Return' || submitKey === 'Enter' ? 'submit' : undefined,

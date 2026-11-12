@@ -20,8 +20,10 @@ import { logTokenUsage, usageFromResponse, type OpenAIResponsesClient } from '..
 import { AUTOMATION_COMPILE_INSTRUCTIONS } from './automationPrompt'
 import {
   allowedLiteralsFromPolished,
+  exactTypedText,
   isAllowedLiteral,
   looksLikeShellNoise,
+  normalizeLiteral,
   pickLiteralFromEvidence,
   searchQueryFromTitle
 } from './groundText'
@@ -126,9 +128,17 @@ export function validateAndGroundScript(
   for (const text of clipMap.values()) {
     if (text.trim() && !looksLikeShellNoise(text)) allowedLiterals.add(text.trim())
   }
-  // Editor / extracted step text is authoritative when the user edits a step.
+  // Editor / extracted step text is authoritative when the user edits a step — but step text
+  // quoting uncertain typing is that same guess, so it is not allowed unless also captured exactly.
+  const uncertain = new Set(
+    polished.actions
+      .filter((a) => a.typedText?.trim() && !exactTypedText(a))
+      .map((a) => normalizeLiteral(a.typedText!))
+  )
   for (const lit of literalsFromWorkflowSteps(workflow)) {
-    if (lit.trim() && !looksLikeShellNoise(lit)) allowedLiterals.add(lit.trim())
+    if (!lit.trim() || looksLikeShellNoise(lit)) continue
+    if (uncertain.has(normalizeLiteral(lit)) && !isAllowedLiteral(lit, allowedLiteralsFromPolished(polished))) continue
+    allowedLiterals.add(lit.trim())
   }
 
   const ops: AutomationOp[] = script.ops.map((raw) => {
@@ -177,6 +187,10 @@ export function validateAndGroundScript(
         const recovered = pickLiteralFromEvidence(op.evidenceEventIds, byEvent)
         if (recovered && !looksLikeShellNoise(recovered)) {
           op = { ...op, literalText: recovered, variableKey: null }
+        } else if (op.evidenceEventIds.some((id) => byEvent.get(id)?.textQuality === 'uncertain')) {
+          // Captured, but not provably what was entered: ask instead of replaying a guess.
+          op = toManual(op, 'Confirm the text for this step; the captured text may be inexact')
+          warnings.push(`Downgraded type_text at step ${op.stepOrder}: captured text is uncertain`)
         } else {
           op = toManual(op, 'Missing captured text for this step')
           warnings.push(`Downgraded type_text at step ${op.stepOrder}: no grounded text`)
@@ -284,7 +298,9 @@ export function validateAndGroundScript(
   const withNav = collapseRedundantBrowserNav(withWaits, warnings)
   // Re-order again after wait injection / nav collapse so Untitled waits never precede create.
   const ordered = orderCreateSheetSequences(withNav, warnings)
-  const finalOps = hoistCreateSheetBeforeMisplacedWaits(ordered, warnings)
+  const hoisted = hoistCreateSheetBeforeMisplacedWaits(ordered, warnings)
+  // Invariant over the final ops, after every inference/injection pass.
+  const finalOps = enforceLiteralProvenance(hoisted, polished, byEvent, clipMap, warnings)
 
 
   return AutomationScriptSchema.parse({
@@ -1618,6 +1634,54 @@ function isWeakOrAppNameLabel(label: string | null | undefined, appName?: string
   return false
 }
 
+/**
+ * Final invariant: a replayed literal must be an observed, authoritative value — exact typed
+ * text, captured clipboard text, a results-page search query or an observed title rename.
+ * Generated workflow prose is not evidence. A value equal only after normalization (case,
+ * whitespace, line breaks) is replaced by the authoritative bytes; anything else needs the
+ * user to confirm it.
+ */
+export function enforceLiteralProvenance(
+  ops: AutomationOp[],
+  polished: PolishedSession,
+  byEvent: Map<string, PolishedAction>,
+  clipMap: Map<string, string>,
+  warnings: string[]
+): AutomationOp[] {
+  const authoritative = new Set<string>()
+  for (const a of polished.actions) {
+    const typed = exactTypedText(a)
+    if (typed) authoritative.add(typed)
+    const q = searchQueryFromTitle(a.documentTitle)
+    if (q) authoritative.add(q)
+  }
+  for (const text of clipMap.values()) if (text.trim()) authoritative.add(text.trim())
+  const renamed = renameNameFromPolishedTitleChange(polished)
+  if (renamed) authoritative.add(renamed)
+
+  return ops.map((op) => {
+    // Byte-for-byte: added edge whitespace or line breaks are a change, not a match.
+    const literal = op.literalText
+    if (!literal?.trim() || authoritative.has(literal)) return op
+    const matches = [...authoritative].filter((a) => normalizeLiteral(a) === normalizeLiteral(literal))
+    if (matches.length === 1) {
+      warnings.push(`Restored the captured text exactly at step ${op.stepOrder}`)
+      return { ...op, literalText: matches[0] }
+    }
+    const uncertain = op.evidenceEventIds.some((id) => {
+      const a = byEvent.get(id)
+      return !!a?.typedText && !exactTypedText(a)
+    })
+    warnings.push(`Downgraded ${op.op} at step ${op.stepOrder}: literal not grounded in exact evidence`)
+    return toManual(
+      { ...op, literalText: null },
+      uncertain
+        ? 'Confirm the text for this step; the captured text may be inexact'
+        : 'Confirm the text for this step; it was not captured exactly'
+    )
+  })
+}
+
 /** Inject type_text for polished typedText not already covered by an op. */
 export function injectTypeTextOpsFromEvidence(
   ops: AutomationOp[],
@@ -1631,8 +1695,9 @@ export function injectTypeTextOpsFromEvidence(
     for (const id of op.evidenceEventIds) covered.add(id)
   }
 
+  // Only exact text may be replayed; uncertain text stays a confirmation step.
   const typed = polished.actions
-    .filter((a) => !!a.typedText?.trim())
+    .filter((a) => !!exactTypedText(a))
     .sort((a, b) => a.order - b.order)
   if (!typed.length) return ops
 
@@ -1653,9 +1718,9 @@ export function injectTypeTextOpsFromEvidence(
       op: 'type_text',
       stepOrder,
       evidenceEventIds: action.sourceEventIds.length ? action.sourceEventIds : seed.evidenceEventIds,
-      literalText: action.typedText!.trim(),
+      literalText: exactTypedText(action)!,
       appName: action.appName ?? seed.appName,
-      label: `Type “${action.typedText!.trim().slice(0, 40)}”`,
+      label: `Type “${exactTypedText(action)!.slice(0, 40)}”`,
       confidence: Math.min(seed.confidence, 0.8),
       timeoutMs: 8000
     })
@@ -2070,7 +2135,8 @@ function prepareCompileInput(
         searchQuery,
         elementLabel: a.elementLabel ?? null,
         elementRole: a.elementRole ?? null,
-        typedText: a.typedText ?? null,
+        // Only replayable text is offered to the compiler; uncertain typing stays out.
+        typedText: exactTypedText(a),
         inputKind: a.inputKind ?? null,
         targetResolution: a.targetResolution ?? null,
         waitedMs: a.waitedMs ?? null,

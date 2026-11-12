@@ -107,7 +107,7 @@ export function extractWorkflowVariables(
 
   if (polished) {
     for (const a of polished.actions) {
-      maybeAddTypedVar(byKey, a.typedText, a.elementLabel, a.elementRole, a.inputKind, a.documentTitle)
+      maybeAddTypedVar(byKey, a.typedText, a.elementLabel, a.elementRole, a.inputKind, a.documentTitle, a.textQuality === 'exact')
     }
   } else {
     for (const e of events) {
@@ -118,7 +118,8 @@ export function extractWorkflowVariables(
         e.data.elementLabel || e.target?.accessibleLabel || e.target?.visibleLabel,
         e.data.elementRole,
         e.data.field?.valueCategory,
-        e.data.documentTitle
+        e.data.documentTitle,
+        e.data.textQuality === 'exact' && !e.data.typedTextRedacted
       )
     }
   }
@@ -163,7 +164,9 @@ function maybeAddTypedVar(
   label: string | undefined,
   role: string | undefined,
   inputKind: string | undefined,
-  documentTitle: string | undefined
+  documentTitle: string | undefined,
+  /** Only the committed value may become an example (examples can resolve to literals). */
+  exact: boolean
 ): void {
   if (!typedText) return
   if (/^\[(email|token|number)\]$/.test(typedText.trim())) return
@@ -174,8 +177,9 @@ function maybeAddTypedVar(
   const key = resolved === 'text' ? 'text' : resolved
   if (byKey.has(key)) return
 
-  const example =
-    resolved === 'search' ? searchQueryFromTitle(documentTitle) || typedText : typedText
+  // The results-page title is observed evidence; typed text only when it is the committed value.
+  const titleQuery = resolved === 'search' ? searchQueryFromTitle(documentTitle) : null
+  const example = titleQuery ?? (exact ? typedText : null)
 
   const labels: Record<string, string> = {
     search: 'Search query',
@@ -189,7 +193,7 @@ function maybeAddTypedVar(
     key,
     label: labels[key] ?? 'Text',
     kind: resolved,
-    exampleSanitized: sanitizeModelString(example, 200)
+    exampleSanitized: example ? sanitizeModelString(example, 200) : null
   })
 }
 
