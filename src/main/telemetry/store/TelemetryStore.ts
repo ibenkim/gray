@@ -119,6 +119,8 @@ export interface TelemetryStore {
     eventId: string,
     jpeg: Buffer
   ): Promise<{ absolutePath: string; relativePath: string }>
+  /** Delete a frame saveKeyframe stored (by its relative path); absent is not an error. */
+  discardKeyframe?(relativePath: string): Promise<void>
   /** Absolute root for keyframe files (optional). */
   keyframesRoot?(): string
   saveNarration?(sessionId: string, narration: StoredNarration): Promise<void>

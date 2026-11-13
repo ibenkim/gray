@@ -1,6 +1,5 @@
 import { createHash } from 'crypto'
 import { sanitizeLabel, sanitizeUrl, sanitizeWindowTitle } from '../../shared/telemetry/sanitize'
-import type { ScreenshotProvider } from './providers'
 
 export type ScreenStateSnapshot = {
   screenStateId: string
@@ -32,11 +31,6 @@ export type ActiveWindowInfo = {
  */
 export class ScreenStateTracker {
   private lastId: string | null = null
-  private screenshot: ScreenshotProvider
-
-  constructor(screenshot: ScreenshotProvider) {
-    this.screenshot = screenshot
-  }
 
   fromActiveWindow(win: ActiveWindowInfo | null | undefined): ScreenStateSnapshot | null {
     if (!win) return null
@@ -69,11 +63,6 @@ export class ScreenStateTracker {
 
     if (screenStateId === this.lastId) return null
     this.lastId = screenStateId
-
-    // Screenshot provider is disabled by default — never embeds base64.
-    if (this.screenshot.enabled) {
-      void this.screenshot.captureKeyframe(screenStateId)
-    }
 
     return { screenStateId, ...payload }
   }

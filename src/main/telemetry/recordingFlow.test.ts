@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -34,6 +34,11 @@ const h = vi.hoisted(() => ({
   interaction: null as null | { emit: (p: unknown) => void },
   buffered: null as null | Record<string, unknown>,
   shotGate: null as null | Promise<void>,
+  /** M10: what the synthetic source declares, and whether deleting a frame fails. */
+  shotRedaction: 'masked' as 'masked' | 'none',
+  discardFails: false,
+  /** The interaction source's stop throws (its shutdown is unconfirmed). */
+  stopThrows: false,
   log: [] as string[],
   ctor: [] as unknown[],
   bodies: [] as Array<{ input: Array<{ content: string }> }>,
@@ -123,6 +128,7 @@ vi.mock('./ax/JxaAccessibilityProvider', () => ({
     }
     stop() {
       this.cb = null
+      if (h.stopThrows) throw new Error('synthetic teardown failure')
     }
     flush() {
       if (h.buffered) {
@@ -147,6 +153,11 @@ vi.mock('./capture', async (importOriginal) => {
     readonly enabled = true
     private busy = false
     constructor(private readonly store: Store, private readonly owner: { recorder?: InstanceType<typeof mod.TelemetryRecorder> }) {}
+    async discard(relativePath: string) {
+      h.log.push('artifact-discarded')
+      if (h.discardFails) throw new Error('synthetic EPERM')
+      await this.store?.discardKeyframe?.(relativePath)
+    }
     async captureKeyframe(_id: string, opts: { sessionId?: string; eventId?: string } = {}) {
       if (this.busy || !opts.sessionId || !opts.eventId || !this.store?.saveKeyframe) return null
       this.busy = true
@@ -155,7 +166,8 @@ vi.mock('./capture', async (importOriginal) => {
         try {
           const saved = await this.store.saveKeyframe(opts.sessionId, opts.eventId, Buffer.from('synthetic-frame-bytes'))
           h.log.push('artifact-ack')
-          return { relativePath: saved.relativePath }
+          // M10 contract: the synthetic source declares its frames masked before retention.
+          return { relativePath: saved.relativePath, redaction: h.shotRedaction }
         } catch {
           // Reported, not swallowed: the save manifest must count it.
           this.owner.recorder?.noteArtifactWriteFailure(opts.sessionId)
@@ -292,6 +304,9 @@ beforeEach(() => {
   h.bodies.length = 0
   h.respond.length = 0
   h.shotGate = null
+  h.shotRedaction = 'masked'
+  h.discardFails = false
+  h.stopThrows = false
   h.polishFails = false
   h.buffered = null
 })
@@ -357,7 +372,12 @@ describe('canonical synthetic flow: Stop → save → rediscover → review → 
       droppedEvents: 0,
       storedEvents: lines.length
     })
-    expect(meta.delivery.save.artifacts.saved).toBeGreaterThanOrEqual(1)
+    // M10: the frame was held across Stop, so its pixels may postdate it: discarded, not kept.
+    expect(h.log).toContain('artifact-discarded')
+    expect(meta.delivery.save.artifacts.saved).toBe(0)
+    expect(existsSync(join(h.devDir, 'sessions', sessionId, 'shots'))
+      ? readdirSync(join(h.devDir, 'sessions', sessionId, 'shots'))
+      : []).toEqual([])
     expect(existsSync(join(h.devDir, 'narration', `${sessionId}.webm`))).toBe(true)
 
     // A repeated Stop after completion is idempotent: same id, no duplicate events.
@@ -501,6 +521,53 @@ describe('Stop safety and save failures (no request is ever made)', () => {
     expect(h.ctor).toHaveLength(0)
   })
 
+  it('M10: an undeletable frame fails the save, is retryable, and Save retry deletes it (also after relaunch)', async () => {
+    let app = await boot()
+    h.shotRedaction = 'none' // the frame must not be kept…
+    h.discardFails = true // …and deleting it fails
+    const sessionId = await recordSynthetic()
+    const shots = join(h.devDir, 'sessions', sessionId, 'shots')
+    const stop = await invoke('telemetry:sessionStop', { sessionId })
+    expect(stop.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'ARTIFACT_FAILED', canRetrySave: true })
+    expect(readdirSync(shots)).toHaveLength(1)
+    const meta = () => JSON.parse(readFileSync(join(h.devDir, 'sessions', sessionId, 'meta.json'), 'utf8'))
+    expect(meta().delivery.save.artifacts).toMatchObject({ failed: 1, undeleted: [expect.stringContaining(sessionId)] })
+
+    // Still failing: the obligation and the failure stay; nothing is cleared by counting.
+    const again = await invoke('telemetry:retrySave', sessionId)
+    expect(again.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'ARTIFACT_FAILED', canRetrySave: true })
+    expect(meta().delivery.save.artifacts.failed).toBe(1)
+
+    // After a relaunch the owed path comes from the save record; a healthy delete completes it.
+    app = await boot()
+    h.discardFails = false
+    const retried = await invoke('telemetry:retrySave', sessionId)
+    console.log("RETRIED", JSON.stringify(h.log))
+    expect(retried.recording).toMatchObject({ saveState: 'complete', canRetrySave: false })
+    expect(readdirSync(shots)).toHaveLength(0)
+    expect(meta().delivery.save.artifacts.undeleted).toBeUndefined()
+    expect(app).toBeTruthy()
+  })
+
+  it('M10: Save retry deletes owed frames but never clears an unconfirmed source shutdown', async () => {
+    await boot()
+    h.shotRedaction = 'none'
+    h.discardFails = true
+    h.stopThrows = true
+    const sessionId = await recordSynthetic()
+    const shots = join(h.devDir, 'sessions', sessionId, 'shots')
+    const stop = await invoke('telemetry:sessionStop', { sessionId })
+    expect(stop.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'SOURCE_TEARDOWN_FAILED', canRetrySave: true })
+    const failing = await invoke('telemetry:retrySave', sessionId)
+    expect(failing.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'SOURCE_TEARDOWN_FAILED' })
+    await boot()
+    h.discardFails = false
+    const cleaned = await invoke('telemetry:retrySave', sessionId)
+    // The frame is gone, but the source was never confirmed stopped: still incomplete.
+    expect(readdirSync(shots)).toHaveLength(0)
+    expect(cleaned.recording).toMatchObject({ saveState: 'incomplete', saveErrorCode: 'SOURCE_TEARDOWN_FAILED', canRetrySave: false })
+  })
+
   it('audio chunk failure → incomplete AUDIO_INCOMPLETE', async () => {
     await boot()
     const sessionId = await recordSynthetic({ narrate: true })
@@ -526,6 +593,7 @@ describe('Stop safety and save failures (no request is ever made)', () => {
     expect(stop).toMatchObject({ ok: false, errorCode: 'MANIFEST_WRITE_FAILED' })
     expect(stop.recording).toMatchObject({ saveState: 'incomplete', canRetrySave: true })
     const retried = await invoke('telemetry:retrySave', sessionId)
+    console.log("RETRIED", JSON.stringify(h.log))
     expect(retried.recording.saveState).toBe('complete')
   })
 

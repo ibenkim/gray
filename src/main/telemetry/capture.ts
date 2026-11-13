@@ -2,6 +2,7 @@ import { screen } from 'electron'
 import { newId } from '../../shared/id'
 import {
   EVENT_SCHEMA_VERSION,
+  type ArtifactRef,
   type DisplayInfo,
   type ScreenshotCaptureStatus,
   type TelemetryEvent,
@@ -71,7 +72,7 @@ export type StopResult = {
   /** Sequence of the terminal session_stopped event. */
   finalSequence?: number
   events?: DrainResult
-  artifacts?: { saved: number; skipped: number; failed: number; paths: string[] }
+  artifacts?: { saved: number; skipped: number; failed: number; paths: string[]; undeleted?: string[] }
   /** A source did not confirm shutdown; the save must not be reported complete. */
   teardownFailed?: boolean
 }
@@ -113,6 +114,13 @@ type ActiveWinResult = {
 const POLL_MS = 800
 /** Admitted async source work (window polls, screenshots) owned until Stop drains it. */
 const MAX_ADMITTED_JOBS = 16
+/** M10 frame request policy: one in flight, spaced, capped per session. */
+const SHOT_MIN_INTERVAL_MS = 1000
+const MAX_SHOTS_PER_SESSION = 120
+/** Post-action frames wait for the UI to settle (a deadline, not an immediate capture). */
+const POST_SETTLE_MS = 700
+/** A "pre" reference older than this says nothing about the state just before the action. */
+const PRE_MAX_AGE_MS = 5000
 
 /**
  * Main-process recorder: active-win polling + clipboard watcher + sparse
@@ -175,6 +183,10 @@ export class TelemetryRecorder {
   private stopPromise: Promise<StopResult> | null = null
   private admittedJobs = new Set<Promise<unknown>>()
   private artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] as string[] }
+  /** M10 request state for the current session (reset at Start). */
+  private shots = freshShotState()
+  /** Wakes post-action settle waits when sources halt (pause/Stop), so none outlives them. */
+  private shotWaits = new Set<() => void>()
 
   constructor(
     private readonly store: TelemetryStore | null,
@@ -189,7 +201,7 @@ export class TelemetryRecorder {
     this.clock = providers?.clock ?? (() => performance.now())
     this.interaction = providers?.interaction ?? new NoopInteractionProvider()
     this.screenshot = providers?.screenshot ?? new DisabledScreenshotProvider()
-    this.screenStates = new ScreenStateTracker(this.screenshot)
+    this.screenStates = new ScreenStateTracker()
     this.clipboard = providers?.clipboard ?? new ClipboardWatcher()
   }
 
@@ -274,6 +286,7 @@ export class TelemetryRecorder {
       clearTimeout(this.settleTimer)
       this.settleTimer = null
     }
+    for (const wake of [...this.shotWaits]) wake()
   }
 
   private startSources(): void {
@@ -378,6 +391,7 @@ export class TelemetryRecorder {
     this.lastFieldLength = null
     this.finalizing = false
     this.artifactStats = { saved: 0, nulls: 0, failed: 0, writeFailures: 0, paths: [] }
+    this.shots = freshShotState()
     this.screenStates.reset()
     this.clipboard.reset()
 
@@ -461,6 +475,24 @@ export class TelemetryRecorder {
     return this.stopPromise
   }
 
+  /**
+   * Save retry: delete frames a stopped session must not keep. Returns the paths still on disk.
+   * Only paths in the session's own frame layout are attempted (the store re-validates).
+   */
+  async retryUndeleted(sessionId: string, paths: string[]): Promise<string[]> {
+    const remaining: string[] = []
+    for (const path of paths) {
+      const own = path.startsWith(`sessions/${sessionId}/shots/`) || path.startsWith(`${sessionId}/`)
+      try {
+        if (!own || !this.screenshot.discard) throw new Error('not deletable here')
+        await this.screenshot.discard(path)
+      } catch {
+        remaining.push(path)
+      }
+    }
+    return remaining
+  }
+
   /** Same-session local retry: drain retained events again (after relaunch, from the outbox). */
   async retrySessionDrain(sessionId: string): Promise<DrainResult | null> {
     if (!this.store) return null
@@ -486,6 +518,12 @@ export class TelemetryRecorder {
     this.haltSources()
     // Admitted jobs may still record their events; no new reads are accepted.
     await this.drainSources()
+    // A frame that must not be kept and could not be deleted is retried once; still there →
+    // the save is incomplete (counted failed), never silently left behind.
+    for (const path of [...this.shots.undiscarded]) await this.discardFrame(path)
+    // Still on disk: the save fails and reports these paths, owed until a Save retry deletes them.
+    const undeleted = [...this.shots.undiscarded]
+    this.artifactStats.failed += undeleted.length
 
     const stopped = this.recordEvent('session_stopped', {
       data: { message: 'Recording stopped' }
@@ -514,21 +552,23 @@ export class TelemetryRecorder {
         saved: a.saved,
         failed: a.failed + a.writeFailures,
         skipped: Math.max(0, a.nulls - a.writeFailures),
-        paths: [...a.paths]
+        paths: [...a.paths],
+        ...(undeleted.length ? { undeleted } : {})
       },
       ...(this.teardownFailed ? { teardownFailed: true } : {})
     }
   }
 
-  /** Own async source work so Stop can await it; bounded, over-limit work is skipped. */
-  private admit(job: () => Promise<unknown>): void {
+  /** Own async source work so Stop can await it; bounded, over-limit work is skipped (false). */
+  private admit(job: () => Promise<unknown>): boolean {
     if (this.admittedJobs.size >= MAX_ADMITTED_JOBS) {
       this.artifactStats.nulls += 1
-      return
+      return false
     }
     const p = job().catch(() => undefined)
     this.admittedJobs.add(p)
     void p.finally(() => this.admittedJobs.delete(p))
+    return true
   }
 
   recordEvent(
@@ -941,59 +981,114 @@ export class TelemetryRecorder {
     }, 1500)
   }
 
-  private async captureKeyframe(
+  /** Background frame (app change, clipboard, settle): kept only when stored, else counted. */
+  private async captureKeyframe(reason: KeyframeReason): Promise<string | null> {
+    const ref = await this.acquireFrame(reason, 'background')
+    if (ref.status !== 'stored') return null
+    this.recordEvent('keyframe_captured', {
+      data: { keyframePath: ref.relativePath, message: reason, artifact: ref }
+    })
+    return ref.relativePath ?? null
+  }
+
+  /**
+   * One frame request, settled with an explicit status (M10). Bounded: one in flight, spaced
+   * by SHOT_MIN_INTERVAL_MS, MAX_SHOTS_PER_SESSION per session; background frames yield to a
+   * pending action frame. A frame not declared `masked`, or completing after its session or
+   * generation ended, is discarded, never kept or attached.
+   */
+  private async acquireFrame(
     reason: KeyframeReason,
-    boundsOverride?: { x: number; y: number; width: number; height: number }
-  ): Promise<string | null> {
-    if (
-      !this.screenshot.enabled ||
-      !this.sessionId ||
-      !this.recording ||
-      this.paused ||
-      this.finalizing
-    ) {
-      return null
+    phase: 'post' | 'background',
+    actionEventId?: string
+  ): Promise<ArtifactRef> {
+    const ref = (status: ArtifactRef['status'], why?: string): ArtifactRef => {
+      this.noteShot(status)
+      return { phase, status, ...(actionEventId ? { actionEventId } : {}), ...(why ? { reason: why } : {}) }
     }
+    if (!this.screenshot.enabled) return ref('unavailable', 'capture_disabled')
+    // A source that cannot delete a frame it must not keep cannot be used at all.
+    if (!this.screenshot.discard) return ref('unavailable', 'no_discard')
+    if (!this.sessionId || !this.recording || this.paused || this.finalizing) return ref('denied', 'session_closed')
+    const shots = this.shots
+    if (shots.inFlight) return ref('busy')
+    if (shots.requests >= MAX_SHOTS_PER_SESSION) return ref('throttled', 'session_cap')
+    const now = this.clock()
+    if (now - shots.lastAt < SHOT_MIN_INTERVAL_MS) return ref('throttled', 'min_interval')
+    if (phase === 'background' && shots.postsPending > 0) return ref('throttled', 'action_priority')
+
     const sessionId = this.sessionId
+    const gen = this.generation
     const eventId = newId('tevt')
+    shots.inFlight = true
+    shots.lastAt = now
+    shots.requests += 1
     try {
-      const bounds =
-        boundsOverride ??
-        (this.lastBounds
+      const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
+        reason,
+        bounds: this.lastBounds
           ? {
               x: this.lastBounds.x ?? 0,
               y: this.lastBounds.y ?? 0,
               width: this.lastBounds.width ?? 0,
               height: this.lastBounds.height ?? 0
             }
-          : undefined)
-      const result = await this.screenshot.captureKeyframe(`ss_${eventId}`, {
-        reason,
-        bounds,
+          : undefined,
         sessionId,
         eventId
       })
-      // A late completion can never attach to a later session.
-      if (this.sessionId !== sessionId) return null
-      if (!result?.relativePath) this.artifactStats.nulls += 1
+      // The pixels were acquired somewhere in [now, done]: only `done` is known to be after them.
+      const done = this.clock()
+      const late = this.sessionId !== sessionId || this.generation !== gen
       if (result?.relativePath) {
+        const refused = late ? 'session_changed' : result.redaction !== 'masked' ? 'unredacted' : unsafePath(result.relativePath)
+        if (refused) {
+          await this.discardFrame(result.relativePath)
+          return ref('denied', refused)
+        }
+        shots.taken += 1
         this.artifactStats.saved += 1
         this.artifactStats.paths.push(result.relativePath)
-        if (reason !== 'pre_action' && reason !== 'post_action' && reason !== 'target_crop') {
-          this.recordEvent('keyframe_captured', {
-            data: {
-              keyframePath: result.relativePath,
-              message: reason
-            }
-          })
+        const stored: ArtifactRef = {
+          phase,
+          status: 'stored',
+          ...(actionEventId ? { actionEventId } : {}),
+          relativePath: result.relativePath,
+          requestedAtMs: this.sinceStart(now),
+          capturedAtMs: this.sinceStart(done),
+          redaction: 'masked',
+          ...(result.display ? { display: result.display } : {})
         }
-        return result.relativePath
+        this.noteShot('stored')
+        shots.lastFrame = { ref: stored, at: done, requestedAt: now, gen }
+        return stored
       }
+      if (late) return ref('denied', 'session_changed')
+      return ref(result?.status ?? 'error', result?.status ? undefined : 'no_frame')
     } catch {
-      /* never block recording on keyframe failure; counted for the save manifest */
-      if (this.sessionId === sessionId) this.artifactStats.failed += 1
+      // Never block recording on a frame failure; counted for the save manifest.
+      return ref('error', 'capture_failed')
+    } finally {
+      shots.inFlight = false
     }
-    return null
+  }
+
+  private noteShot(status: ArtifactRef['status']): void {
+    this.shots.byStatus[status] = (this.shots.byStatus[status] ?? 0) + 1
+    if (status === 'error') this.artifactStats.failed += 1
+    else if (status !== 'stored' && status !== 'dedup') this.artifactStats.nulls += 1
+  }
+
+  /** True once the frame is gone; a failure keeps the cleanup obligation until Stop. */
+  private async discardFrame(relativePath: string): Promise<boolean> {
+    try {
+      await this.screenshot.discard!(relativePath)
+      this.shots.undiscarded.delete(relativePath)
+      return true
+    } catch {
+      this.shots.undiscarded.add(relativePath)
+      return false
+    }
   }
 
   /**
@@ -1132,7 +1227,7 @@ export class TelemetryRecorder {
 
     // Record the interaction immediately so callers/tests see it without waiting
     // on screenshot I/O; attach pre/post shot paths asynchronously when enabled.
-    this.recordEvent(partial.type, {
+    const recorded = this.recordEvent(partial.type, {
       target: partial.target,
       data,
       occurredAt: partial.occurredAt,
@@ -1141,33 +1236,185 @@ export class TelemetryRecorder {
 
     if (partial.type === 'element_activated' || partial.type === 'click') {
       this.interaction.poke?.()
-      this.admit(() => this.captureActionShots(data))
+      if (recorded && this.screenshot.enabled) {
+        const actionAt = partial.occurredAt ?? this.clock()
+        const admitted = this.admit(() => this.captureActionShots(recorded.eventId, actionAt, data))
+        // Over the job bound: this action's evidence is refused visibly, not silently absent.
+        if (!admitted) {
+          for (const phase of ['pre', 'post'] as const) {
+            // admit() already counted the skipped job once in the manifest; status only here.
+            this.shots.byStatus.throttled = (this.shots.byStatus.throttled ?? 0) + 1
+            this.recordArtifact({ actionEventId: recorded.eventId, phase, status: 'throttled', reason: 'job_limit' })
+          }
+        }
+      }
     }
   }
 
-  /** Pre/post screenshots + optional target crop at action boundaries. */
-  private async captureActionShots(data: InteractionPartial['data']): Promise<void> {
-    if (!this.screenshot.enabled) return
-    const pre = await this.captureKeyframe('pre_action')
-    if (pre) {
-      this.recordEvent('keyframe_captured', {
-        data: { keyframePath: pre, preShotPath: pre, message: 'pre_action' }
-      })
+  /**
+   * M10 action evidence, each phase recorded with its settled status:
+   * - pre: a reference to the last frame stored before the action (same session generation,
+   *   with its age), never a capture taken after it;
+   * - post: acquired after a settle deadline; a pause/Stop meanwhile denies it;
+   * - crop: cut from that same stored post frame, only inside its display; never a new capture.
+   */
+  private async captureActionShots(
+    actionEventId: string,
+    actionAt: number,
+    data: InteractionPartial['data']
+  ): Promise<void> {
+    const gen = this.generation
+    const shots = this.shots
+    const last = shots.lastFrame
+    // The pixels lie in [requestedAt, at]: complete before the action, and even at their oldest
+    // possible acquisition no more than PRE_MAX_AGE_MS old. ageMs is that upper bound.
+    const pre: ArtifactRef =
+      last && last.gen === gen && last.at <= actionAt && actionAt - last.requestedAt <= PRE_MAX_AGE_MS
+        ? {
+            ...last.ref,
+            actionEventId,
+            phase: 'pre',
+            status: 'dedup',
+            ageMs: Math.round(actionAt - last.requestedAt)
+          }
+        : {
+            actionEventId,
+            phase: 'pre',
+            status: 'unavailable',
+            reason: last && last.gen === gen && last.at <= actionAt ? 'prior_frame_stale' : 'no_prior_frame'
+          }
+    this.noteShot(pre.status)
+    this.recordArtifact(pre)
+
+    shots.postsPending += 1
+    let post: ArtifactRef
+    try {
+      const settled = await this.settleWait(POST_SETTLE_MS)
+      post = settled
+        ? await this.acquireFrame('post_action', 'post', actionEventId)
+        : (this.noteShot('denied'), { actionEventId, phase: 'post', status: 'denied', reason: 'session_closed' })
+    } finally {
+      shots.postsPending -= 1
     }
-    if (data?.elementBounds) {
-      const crop = await this.captureKeyframe('target_crop', data.elementBounds)
-      if (crop) {
-        this.recordEvent('keyframe_captured', {
-          data: { keyframePath: crop, targetCropPath: crop, message: 'target_crop' }
-        })
+    this.recordArtifact(post)
+
+    const bounds = data?.elementBounds
+    if (!bounds) return
+    this.recordArtifact(await this.cropFromPost(post, bounds, actionEventId))
+  }
+
+  private async cropFromPost(
+    post: ArtifactRef,
+    rect: { x: number; y: number; width: number; height: number },
+    actionEventId: string
+  ): Promise<ArtifactRef> {
+    const out = (status: ArtifactRef['status'], reason: string): ArtifactRef => {
+      this.noteShot(status)
+      return { actionEventId, phase: 'crop', status, reason }
+    }
+    if (post.status !== 'stored' || !post.relativePath) return out('unavailable', 'no_source_frame')
+    if (!this.screenshot.cropFrom) return out('unavailable', 'crop_unsupported')
+    const d = post.display
+    const inside =
+      rect.width > 0 &&
+      rect.height > 0 &&
+      !!d &&
+      d.x !== undefined &&
+      d.y !== undefined &&
+      rect.x >= d.x &&
+      rect.y >= d.y &&
+      rect.x + rect.width <= d.x + d.width &&
+      rect.y + rect.height <= d.y + d.height
+    // A rect the source frame cannot be shown to contain is rejected, not clamped or kept whole.
+    if (!inside) return out('denied', d ? 'invalid_crop' : 'source_display_unknown')
+    const sessionId = this.sessionId
+    const gen = this.generation
+    try {
+      const result = await this.screenshot.cropFrom(post.relativePath, rect, {
+        sessionId: sessionId!,
+        eventId: newId('tevt')
+      })
+      const late = this.sessionId !== sessionId || this.generation !== gen
+      if (!result?.relativePath) return out(late ? 'denied' : (result?.status ?? 'error'), late ? 'session_changed' : 'no_frame')
+      const refused = late ? 'session_changed' : result.redaction !== 'masked' ? 'unredacted' : unsafePath(result.relativePath)
+      if (refused) {
+        await this.discardFrame(result.relativePath)
+        return out('denied', refused)
       }
+      this.artifactStats.saved += 1
+      this.artifactStats.paths.push(result.relativePath)
+      this.noteShot('stored')
+      return {
+        actionEventId,
+        phase: 'crop',
+        status: 'stored',
+        relativePath: result.relativePath,
+        capturedAtMs: post.capturedAtMs,
+        redaction: 'masked',
+        sourcePath: post.relativePath,
+        cropRect: rect
+      }
+    } catch {
+      return out('error', 'crop_failed')
     }
-    const post = await this.captureKeyframe('post_action')
-    if (post) {
-      this.recordEvent('keyframe_captured', {
-        data: { keyframePath: post, postShotPath: post, message: 'post_action' }
-      })
-    }
+  }
+
+  private recordArtifact(ref: ArtifactRef): void {
+    this.recordEvent('keyframe_captured', {
+      data: {
+        ...(ref.status === 'stored' && ref.relativePath ? { keyframePath: ref.relativePath } : {}),
+        message: `${ref.phase}_action`,
+        artifact: ref
+      }
+    })
+  }
+
+  /** Resolve true after `ms`, or false at once if sources halt (pause/Stop) meanwhile. */
+  private settleWait(ms: number): Promise<boolean> {
+    if (this.finalizing || this.paused) return Promise.resolve(false)
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer)
+        this.shotWaits.delete(wake)
+        resolve(false)
+      }
+      const timer = setTimeout(() => {
+        this.shotWaits.delete(wake)
+        resolve(!this.finalizing && !this.paused)
+      }, ms)
+      this.shotWaits.add(wake)
+    })
+  }
+}
+
+type ShotState = {
+  inFlight: boolean
+  lastAt: number
+  taken: number
+  /** Requests that reached the provider (the per-session cap counts these, not stored frames). */
+  requests: number
+  /** Frames that must be deleted but whose deletion failed: retried at Stop. */
+  undiscarded: Set<string>
+  postsPending: number
+  byStatus: Partial<Record<ArtifactRef['status'], number>>
+  lastFrame: { ref: ArtifactRef; at: number; requestedAt: number; gen: number } | null
+}
+
+/** A frame path the session may reference: relative, inside its root. */
+function unsafePath(p: string): 'unsafe_path' | null {
+  return p.includes('..') || p.startsWith('/') || /^[A-Za-z]:\\/.test(p) ? 'unsafe_path' : null
+}
+
+function freshShotState(): ShotState {
+  return {
+    inFlight: false,
+    lastAt: -Infinity,
+    taken: 0,
+    requests: 0,
+    undiscarded: new Set(),
+    postsPending: 0,
+    byStatus: {},
+    lastFrame: null
   }
 }
 

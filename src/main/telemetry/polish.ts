@@ -1,6 +1,7 @@
 import {
   SCHEMA_VERSION,
   sessionTiming,
+  type ArtifactRef,
   type ClipboardData,
   type PolishedAction,
   type PolishedSession,
@@ -27,6 +28,8 @@ import type { TelemetryStore } from './store/TelemetryStore'
 
 const IDLE_GAP_MS = 30_000
 const CLICK_COLLAPSE_MS = 800
+/** Artifact refs kept on one polished action (matches PolishedActionSchema.artifacts). */
+export const MAX_ACTION_ARTIFACTS = 30
 const PASTE_CHAIN_MS = 8_000
 const FOCUS_FOLD_MS = 2_000
 
@@ -85,6 +88,7 @@ export async function polishSession(
   const timingVerified = timing === 'monotonic'
 
   const drafts: ActionDraft[] = []
+  const artifactRefs: ArtifactRef[] = []
   let lastClickKey: string | null = null
   let lastClickAt = 0
   let pendingField: TelemetryEvent | null = null
@@ -959,6 +963,13 @@ export async function polishSession(
         break
       }
       case 'keyframe_captured':
+        // M10: an artifact is evidence only for the action it names (or none: background).
+        // Attached after folding (below), so merges and collapses never drop a ref.
+        if (event.data?.artifact) {
+          if (event.data.artifact.actionEventId) artifactRefs.push(event.data.artifact)
+          break
+        }
+        // Legacy frame (no artifact contract): unverified, attached as before, never uploaded.
         if (event.data?.keyframePath && drafts.length > 0) {
           const prior = drafts[drafts.length - 1]
           if (prior.category !== 'session' && prior.category !== 'idle') {
@@ -1011,6 +1022,21 @@ export async function polishSession(
       default:
         break
     }
+  }
+
+  // Every action-linked artifact goes to the final action that owns its action event, whatever
+  // was folded into it (fill_field, collapsed clicks); the newest stored post is its keyframe.
+  // Bounded per action: the first MAX_ACTION_ARTIFACTS refs are kept in order; the rest are
+  // counted in artifactsOmitted (and the newest stored post still becomes its keyframe).
+  for (const ref of artifactRefs) {
+    const owner = drafts.find((d) => d.sourceEventIds.includes(ref.actionEventId!))
+    if (!owner) continue
+    if ((owner.artifacts?.length ?? 0) < MAX_ACTION_ARTIFACTS) {
+      owner.artifacts = [...(owner.artifacts ?? []), ref]
+    } else {
+      owner.artifactsOmitted = (owner.artifactsOmitted ?? 0) + 1
+    }
+    if (ref.phase === 'post' && ref.status === 'stored') owner.keyframePath = ref.relativePath
   }
 
   const actions: PolishedAction[] = drafts.map(({ elapsedMs, ...d }, i) => ({

@@ -10,6 +10,7 @@ import {
   readSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync
 } from 'fs'
@@ -408,6 +409,19 @@ export class FileTelemetryStore implements TelemetryStore {
     mkdirSync(dirname(absolutePath), { recursive: true })
     writeFileSync(absolutePath, jpeg)
     return { absolutePath, relativePath }
+  }
+
+  async discardKeyframe(relativePath: string): Promise<void> {
+    // Only the two shapes saveKeyframe returns; anything else is refused, never resolved.
+    const session = /^sessions\/([A-Za-z0-9_-]+)\/shots\/([A-Za-z0-9_-]+)\.jpg$/.exec(relativePath)
+    const legacy = /^([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\.jpg$/.exec(relativePath)
+    const absolutePath = session
+      ? this.safeJoin('sessions', session[1], 'shots', `${session[2]}.jpg`)
+      : legacy
+        ? this.safeJoin('keyframes', legacy[1], `${legacy[2]}.jpg`)
+        : null
+    if (!absolutePath) throw new Error('[telemetry] invalid keyframe path')
+    rmSync(absolutePath, { force: true })
   }
 
   keyframesRoot(): string {

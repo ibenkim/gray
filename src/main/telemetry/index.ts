@@ -9,6 +9,7 @@ import {
 import { newId } from '../../shared/id'
 import {
   initialDelivery,
+  MAX_UNDELETED,
   type ProcessingErrorCode,
   type SessionDelivery,
   type StopReason,
@@ -473,7 +474,13 @@ async function verifyArtifacts(
     const size = await s.artifactSize(path)
     if (!size) missing += 1
   }
-  return { saved: a.saved - missing, missing, failed: a.failed, skipped: a.skipped }
+  return {
+    saved: a.saved - missing,
+    missing,
+    failed: a.failed,
+    skipped: a.skipped,
+    ...(a.undeleted?.length ? { undeleted: a.undeleted.slice(0, MAX_UNDELETED) } : {})
+  }
 }
 
 /** Audio is complete only when every chunk the renderer sent was acknowledged and closed. */
@@ -1124,13 +1131,16 @@ export function registerTelemetryIpc(): void {
     if (!auth.ok) return { ok: false, error: auth.error }
     const save = meta.delivery?.save
     const remembered = lastStopOutcomes.get(sessionId)
+    const owed = save?.artifacts?.undeleted ?? []
     const fromMeta: SaveInputs | null =
-      save?.state === 'incomplete' && save.errorCode === 'EVENTS_NOT_PERSISTED'
+      save?.state === 'incomplete' && (save.errorCode === 'EVENTS_NOT_PERSISTED' || owed.length > 0)
         ? {
             finalSequence: save.finalSequence,
             artifacts: save.artifacts ?? { saved: 0, missing: 0, failed: 0, skipped: 0 },
             audio: save.audio ?? { state: 'none' },
-            stopReason: save.stopReason
+            stopReason: save.stopReason,
+            // Deleting frames or draining events never establishes that an input source stopped.
+            ...(save.errorCode === 'SOURCE_TEARDOWN_FAILED' ? { teardownFailed: true } : {})
           }
         : null
     const base = remembered ?? fromMeta
@@ -1142,9 +1152,19 @@ export function registerTelemetryIpc(): void {
         recording: toRecordingSummary(meta)
       }
     }
+    // Frames that had to be deleted but could not be are retried; each one now deleted stops
+    // counting as a failed artifact, and the ones still on disk stay owed.
+    const undeleted = base.artifacts.undeleted ?? []
+    const remaining = undeleted.length ? await recorder.retryUndeleted(sessionId, undeleted) : []
+    const { undeleted: _owed, ...rest } = base.artifacts
+    const artifacts = {
+      ...rest,
+      failed: Math.max(0, base.artifacts.failed - (undeleted.length - remaining.length)),
+      ...(remaining.length ? { undeleted: remaining } : {})
+    }
     const drained = await recorder.retrySessionDrain(sessionId)
-    if (!drained) return writeSaveOutcome(store, sessionId, base)
-    if (remembered) return writeSaveOutcome(store, sessionId, { ...remembered, events: drained })
+    if (!drained) return writeSaveOutcome(store, sessionId, { ...base, artifacts })
+    if (remembered) return writeSaveOutcome(store, sessionId, { ...remembered, artifacts, events: drained })
     // After a restart the queue only knows what its outbox restored. Each event pending at Stop
     // stays outstanding until this process settles that same id; a stale, empty or quarantined
     // outbox (or replayed duplicates of other events) therefore never clears it.
@@ -1153,6 +1173,7 @@ export function registerTelemetryIpc(): void {
     const prior = save?.pendingEventIds
     return writeSaveOutcome(store, sessionId, {
       ...base,
+      artifacts,
       unrecoveredIds: prior?.filter((id) => !settled.has(id) && !queued.has(id)),
       legacyPending: prior ? 0 : (save?.pendingEvents ?? 0),
       events: {

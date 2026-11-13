@@ -386,6 +386,15 @@ export function redactEvent(event: TelemetryEvent): TelemetryEvent {
       }
     }
 
+    if (data.artifact) {
+      const unsafe = (p?: string) => !!p && (p.includes('..') || p.startsWith('/') || /^[A-Za-z]:\\/.test(p))
+      // A ref with an unsafe path keeps its status but loses the path (never absolute).
+      if (unsafe(data.artifact.relativePath) || unsafe(data.artifact.sourcePath)) {
+        const { relativePath: _r, sourcePath: _s, ...rest } = data.artifact
+        data.artifact = { ...rest, status: rest.status === 'stored' || rest.status === 'dedup' ? 'denied' : rest.status, reason: 'unsafe_path' }
+      }
+    }
+
     data.narrationText = truncate(data.narrationText, 800)
     data.filePath = truncate(data.filePath, 400)
     data.fileName = truncate(data.fileName, 200)

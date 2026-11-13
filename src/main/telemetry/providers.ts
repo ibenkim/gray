@@ -1,4 +1,5 @@
 import type {
+  DisplayInfo,
   ScreenshotCaptureStatus,
   TelemetryEvent,
   TelemetryEventType,
@@ -165,6 +166,20 @@ export type KeyframeReason =
  * Optional keyframe screenshot source. Production uses DisabledScreenshotProvider (M3-A):
  * no unredacted pixels are acquired until a scoped, masked source exists.
  */
+export type KeyframeResult = {
+  path?: string
+  relativePath?: string
+  /**
+   * What was done to the pixels before they were written. Only `masked` (scoped and masked
+   * before retention) frames are kept; anything else is discarded by the recorder.
+   */
+  redaction?: 'masked' | 'none'
+  /** Display the frame shows (global points), when known: bounds a valid crop. */
+  display?: DisplayInfo
+  /** A request the provider settled without a new frame. */
+  status?: 'dedup' | 'busy' | 'denied' | 'error'
+} | null
+
 export interface ScreenshotProvider {
   readonly enabled: boolean
   /** What sessions recorded with this provider may claim about screenshots. */
@@ -177,7 +192,15 @@ export interface ScreenshotProvider {
       sessionId?: string
       eventId?: string
     }
-  ): Promise<{ path?: string; relativePath?: string } | null>
+  ): Promise<KeyframeResult>
+  /** Cut `rect` (global points) from an already stored frame; never a second capture. */
+  cropFrom?(
+    sourceRelativePath: string,
+    rect: { x: number; y: number; width: number; height: number },
+    opts: { sessionId: string; eventId: string }
+  ): Promise<KeyframeResult>
+  /** Delete a frame the recorder will not keep (unredacted, late, wrong session). */
+  discard?(relativePath: string): Promise<void>
 }
 
 export class DisabledScreenshotProvider implements ScreenshotProvider {

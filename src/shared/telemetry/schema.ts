@@ -328,6 +328,39 @@ export const SegmentCandidateSchema = z
 
 export type SegmentCandidate = z.infer<typeof SegmentCandidateSchema>
 
+/**
+ * M10 screenshot artifact contract: what a frame is evidence for and how its request settled.
+ * `pre` only ever references a frame captured before the action (with its age); `post` is
+ * acquired after a settle deadline; `crop` is cut from that same stored post frame. Every
+ * action request settles with a status; anything but `stored`/`dedup` carries no path.
+ */
+export const ArtifactRefSchema = z
+  .object({
+    /** The action event this frame is evidence for; absent for background frames. */
+    actionEventId: z.string().max(80).optional(),
+    phase: z.enum(['pre', 'post', 'crop', 'background']),
+    status: z.enum(['stored', 'dedup', 'busy', 'throttled', 'denied', 'error', 'unavailable']),
+    reason: z.string().max(80).optional(),
+    relativePath: z.string().max(300).optional(),
+    /**
+     * Session-relative monotonic ms: the frame was requested at `requestedAtMs` and its pixels
+     * were acquired no later than `capturedAtMs` (the provider's completion).
+     */
+    requestedAtMs: z.number().int().nonnegative().optional(),
+    capturedAtMs: z.number().int().nonnegative().optional(),
+    /** pre: at least this long before the action the referenced frame was complete. */
+    ageMs: z.number().int().nonnegative().optional(),
+    /** Declared by the provider; only `masked` frames are retained. */
+    redaction: z.enum(['masked']).optional(),
+    display: DisplayInfoSchema.optional(),
+    /** crop: the stored frame it was cut from, and the rect (global points) cut. */
+    sourcePath: z.string().max(300).optional(),
+    cropRect: ElementBoundsSchema.optional()
+  })
+  .strict()
+
+export type ArtifactRef = z.infer<typeof ArtifactRefSchema>
+
 export const TelemetryEventDataSchema = z
   .object({
     appName: z.string().max(120).optional(),
@@ -378,6 +411,8 @@ export const TelemetryEventDataSchema = z
     preShotPath: z.string().max(300).optional(),
     postShotPath: z.string().max(300).optional(),
     targetCropPath: z.string().max(300).optional(),
+    /** keyframe_captured (M10): the frame's action link, phase, settle status and metadata. */
+    artifact: ArtifactRefSchema.optional(),
     /**
      * Text the user typed, after redaction. Absent when the target was a
      * password/secure field or the text redacted down to nothing.
@@ -536,6 +571,9 @@ export const SaveStateSchema = z.enum([
   'incomplete',
   'legacy_unverified'
 ])
+/** Bound on remembered undeletable frames (the per-session frame request cap). */
+export const MAX_UNDELETED = 120
+
 export const SaveErrorCodeSchema = z.enum([
   'EVENTS_NOT_PERSISTED',
   'EVENTS_REJECTED',
@@ -640,7 +678,12 @@ export const SessionDeliverySchema = z
             saved: z.number().int().nonnegative(),
             missing: z.number().int().nonnegative(),
             failed: z.number().int().nonnegative(),
-            skipped: z.number().int().nonnegative()
+            skipped: z.number().int().nonnegative(),
+            /**
+             * M10: frames the session must not keep whose deletion failed (counted in `failed`).
+             * Kept until a Save retry deletes them; while any remain the save can be retried.
+             */
+            undeleted: z.array(z.string().max(300)).max(MAX_UNDELETED).optional()
           })
           .strict()
           .optional(),
@@ -852,6 +895,12 @@ export const PolishedActionSchema = z
     elementRole: z.string().max(64).optional(),
     clipboard: ClipboardDataSchema.optional(),
     keyframePath: z.string().max(300).optional(),
+    /**
+     * M10: pre/post/crop artifacts of the action events folded into this action, including
+     * unavailable ones and why — the first 30 in order; any more are counted, not listed.
+     */
+    artifacts: z.array(ArtifactRefSchema).max(30).optional(),
+    artifactsOmitted: z.number().int().positive().optional(),
     inferred: z.boolean().optional(),
     verified: z.boolean().optional(),
     /** Redacted text the user typed during this action, when captured. */

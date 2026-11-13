@@ -358,7 +358,10 @@ export function toRecordingSummary(meta: TelemetrySessionMeta): RecordingSummary
       ? { saveErrorCode: save.errorCode, saveMessage: SAVE_ERROR_TEXT[save.errorCode] }
       : {}),
     canRetrySave:
-      save?.state === 'incomplete' && !!save.errorCode && RETRYABLE_SAVE.includes(save.errorCode),
+      save?.state === 'incomplete' &&
+      ((!!save.errorCode && RETRYABLE_SAVE.includes(save.errorCode)) ||
+        // A frame that must be deleted is still on disk: retrying the save retries the delete.
+        (save.artifacts?.undeleted?.length ?? 0) > 0),
     reviewState: d?.review.state ?? 'pending',
     ...(d?.review.errorCode
       ? { reviewErrorCode: d.review.errorCode, reviewMessage: REVIEW_ERROR_TEXT[d.review.errorCode] }

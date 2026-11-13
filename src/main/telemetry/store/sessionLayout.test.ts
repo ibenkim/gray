@@ -91,6 +91,22 @@ describe('FileTelemetryStore session layout', () => {
     expect(kf.relativePath).toBe('tsess_old/tevt_x.jpg')
     expect(existsSync(join(dir, 'keyframes', 'tsess_old', 'tevt_x.jpg'))).toBe(true)
   })
+
+  it('M10: discardKeyframe removes exactly a frame saveKeyframe returned, in either layout', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'gray-sess-'))
+    const store = new FileTelemetryStore(dir, { isPackaged: false, isDev: true })
+    await store.createSession({ sessionId: 'tsess_new' })
+    const kept = await store.saveKeyframe('tsess_new', 'tevt_keep', Buffer.from('jpeg'))
+    const gone = await store.saveKeyframe('tsess_new', 'tevt_gone', Buffer.from('jpeg'))
+    await store.discardKeyframe(gone.relativePath)
+    expect(existsSync(gone.absolutePath)).toBe(false)
+    expect(existsSync(kept.absolutePath)).toBe(true)
+    await store.discardKeyframe(gone.relativePath) // already absent: not an error
+    for (const bad of ['../meta.json', '/etc/hosts', 'sessions/tsess_new/meta.json', 'sessions/../x/shots/a.jpg']) {
+      await expect(store.discardKeyframe(bad)).rejects.toThrow()
+    }
+    expect(existsSync(join(dir, 'sessions', 'tsess_new', 'meta.json'))).toBe(true)
+  })
 })
 
 describe('InMemoryTelemetryStore narration / ground truth', () => {
