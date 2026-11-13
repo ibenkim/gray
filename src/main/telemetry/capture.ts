@@ -2,6 +2,7 @@ import { screen } from 'electron'
 import { newId } from '../../shared/id'
 import {
   EVENT_SCHEMA_VERSION,
+  type DisplayInfo,
   type ScreenshotCaptureStatus,
   type TelemetryEvent,
   type TelemetryEventType
@@ -548,11 +549,14 @@ export class TelemetryRecorder {
       this.ingress.drainedAfterBoundary += 1
     }
 
-    const display = this.displayInfo()
+    const point =
+      partial.data?.clickX != null && partial.data?.clickY != null
+        ? { x: partial.data.clickX, y: partial.data.clickY }
+        : undefined
     const windowBounds = this.windowBounds()
     const data = {
       ...partial.data,
-      display: partial.data?.display ?? display,
+      display: partial.data?.display ?? this.displayInfo(point),
       windowBounds: partial.data?.windowBounds ?? windowBounds
     }
 
@@ -624,16 +628,31 @@ export class TelemetryRecorder {
     }
   }
 
-  private displayInfo(): { scale: number; width: number; height: number } {
+  /**
+   * The display containing the event's global point (negative origins and mixed scales are
+   * ordinary), else the primary display for point-less events. A point no display contains
+   * gets no display rather than a guessed one.
+   */
+  private displayInfo(point?: { x: number; y: number }): DisplayInfo | undefined {
     try {
-      const d = screen.getPrimaryDisplay()
+      const d = point
+        ? screen.getAllDisplays().find(
+            ({ bounds: b }) =>
+              point.x >= b.x && point.x < b.x + b.width && point.y >= b.y && point.y < b.y + b.height
+          )
+        : screen.getPrimaryDisplay()
+      if (!d) return undefined
       return {
+        id: d.id,
+        x: Math.round(d.bounds.x),
+        y: Math.round(d.bounds.y),
+        width: Math.round(d.bounds.width),
+        height: Math.round(d.bounds.height),
         scale: d.scaleFactor || 1,
-        width: d.size.width,
-        height: d.size.height
+        binding: point ? 'event_point' : 'primary'
       }
     } catch {
-      return { scale: 1, width: 0, height: 0 }
+      return undefined
     }
   }
 

@@ -352,6 +352,8 @@ function describeElement(el) {
   var rowIndex = null;
   var siblingCount = null;
   var windowBounds = null;
+  /* The clicked element's own window: its frame and title identify where the point belongs. */
+  var windowTitle = null;
   for (var i = 0; i < MAX_ANCESTORS + 4 && path.length < 8; i++) {
     cur = axCopy(cur, 'AXParent');
     if (!cur) break;
@@ -360,6 +362,7 @@ function describeElement(el) {
     if (pLabel) path.push(pLabel.slice(0, 80));
     if (!windowBounds && pRole === 'AXWindow') {
       windowBounds = axFrameBounds(cur);
+      windowTitle = axString(cur, 'AXTitle');
     }
     if (!containerRole && pRole && /AX(Table|List|Outline|ScrollArea|Grid|Row|Cell)/.test(pRole)) {
       containerRole = pRole;
@@ -380,6 +383,7 @@ function describeElement(el) {
   }
   if (!windowBounds && role === 'AXWindow') {
     windowBounds = axFrameBounds(el);
+    windowTitle = axString(el, 'AXTitle');
   }
 
   return {
@@ -392,6 +396,7 @@ function describeElement(el) {
     path: path,
     bounds: axFrameBounds(el),
     windowBounds: windowBounds,
+    windowTitle: windowTitle ? windowTitle.slice(0, 300) : null,
     containerRole: containerRole,
     containerLabel: containerLabel,
     rowIndex: rowIndex,
@@ -748,9 +753,77 @@ function pointOf(evt) {
   return null;
 }
 
+/*
+ * One accepted event per physical press, by press identity: a polled edge proves its button went
+ * down inside (previous poll, this poll] on the system-uptime clock that also stamps NSEvent
+ * timestamps. A monitor press of the same button stamped inside that interval is the same press.
+ * The poll copy is held one pump so the monitor copy (real count and modifiers) can claim it;
+ * a monitor copy arriving after the poll copy was emitted is dropped as the late duplicate;
+ * a poll edge whose press the monitor already delivered is suppressed. A different button, or a
+ * press outside the interval, is never a duplicate. Both remembered lists are bounded.
+ */
+var MATCH_EPS = 0.005;
+var REMEMBER_S = 10;
+var REMEMBER_MAX = 16;
+var heldPolls = [];
+var releasedPolls = [];
+var monitorPresses = [];
+var pollSuppressed = 0;
+var monitorLateDuplicates = 0;
+var correlationDropped = 0;
+
+function uptime() {
+  try {
+    var t = Number($.NSProcessInfo.processInfo.systemUptime);
+    return isFinite(t) ? t : null;
+  } catch (e) { return null; }
+}
+
+function within(ts, p) {
+  return ts !== null && ts > p.after - MATCH_EPS && ts <= p.upTo + MATCH_EPS;
+}
+
+/* Keep a remembered list bounded in age and length; losses are counted, never silent. */
+function remember(list, item, now) {
+  list.push(item);
+  while (list.length && (list.length > REMEMBER_MAX || (now !== null && now - list[0].at > REMEMBER_S))) {
+    if (list.length > REMEMBER_MAX) correlationDropped += 1;
+    list.shift();
+  }
+}
+
+/* Which copy of this monitor press was already polled: 'held', 'released' or null. */
+function matchPoll(button, ts) {
+  for (var i = 0; i < heldPolls.length; i++) {
+    var h = heldPolls[i];
+    /* Without a timestamp the held same-button edge is the only candidate (one pump old). */
+    if (h.button === button && (ts === null || within(ts, h))) {
+      heldPolls.splice(i, 1);
+      pollSuppressed += 1;
+      return 'held';
+    }
+  }
+  for (var j = 0; j < releasedPolls.length; j++) {
+    if (releasedPolls[j].button === button && within(ts, releasedPolls[j])) {
+      releasedPolls.splice(j, 1);
+      monitorLateDuplicates += 1;
+      return 'released';
+    }
+  }
+  return null;
+}
+
 function onMouse(evt, button) {
   try {
     clickCallbacks += 1;
+    var ts = null;
+    try { ts = Number(evt.timestamp); if (!isFinite(ts)) ts = null; } catch (eTs) {}
+    var copy = matchPoll(button, ts);
+    /* Its polled copy was already emitted: this press is recorded once. */
+    if (copy === 'released') return;
+    if (copy === null && ts !== null) remember(monitorPresses, { button: button, ts: ts, at: ts }, ts);
+    /* Polled presses still held happened no later than this one: emit them first (order). */
+    releaseHeldPolls();
     var front = frontApp();
     if (!appAllowed(front.name)) return;
     var pt = pointOf(evt);
@@ -783,6 +856,7 @@ function onMouse(evt, button) {
       path: target ? target.path : [],
       bounds: target ? target.bounds : null,
       windowBounds: target ? target.windowBounds : null,
+      windowTitle: target ? target.windowTitle : null,
       containerRole: target ? target.containerRole : null,
       containerLabel: target ? target.containerLabel : null,
       rowIndex: target ? target.rowIndex : null,
@@ -822,6 +896,7 @@ function onScroll(evt) {
       role: target ? target.role : null,
       label: target ? target.label : null,
       windowBounds: target ? target.windowBounds : null,
+      windowTitle: target ? target.windowTitle : null,
       containerRole: target ? target.containerRole : null,
       containerLabel: target ? target.containerLabel : null
     });
@@ -904,6 +979,7 @@ var nextStatsAt = Date.now() + 2500;
  * osascript helpers): poll pressedMouseButtons and synthesize click edges.
  */
 var lastMouseButtons = 0;
+var lastPollAt = uptime();
 var pollClicks = 0;
 
 function readMouseButtons() {
@@ -924,11 +1000,9 @@ function readMouseButtons() {
   return null;
 }
 
-function emitPolledClick(button) {
-  pollClicks += 1;
-  clickCallbacks += 1;
+function polledClick(button) {
   var front = frontApp();
-  if (!appAllowed(front.name)) return;
+  if (!appAllowed(front.name)) return null;
   var pt = null;
   try {
     var m = $.NSEvent.mouseLocation;
@@ -936,18 +1010,19 @@ function emitPolledClick(button) {
     pt = { x: Math.round(m.x), y: Math.round(h - m.y) };
   } catch (ePt) {}
   var el = scopedElementAt(pt, front);
-  if (pt && !el) return;
+  if (pt && !el) return null;
   var target = describeElement(el);
-  emit({
+  return {
     k: 'click',
     button: button,
-    count: 1,
+    /* A polled edge observes neither click count nor modifiers: report them unknown. */
+    count: null,
     x: pt ? pt.x : null,
     y: pt ? pt.y : null,
-    cmd: false,
-    opt: false,
-    ctrl: false,
-    shift: false,
+    cmd: null,
+    opt: null,
+    ctrl: null,
+    shift: null,
     app: front.name,
     appBundleId: front.bundleId,
     role: target ? target.role : null,
@@ -958,13 +1033,52 @@ function emitPolledClick(button) {
     enabled: target ? target.enabled : null,
     path: target ? target.path : [],
     bounds: target ? target.bounds : null,
+    windowBounds: target ? target.windowBounds : null,
+    windowTitle: target ? target.windowTitle : null,
     containerRole: target ? target.containerRole : null,
     containerLabel: target ? target.containerLabel : null,
     rowIndex: target ? target.rowIndex : null,
     siblingCount: target ? target.siblingCount : null,
     via: 'poll'
-  });
-  scheduleSample(160);
+  };
+}
+
+/* After a pump: held polled edges no monitor delivery claimed are emitted (remembered briefly). */
+function releaseHeldPolls() {
+  var held = heldPolls;
+  heldPolls = [];
+  for (var i = 0; i < held.length; i++) {
+    if (!held[i].click) continue;
+    pollClicks += 1;
+    clickCallbacks += 1;
+    /* Only an edge with a known interval can be recognised later; one without is not kept. */
+    if (isFinite(held[i].after) && isFinite(held[i].upTo)) remember(releasedPolls, held[i], held[i].at);
+    emit(held[i].click);
+    scheduleSample(160);
+  }
+}
+
+/*
+ * A polled edge: suppressed if the monitor already delivered this press, else held one pump.
+ * Degraded (no clock): the edge has no interval, so it is never compared with remembered
+ * monitor presses and never remembered itself; only a same-button monitor delivery during its
+ * one-pump hold claims it. Such edges are counted (pollUnidentified).
+ */
+var pollUnidentified = 0;
+function pollEdge(button, after, upTo) {
+  if (!isFinite(after) || !isFinite(upTo)) {
+    pollUnidentified += 1;
+    heldPolls.push({ button: button, after: after, upTo: upTo, at: null, click: polledClick(button) });
+    return;
+  }
+  for (var i = 0; i < monitorPresses.length; i++) {
+    if (monitorPresses[i].button === button && within(monitorPresses[i].ts, { after: after, upTo: upTo })) {
+      monitorPresses.splice(i, 1);
+      pollSuppressed += 1;
+      return;
+    }
+  }
+  heldPolls.push({ button: button, after: after, upTo: upTo, at: upTo, click: polledClick(button) });
 }
 
 function pollMouseButtons() {
@@ -975,8 +1089,14 @@ function pollMouseButtons() {
     var rightDown = (buttons & 2) !== 0;
     var wasLeft = (lastMouseButtons & 1) !== 0;
     var wasRight = (lastMouseButtons & 2) !== 0;
-    if (leftDown && !wasLeft) emitPolledClick('left');
-    if (rightDown && !wasRight) emitPolledClick('right');
+    var now = uptime();
+    var after = lastPollAt;
+    lastPollAt = now;
+    /* No clock: the edge cannot be identified, so only the held same-button rule applies. */
+    var from = after === null || now === null ? -Infinity : after;
+    var to = now === null ? Infinity : now;
+    if (leftDown && !wasLeft) pollEdge('left', from, to);
+    if (rightDown && !wasRight) pollEdge('right', from, to);
     lastMouseButtons = buttons;
   } catch (ePoll) {}
 }
@@ -1002,6 +1122,7 @@ while (true) {
   }
 
   exitIfOrphaned();
+  releaseHeldPolls();
   pollMouseButtons();
   checkCopy();
 
@@ -1020,6 +1141,10 @@ while (true) {
       keys: keyCallbacks,
       clicks: clickCallbacks,
       pollClicks: pollClicks,
+      pollSuppressed: pollSuppressed,
+      monitorLateDuplicates: monitorLateDuplicates,
+      correlationDropped: correlationDropped,
+      pollUnidentified: pollUnidentified,
       monitors: monitorsOk
     });
     nextStatsAt = now + 2500;

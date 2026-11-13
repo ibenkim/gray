@@ -617,6 +617,55 @@ describe('JxaAccessibilityProvider click capture', () => {
   })
 })
 
+describe('M9 pointer source fidelity', () => {
+  const click = (events: ReturnType<typeof harness>['events']) => events.find((e) => e.type === 'click')!
+
+  it('a polled press reports count and modifiers unknown, not "single, no modifiers"', () => {
+    const { provider, events } = harness()
+    provider.handleLine(
+      JSON.stringify({ k: 'click', button: 'left', count: null, cmd: null, opt: null, ctrl: null, shift: null, x: 10, y: 10, label: 'Row', via: 'poll' })
+    )
+    expect(click(events).data).toMatchObject({ pointerSource: 'poll', clickButton: 'left' })
+    expect(click(events).data?.clickCount).toBeUndefined()
+    expect(click(events).data?.clickModifiers).toBeUndefined()
+  })
+
+  it('a monitored press keeps its observed count and modifiers', () => {
+    const { provider, events } = harness()
+    provider.handleClick({ button: 'left', count: 2, cmd: true, x: 10, y: 10, label: 'Row' })
+    expect(click(events).data).toMatchObject({
+      pointerSource: 'monitor',
+      clickCount: 2,
+      clickModifiers: { cmd: true, opt: false, ctrl: false, shift: false },
+      coordinateSpace: 'global_points'
+    })
+  })
+
+  it('the clicked target\'s own window title is kept as the window identity', () => {
+    const { provider, events } = harness()
+    provider.handleClick({ x: 10, y: 10, label: 'Share', windowTitle: 'Recorded document' })
+    expect(click(events).data?.targetWindowTitle).toBe('Recorded document')
+  })
+
+  it('middle stays middle; an unknown button is not converted to left', () => {
+    const a = harness()
+    a.provider.handleClick({ button: 'middle', label: 'Tab' })
+    expect(click(a.events).data?.clickButton).toBe('middle')
+    const b = harness()
+    b.provider.handleClick({ button: 'other', label: 'Tab' })
+    expect(click(b.events).data?.clickButton).toBeUndefined()
+  })
+
+  it('elementNorm only for a point inside the measured frame (negative origins included)', () => {
+    const a = harness()
+    a.provider.handleClick({ x: -1400, y: -150, bounds: { x: -1440, y: -200, width: 80, height: 100 }, label: 'OK' })
+    expect(click(a.events).data?.elementNorm).toEqual({ x: 0.5, y: 0.5 })
+    const b = harness()
+    b.provider.handleClick({ x: 500, y: 500, bounds: { x: -1440, y: -200, width: 80, height: 100 }, label: 'OK' })
+    expect(click(b.events).data?.elementNorm).toBeUndefined()
+  })
+})
+
 describe('AX valueTail typing fallback', () => {
   it('aggregates typed text from valueTail when key monitors are silent', () => {
     vi.useFakeTimers()

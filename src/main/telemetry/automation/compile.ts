@@ -300,7 +300,11 @@ export function validateAndGroundScript(
   const ordered = orderCreateSheetSequences(withNav, warnings)
   const hoisted = hoistCreateSheetBeforeMisplacedWaits(ordered, warnings)
   // Invariant over the final ops, after every inference/injection pass.
-  const finalOps = enforceLiteralProvenance(hoisted, polished, byEvent, clipMap, warnings)
+  const finalOps = groundPointIdentity(
+    enforceLiteralProvenance(hoisted, polished, byEvent, clipMap, warnings),
+    polished,
+    byEvent
+  )
 
 
   return AutomationScriptSchema.parse({
@@ -1548,6 +1552,7 @@ function clickFieldsFromAction(a: PolishedAction): Partial<AutomationOp> {
     clickWindowY: a.clickWindowY ?? null,
     windowWidth: a.windowWidth ?? null,
     windowHeight: a.windowHeight ?? null,
+    windowTitle: a.targetWindowTitle ?? null,
     clickButton: a.clickButton ?? null,
     clickCount: a.clickCount ?? null,
     clickModifiers: a.clickModifiers
@@ -1580,6 +1585,50 @@ function evidenceActionForOp(
     }
   }
   return null
+}
+
+/**
+ * Final M9 pass over every point-bearing op: geometry, button details and window identity come only from the
+ * op's own recorded click evidence. A proposed or rewritten value is replaced; without evidence
+ * the op carries no point and no window, so the runner cannot resolve one.
+ */
+export function groundPointIdentity(
+  ops: AutomationOp[],
+  polished: PolishedSession,
+  byEvent: Map<string, PolishedAction>
+): AutomationOp[] {
+  const none = {
+    clickX: null,
+    clickY: null,
+    clickWindowX: null,
+    clickWindowY: null,
+    windowWidth: null,
+    windowHeight: null,
+    windowTitle: null,
+    clickButton: null,
+    clickCount: null,
+    clickModifiers: null
+  }
+  return ops.map((op) => {
+    if (op.op !== 'click_at' && op.op !== 'scroll' && op.op !== 'activate_element') return op
+    const action = evidenceActionForOp(op, polished, byEvent)
+    if (!action) return { ...op, ...none }
+    const f = clickFieldsFromAction(action)
+    return {
+      ...op,
+      clickX: f.clickX ?? null,
+      clickY: f.clickY ?? null,
+      clickWindowX: f.clickWindowX ?? null,
+      clickWindowY: f.clickWindowY ?? null,
+      windowWidth: f.windowWidth ?? null,
+      windowHeight: f.windowHeight ?? null,
+      windowTitle: f.windowTitle ?? null,
+      // Button, count and modifiers are what was observed, never a proposal (middle stays middle).
+      clickButton: f.clickButton ?? null,
+      clickCount: f.clickCount ?? null,
+      clickModifiers: f.clickModifiers ?? null
+    }
+  })
 }
 
 /** Prefer click_at when evidence has screen coordinates and activate_element is weak/ungrounded. */

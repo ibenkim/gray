@@ -70,14 +70,15 @@ export type JxaKeyEvent = {
 }
 
 export type JxaClickEvent = {
-  button?: 'left' | 'right'
-  count?: number
+  button?: string
+  /** null from a polled edge: not observed. */
+  count?: number | null
   x?: number | null
   y?: number | null
-  cmd?: boolean
-  opt?: boolean
-  ctrl?: boolean
-  shift?: boolean
+  cmd?: boolean | null
+  opt?: boolean | null
+  ctrl?: boolean | null
+  shift?: boolean | null
   app?: string | null
   appBundleId?: string | null
   role?: string | null
@@ -90,6 +91,8 @@ export type JxaClickEvent = {
   bounds?: JxaElementBounds | null
   /** Frame of the owning AXWindow when known. */
   windowBounds?: JxaElementBounds | null
+  /** AXTitle of that owning window, read in the click callback. */
+  windowTitle?: string | null
   containerRole?: string | null
   containerLabel?: string | null
   rowIndex?: number | null
@@ -1003,6 +1006,7 @@ export class JxaAccessibilityProvider implements InteractionProvider {
     role?: string | null
     label?: string | null
     windowBounds?: JxaElementBounds | null
+    windowTitle?: string | null
     containerRole?: string | null
     containerLabel?: string | null
   }): void {
@@ -1043,6 +1047,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         scrollContainerLabel: sanitizeLabel(event.containerLabel ?? undefined),
         elementRole: sanitizeLabel(event.role ?? undefined),
         elementLabel: sanitizeLabel(event.label ?? undefined),
+        targetWindowTitle: sanitizeWindowTitle(event.windowTitle),
+        coordinateSpace: clickX != null && clickY != null ? 'global_points' : undefined,
         clickX,
         clickY,
         clickWindowX,
@@ -1098,22 +1104,34 @@ export class JxaAccessibilityProvider implements InteractionProvider {
           }
         : undefined
 
+    // Only a point measured inside the element's frame is a position within it; never clamp.
     let elementNorm: { x: number; y: number } | undefined
     if (
       bounds &&
       clickX != null &&
       clickY != null &&
       bounds.width > 0 &&
-      bounds.height > 0
+      bounds.height > 0 &&
+      clickX >= bounds.x &&
+      clickX <= bounds.x + bounds.width &&
+      clickY >= bounds.y &&
+      clickY <= bounds.y + bounds.height
     ) {
       elementNorm = {
-        x: Math.min(1, Math.max(0, (clickX - bounds.x) / bounds.width)),
-        y: Math.min(1, Math.max(0, (clickY - bounds.y) / bounds.height))
+        x: (clickX - bounds.x) / bounds.width,
+        y: (clickY - bounds.y) / bounds.height
       }
     }
 
+    // A polled edge saw only the button: count and modifiers are unknown, not "1, none".
+    const polled = event.via === 'poll'
     const hasModifiers =
-      event.cmd === true || event.opt === true || event.ctrl === true || event.shift === true
+      !polled &&
+      (event.cmd === true || event.opt === true || event.ctrl === true || event.shift === true)
+    const button =
+      event.button === 'left' || event.button === 'right' || event.button === 'middle'
+        ? event.button
+        : undefined
 
     let clickWindowX: number | undefined
     let clickWindowY: number | undefined
@@ -1155,8 +1173,8 @@ export class JxaAccessibilityProvider implements InteractionProvider {
         elementPath: path.length ? path : undefined,
         listContext,
         targetTier: tier,
-        clickButton: event.button === 'right' ? 'right' : 'left',
-        clickCount: clampClickCount(event.count),
+        clickButton: button,
+        clickCount: polled ? undefined : clampClickCount(event.count ?? undefined),
         clickModifiers: hasModifiers
           ? {
               cmd: event.cmd === true,
@@ -1165,6 +1183,9 @@ export class JxaAccessibilityProvider implements InteractionProvider {
               shift: event.shift === true
             }
           : undefined,
+        pointerSource: polled ? 'poll' : 'monitor',
+        targetWindowTitle: sanitizeWindowTitle(event.windowTitle),
+        coordinateSpace: clickX != null && clickY != null ? 'global_points' : undefined,
         clickX,
         clickY,
         clickWindowX,

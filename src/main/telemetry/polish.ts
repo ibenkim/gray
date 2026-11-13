@@ -618,6 +618,8 @@ export async function polishSession(
             l1Op: 'transfer',
             clickButton: event.data?.clickButton,
             clickCount: event.data?.clickCount,
+            pointerSource: event.data?.pointerSource,
+            targetWindowTitle: event.data?.targetWindowTitle,
             clickX: event.data?.clickX,
             clickY: event.data?.clickY,
             clickWindowX: event.data?.clickWindowX,
@@ -647,6 +649,8 @@ export async function polishSession(
           verified: isSend ? detectVerified(events, i) : undefined,
           clickButton: event.data?.clickButton,
           clickCount: event.data?.clickCount,
+          pointerSource: event.data?.pointerSource,
+          targetWindowTitle: event.data?.targetWindowTitle,
           clickX: event.data?.clickX,
           clickY: event.data?.clickY,
           clickWindowX: event.data?.clickWindowX,
@@ -913,6 +917,7 @@ export async function polishSession(
           clickWindowY: event.data?.clickWindowY,
           windowWidth: event.data?.windowBounds?.width,
           windowHeight: event.data?.windowBounds?.height,
+          targetWindowTitle: event.data?.targetWindowTitle,
           scrollAxis: event.data?.scrollAxis,
           scrollDelta: event.data?.scrollDelta
         })

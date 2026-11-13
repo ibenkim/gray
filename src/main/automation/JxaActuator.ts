@@ -257,7 +257,8 @@ export class JxaActuator implements Actuator {
       error: result.error,
       matched: result.matched,
       matchedLabel: result.matchedLabel,
-      matchedRole: result.matchedRole
+      matchedRole: result.matchedRole,
+      bounds: validBounds(result.bounds)
     })
   }
 
@@ -268,4 +269,14 @@ export class JxaActuator implements Actuator {
       this.pending.delete(id)
     }
   }
+}
+
+/** A live window frame from the host protocol: finite numbers and a positive size, else none. */
+function validBounds(raw: unknown): ActuatorResult['bounds'] {
+  if (!raw || typeof raw !== 'object') return undefined
+  const { x, y, width, height } = raw as Record<string, unknown>
+  const nums = [x, y, width, height]
+  if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) return undefined
+  if ((width as number) <= 0 || (height as number) <= 0) return undefined
+  return { x: x as number, y: y as number, width: width as number, height: height as number }
 }

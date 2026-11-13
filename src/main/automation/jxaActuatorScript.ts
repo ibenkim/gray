@@ -169,15 +169,22 @@ function pickWindow(proc, windowTitle) {
     var wins = proc.windows();
     if (!wins || wins.length === 0) return null;
     if (windowTitle) {
-      var want = String(windowTitle).toLowerCase();
+      /* Exact (trimmed, case-insensitive) title: "Doc" is not "Doc 2", and "" matches nothing. */
+      var want = String(windowTitle).trim().toLowerCase();
+      var found = null;
       for (var i = 0; i < wins.length; i++) {
         try {
-          var t = String(wins[i].name() || '');
-          if (t.toLowerCase().indexOf(want) !== -1 || want.indexOf(t.toLowerCase()) !== -1) {
-            return wins[i];
+          var t = String(wins[i].name() || '').trim().toLowerCase();
+          if (want && t === want) {
+            /* Two windows with the recorded title: identity is ambiguous, so none. */
+            if (found) return null;
+            found = wins[i];
           }
         } catch (eT) {}
       }
+      if (found) return found;
+      /* A named window that is not there is not some other window. */
+      return null;
     }
     return wins[0];
   } catch (e) {
@@ -265,9 +272,15 @@ function pressByPath(root, pathLabels, maxDepth) {
 }
 
 function pressInProcess(proc, role, label, path, windowTitle) {
+  /*
+   * A recorded window is resolved (exactly, once) before any press. Its target was inside that
+   * window, so the menu bar is not searched for it.
+   */
+  var named = windowTitle ? pickWindow(proc, windowTitle) : null;
+  if (windowTitle && !named) return { ok: false, error: 'no_window' };
   /* Menu bar first — AXMenuItem lives outside windows. */
   try {
-    var bars = proc.menuBars();
+    var bars = named ? null : proc.menuBars();
     if (bars && bars.length) {
       if (path && path.length) {
         var byPath = pressByPath(bars[0], path.slice().reverse(), 10);
@@ -278,7 +291,7 @@ function pressInProcess(proc, role, label, path, windowTitle) {
     }
   } catch (eMenu) {}
 
-  var win = pickWindow(proc, windowTitle);
+  var win = named || pickWindow(proc, null);
   if (!win) return { ok: false, error: 'no_window' };
   if (path && path.length) {
     var pathHit = pressByPath(win, path.slice().reverse(), 12);
@@ -429,9 +442,12 @@ function handle(cmd) {
     }
 
     if (type === 'windowBounds') {
-      var procB = findProcess(cmd.appName, cmd.appBundleId) || frontProcess();
+      /* The named app's window or nothing: another app's frame would misplace the click. */
+      var procB = cmd.appName || cmd.appBundleId ? findProcess(cmd.appName, cmd.appBundleId) : null;
       if (!procB) return { id: id, ok: false, error: 'app_not_found' };
-      try { procB.frontmost = true; } catch (eB) {}
+      try { procB.frontmost = true; } catch (eB) {
+        return { id: id, ok: false, error: 'activate_failed' };
+      }
       var winB = pickWindow(procB, cmd.windowTitle || null);
       var frame = windowFrame(winB);
       if (!frame) return { id: id, ok: false, error: 'no_window' };
@@ -439,9 +455,12 @@ function handle(cmd) {
     }
 
     if (type === 'pressElement') {
-      var proc = findProcess(cmd.appName, cmd.appBundleId) || frontProcess();
+      /* Only the named app, and only once it is frontmost: never another app's matching button. */
+      var proc = cmd.appName || cmd.appBundleId ? findProcess(cmd.appName, cmd.appBundleId) : null;
       if (!proc) return { id: id, ok: false, error: 'app_not_found' };
-      try { proc.frontmost = true; } catch (e) {}
+      try { proc.frontmost = true; } catch (e) {
+        return { id: id, ok: false, error: 'activate_failed' };
+      }
       var result = pressInProcess(
         proc,
         cmd.elementRole || null,

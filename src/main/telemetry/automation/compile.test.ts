@@ -491,6 +491,7 @@ describe('recoverInferredActions', () => {
           timestamp: '2026-07-29T04:28:48.000Z',
           sourceEventIds: ['tevt_new'],
           appName: 'Google Chrome',
+          targetWindowTitle: 'Recorded document',
           elementLabel: 'New',
           clickX: 80,
           clickY: 200
@@ -577,6 +578,8 @@ describe('recoverInferredActions', () => {
     expect(ops.filter((o) => o.op === 'click_at')).toHaveLength(2)
     expect(ops.map((o) => o.op)).toEqual(['open_url', 'click_at', 'click_at', 'wait_for'])
     expect(warnings.some((w) => /Injected 2 click_at/i.test(w))).toBe(true)
+    // M9 R4: the recorded window identity travels with the point; none is invented.
+    expect(ops.filter((o) => o.op === 'click_at').map((o) => o.windowTitle)).toEqual(['Recorded document', null])
   })
 
   it('isCreateSheetIntent matches spreadsheet create but not create columns', () => {
@@ -1300,6 +1303,65 @@ describe('validateAndGroundScript', () => {
       expect(script.ops[0]).toMatchObject({ op: 'manual', prompt: expect.stringContaining('Confirm the text') })
       expect(script.ops.some((o) => o.op === 'type_text' || o.op === 'set_clipboard' || o.literalText)).toBe(false)
     }
+  })
+
+  it('M9 R4: every point op takes geometry and window identity from its own click evidence', () => {
+    const clickPolished: PolishedSession = {
+      ...polished,
+      actions: [
+        {
+          order: 1,
+          text: 'Clicked Share',
+          category: 'interaction',
+          timestamp: '2026-07-29T04:28:46.548Z',
+          sourceEventIds: ['tevt_c'],
+          appName: 'Figma',
+          elementLabel: 'Share',
+          elementRole: 'AXButton',
+          clickX: 140,
+          clickY: 180,
+          clickWindowX: 40,
+          clickWindowY: 80,
+          windowWidth: 800,
+          windowHeight: 600,
+          targetWindowTitle: 'Recorded document',
+          clickButton: 'middle',
+          clickCount: 1
+        },
+        { order: 2, text: 'Pressed Escape', category: 'interaction', timestamp: '2026-07-29T04:28:47.548Z', sourceEventIds: ['tevt_k'], appName: 'Figma' }
+      ]
+    }
+    const wf: ExtractedWorkflow = {
+      ...workflow,
+      variables: [],
+      steps: [{ order: 1, action: 'Click Share', category: 'navigation', appName: 'Figma', evidenceEventIds: ['tevt_c', 'tevt_k'], confidence: 0.8 }]
+    }
+    const base = {
+      stepOrder: 1, confidence: 0.8, timeoutMs: 10000, appName: 'Figma', appBundleId: null, url: null,
+      urlVariableKey: null, elementRole: null, elementPath: null, chord: null, variableKey: null, literalText: null,
+      waitCondition: null, waitValue: null, prompt: null
+    }
+    const script = validateAndGroundScript(
+      {
+        ops: [
+          // Proposed with another window and other coordinates: grounded to the evidence.
+          { ...base, op: 'click_at' as const, evidenceEventIds: ['tevt_c'], label: 'Click', elementLabel: null, clickX: 1, clickY: 2, clickWindowX: 1, clickWindowY: 2, windowWidth: 10, windowHeight: 10, windowTitle: 'Other document', clickButton: 'left' as const, clickCount: 2 },
+          { ...base, op: 'activate_element' as const, evidenceEventIds: ['tevt_c'], label: 'Press', elementLabel: 'Share', clickX: null, clickY: null },
+          // No click evidence: no point and no window survive.
+          { ...base, op: 'click_at' as const, evidenceEventIds: ['tevt_k'], label: 'Invented', elementLabel: null, clickX: 7, clickY: 8, windowTitle: 'Other document' }
+        ],
+        warnings: []
+      },
+      wf,
+      clickPolished
+    )
+    const points = script.ops.filter((o) => o.op === 'click_at' || o.op === 'activate_element')
+    expect(points[0]).toMatchObject({ clickWindowX: 40, clickWindowY: 80, windowWidth: 800, windowTitle: 'Recorded document' })
+    // R2: the observed middle button and count win over the proposal.
+    expect(points[0]).toMatchObject({ clickButton: 'middle', clickCount: 1 })
+    expect(points[1]).toMatchObject({ windowTitle: 'Recorded document' })
+    // The op with only non-click evidence (labels are normalised, so by position).
+    expect(script.ops[2]).toMatchObject({ op: 'click_at', clickX: null, clickY: null, windowTitle: null, clickButton: null })
   })
 
   it('fills set_clipboard literalText from in-memory clipboard map', () => {

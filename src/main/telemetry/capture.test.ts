@@ -13,9 +13,16 @@ vi.mock('electron', () => ({
     unregister: (accelerator: string) => unregister(accelerator)
   },
   screen: {
-    getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } })
+    getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }),
+    getAllDisplays: () => displays
   }
 }))
+
+// Synthetic layout: a 1× display left of and above a 2× primary (negative global origin).
+const displays = [
+  { id: 1, bounds: { x: 0, y: 0, width: 1440, height: 900 }, scaleFactor: 2 },
+  { id: 2, bounds: { x: -1920, y: -300, width: 1920, height: 1080 }, scaleFactor: 1 }
+]
 
 // active-win is a native module and needs screen-recording permission; the
 // recorder must work without it for these tests.
@@ -200,5 +207,22 @@ describe('TelemetryRecorder paste detection', () => {
     })
 
     expect(events.find((e) => e.type === 'keyboard_shortcut')?.data?.shortcut).toBe('Cmd+S')
+  })
+})
+
+describe('M9 display binding', () => {
+  it('binds each pointer event to the display containing its global point', async () => {
+    const provider = new FakeInteractionProvider(true)
+    const { events } = await startRecorder(provider)
+    const at = (clickX: number, clickY: number) =>
+      provider.emit!({ type: 'click', data: { appName: 'Figma', clickX, clickY, coordinateSpace: 'global_points' } })
+    at(100, 100)
+    at(-1000, -200)
+    at(5000, 5000)
+    const shown = events.filter((e) => e.type === 'click').map((e) => e.data?.display)
+    expect(shown[0]).toEqual({ id: 1, x: 0, y: 0, width: 1440, height: 900, scale: 2, binding: 'event_point' })
+    expect(shown[1]).toEqual({ id: 2, x: -1920, y: -300, width: 1920, height: 1080, scale: 1, binding: 'event_point' })
+    // No display contains it: no display is claimed (never the primary by default).
+    expect(shown[2]).toBeUndefined()
   })
 })

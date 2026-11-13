@@ -10,7 +10,7 @@ vi.mock('electron', () => ({
   }
 }))
 
-import { AutomationOpKindSchema, type AutomationScript } from '../../shared/telemetry/schema'
+import { AutomationOpKindSchema, type AutomationOp, type AutomationScript } from '../../shared/telemetry/schema'
 import { AutomationRunner, resolveClickPoint, toFailureCode } from './runner'
 import type { Actuator, ActuatorResult, QueryParams, RunEvent } from './types'
 
@@ -65,20 +65,31 @@ class FakeActuator implements Actuator {
 
   windowBoundsResult: { x: number; y: number; width: number; height: number } | null = null
 
+  /** Title of the only live window; a request for another title finds no window. */
+  liveWindowTitle = 'Doc'
+
   async windowBounds(
     appName: string | null,
-    _appBundleId: string | null
+    _appBundleId: string | null,
+    windowTitle?: string | null
   ): Promise<ActuatorResult> {
     this.calls.push(`windowBounds:${appName}`)
-    if (!this.windowBoundsResult) return { ok: false, error: 'no_window' }
+    if (!this.windowBoundsResult || windowTitle !== this.liveWindowTitle) return { ok: false, error: 'no_window' }
     return { ok: true, bounds: this.windowBoundsResult }
   }
+
+  pressWindows: Array<string | null | undefined> = []
+  /** Host reply for every press (e.g. no_window), when set. */
+  pressError: string | null = null
 
   async pressElement(params: {
     appName: string | null
     elementLabel: string
+    windowTitle?: string | null
   }): Promise<ActuatorResult> {
     this.calls.push(`press:${params.elementLabel}`)
+    this.pressWindows.push(params.windowTitle)
+    if (this.pressError) return { ok: false, error: this.pressError }
     if (this.failPressTimes > 0) {
       this.failPressTimes -= 1
       return { ok: false, error: 'element_not_found' }
@@ -172,7 +183,8 @@ describe('AutomationRunner', () => {
 
     await runner.start()
 
-    expect(actuator.calls).toEqual(['activateApp:Messages', 'press:Send'])
+    // M9: the press re-verifies its recorded app is frontmost first.
+    expect(actuator.calls).toEqual(['activateApp:Messages', 'activateApp:Messages', 'press:Send'])
     expect(events.filter((e) => e.type === 'stepDone')).toHaveLength(2)
     expect(events.some((e) => e.type === 'navigating' && e.destination === 'Messages')).toBe(
       true
@@ -647,13 +659,20 @@ describe('AutomationRunner', () => {
 
   it('replays click_at with count and button fidelity', async () => {
     const actuator = new FakeActuator()
+    actuator.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
     const events: RunEvent[] = []
     const script: AutomationScript = {
       ops: [
         baseOp({
           op: 'click_at',
+          appName: 'Figma',
           clickX: 50,
           clickY: 60,
+          clickWindowX: 50,
+          clickWindowY: 60,
+          windowWidth: 800,
+          windowHeight: 600,
+          windowTitle: 'Doc',
           clickButton: 'right',
           clickCount: 2,
           clickModifiers: { cmd: true },
@@ -689,6 +708,7 @@ describe('AutomationRunner', () => {
           clickWindowY: 80,
           windowWidth: 800,
           windowHeight: 600,
+          windowTitle: 'Doc',
           label: 'Anchored click'
         })
       ],
@@ -707,8 +727,141 @@ describe('AutomationRunner', () => {
   })
 })
 
+describe('M9: a point op acts only in the verified recorded app', () => {
+  async function run(op: Partial<AutomationOp>, setup: (a: FakeActuator) => void = () => {}) {
+    const actuator = new FakeActuator()
+    setup(actuator)
+    const events: RunEvent[] = []
+    const runner: AutomationRunner = new AutomationRunner({
+      runId: 'run_m9',
+      sessionId: 'tsess_1',
+      script: { ops: [baseOp({ label: 'Point', ...op })], warnings: [] },
+      actuator,
+      onEvent: (e) => {
+        events.push(e)
+        if (e.type === 'stepFailed') setTimeout(() => runner.control({ kind: 'stop' }), 1)
+      }
+    })
+    await runner.start()
+    return { calls: actuator.calls, failed: events.find((e) => e.type === 'stepFailed') }
+  }
+  const anchored = { clickX: 140, clickY: 180, clickWindowX: 40, clickWindowY: 80, windowWidth: 800, windowHeight: 600, windowTitle: 'Doc' }
+
+  it('failed activation stops click_at and scroll before any input', async () => {
+    const click = await run({ op: 'click_at', appName: 'Figma', ...anchored }, (a) => (a.failNext = 'activateApp'))
+    expect(click.failed).toBeDefined()
+    expect(click.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+    const scroll = await run({ op: 'scroll', appName: 'Figma', scrollDelta: 3, ...anchored }, (a) => (a.failNext = 'activateApp'))
+    expect(scroll.calls.some((c) => c.startsWith('scrollAt'))).toBe(false)
+  })
+
+  it('a point op with no recorded app is never clicked', async () => {
+    const r = await run({ op: 'click_at', appName: null, appBundleId: null, clickX: 5, clickY: 5 })
+    expect(r.failed).toBeDefined()
+    expect(r.calls).toEqual([])
+  })
+
+  it('a missing live window frame stops the click instead of using recorded screen coords', async () => {
+    const r = await run({ op: 'click_at', appName: 'Figma', ...anchored })
+    expect(r.calls).toContain('windowBounds:Figma')
+    expect(r.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+    expect(r.failed).toBeDefined()
+  })
+
+  it('middle click is never replayed as a left click', async () => {
+    const r = await run({ op: 'click_at', appName: 'Figma', clickButton: 'middle', ...anchored }, (a) => {
+      a.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
+    })
+    expect(r.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+    expect(r.failed).toBeDefined()
+  })
+
+  it('R2: a recorded middle press on an AX target is unsupported before any AXPress', async () => {
+    const r = await run({ op: 'activate_element', appName: 'Figma', elementLabel: 'Share', clickButton: 'middle' })
+    expect(r.calls).toEqual([])
+    expect(r.failed).toBeDefined()
+  })
+
+  it('R3: failed activation stops activate_element before AXPress and before the Cmd+L fallback', async () => {
+    const r = await run({ op: 'activate_element', appName: 'Safari', elementLabel: 'Address and search bar' }, (a) => {
+      a.failNext = 'activateApp'
+    })
+    expect(r.calls.filter((c) => !c.startsWith('activateApp'))).toEqual([])
+    const none = await run({ op: 'activate_element', appName: null, appBundleId: null, elementLabel: 'Share' })
+    expect(none.calls).toEqual([])
+  })
+
+  it('R4: an absolute-only point (no window anchor) is never executed, and no bounds are guessed', async () => {
+    const r = await run({ op: 'click_at', appName: 'Figma', clickX: 5000, clickY: 5000 }, (a) => {
+      a.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
+    })
+    expect(r.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+    expect(r.failed).toBeDefined()
+  })
+
+  it('R4: the recorded window is required by title: another window of the same app is not used', async () => {
+    const other = await run({ op: 'click_at', appName: 'Figma', ...anchored, windowTitle: 'Recorded document' }, (a) => {
+      a.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
+      a.liveWindowTitle = 'Other document'
+    })
+    expect(other.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+    expect(other.failed).toBeDefined()
+    // No recorded title: the anchor names no window, so no bounds are even requested.
+    const untitled = await run({ op: 'click_at', appName: 'Figma', ...anchored, windowTitle: null }, (a) => {
+      a.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
+    })
+    expect(untitled.calls.some((c) => c.startsWith('windowBounds') || c.startsWith('clickAt'))).toBe(false)
+    // Control: the recorded window present → the click lands in it.
+    const same = await run({ op: 'click_at', appName: 'Figma', ...anchored }, (a) => {
+      a.windowBoundsResult = { x: -1200, y: -200, width: 800, height: 600 }
+    })
+    expect(same.calls).toContain('clickAt:-1160,-120:leftx1')
+  })
+
+  it('R4: activate_element forwards its recorded window to the press', async () => {
+    let seen: Array<string | null | undefined> = []
+    await run({ op: 'activate_element', appName: 'Figma', elementLabel: 'Share', windowTitle: 'Recorded document' }, (a) => {
+      seen = a.pressWindows
+    })
+    expect(seen).toEqual(['Recorded document'])
+  })
+
+  it.each(['no_window', 'activate_failed', 'app_not_found'])(
+    'R4: a press that fails window/app identity (%s) sends no Cmd+L and no click fallback',
+    async (error) => {
+      const r = await run(
+        { op: 'activate_element', appName: 'Safari', elementLabel: 'Address and search bar', windowTitle: 'Recorded document', ...anchored },
+        (a) => {
+          a.pressError = error
+          a.windowBoundsResult = { x: 0, y: 0, width: 800, height: 600 }
+        }
+      )
+      expect(r.calls.filter((c) => c.startsWith('keystroke') || c.startsWith('clickAt'))).toEqual([])
+      expect(r.failed).toBeDefined()
+    }
+  )
+
+  it('control: a label not found in the verified window may still use the Cmd+L fallback', async () => {
+    const r = await run({ op: 'activate_element', appName: 'Safari', elementLabel: 'Address and search bar' }, (a) => {
+      a.pressError = 'element_not_found'
+    })
+    expect(r.calls).toContain('keystroke:Cmd+L')
+  })
+
+  it('the activate_element coordinate fallback needs activation and the live window', async () => {
+    const r = await run(
+      { op: 'activate_element', appName: 'Figma', elementLabel: 'Share', ...anchored },
+      (a) => {
+        a.failPressTimes = 99
+        a.failNext = 'activateApp'
+      }
+    )
+    expect(r.calls.some((c) => c.startsWith('clickAt'))).toBe(false)
+  })
+})
+
 describe('resolveClickPoint', () => {
-  it('falls back to absolute when windowBounds query fails', async () => {
+  it('M9: an in-window point with no live window frame is not clicked (no stale absolute guess)', async () => {
     const pt = await resolveClickPoint(
       {
         clickX: 10,
@@ -720,10 +873,10 @@ describe('resolveClickPoint', () => {
       },
       async () => null
     )
-    expect(pt).toEqual({ x: 10, y: 20 })
+    expect(pt).toBeNull()
   })
 
-  it('keeps out-of-window offsets absolute', async () => {
+  it('M9: an out-of-window offset (menu bar, Dock) is not clicked at recorded screen coords', async () => {
     const pt = await resolveClickPoint(
       {
         clickX: 50,
@@ -735,7 +888,7 @@ describe('resolveClickPoint', () => {
       },
       async () => ({ x: 0, y: 0, width: 100, height: 100 })
     )
-    expect(pt).toEqual({ x: 50, y: -10 })
+    expect(pt).toBeNull()
   })
 
   it('scales the offset when the window was resized', async () => {

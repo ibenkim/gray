@@ -43,6 +43,12 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
     elementApp: null as string | null,
     alive: true,
     loopBudget: 1,
+    /** pressedMouseButtons bitmask the poller reads (1 = left, 2 = right). */
+    buttons: 0,
+    /** System uptime (s): advances 0.1 per pump; NSEvent timestamps use the same clock. */
+    uptime: 100,
+    /** The uptime clock is unavailable (degraded: edges have no interval). */
+    noClock: false,
     reads: 0,
     lines: [] as Array<Record<string, any>>,
     handlers: [] as Array<{ mask: number; fn: (evt: unknown) => void }>
@@ -115,7 +121,9 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
         env.handlers.push({ mask, fn })
         return { token: true }
       },
-      pressedMouseButtons: 0
+      get pressedMouseButtons() {
+        return env.buttons
+      }
     },
     NSEventMaskKeyDown: MASK.key,
     NSEventMaskLeftMouseDown: MASK.left,
@@ -127,10 +135,18 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
     NSEventModifierFlagShift: 1 << 17,
     NSEventTypeRightMouseDown: 3,
     AXIsProcessTrusted: () => true,
+    NSProcessInfo: {
+      processInfo: {
+        get systemUptime() {
+          return env.noClock ? NaN : env.uptime
+        }
+      }
+    },
     CGEventGetLocation: () => ({ x: 10, y: 20 }),
     NSRunLoop: {
       currentRunLoop: {
         runUntilDate: () => {
+          env.uptime += 0.1
           // Scripted steps run one per pump; then `loopBudget` pumps, then the parent "exits".
           const step = steps.shift()
           if (step) step(api)
@@ -202,8 +218,12 @@ function sensor(scope: unknown, front: App, steps: Array<(s: Sensor) => void> = 
         }
       })
     },
-    click() {
-      fire(MASK.left, { type: 1, clickCount: 1, modifierFlags: 0, CGEvent: {} })
+    /** A monitor delivery; `at` = when the press happened (default: during this pump). */
+    click(at = env.uptime - 0.05) {
+      fire(MASK.left, { type: 1, clickCount: 1, modifierFlags: 0, CGEvent: {}, timestamp: at })
+    },
+    rightClick(at = env.uptime - 0.05) {
+      fire(MASK.right, { type: 3, clickCount: 1, modifierFlags: 0, CGEvent: {}, timestamp: at })
     },
     scroll() {
       fire(MASK.scroll, { scrollingDeltaX: 0, scrollingDeltaY: 3, CGEvent: {} })
@@ -457,5 +477,89 @@ describe('M8-A secure fields (actual JXA sensor source, synthetic bridge)', () =
     expect(s.env.valueReads).toBeGreaterThan(0)
     expect(ax).toMatchObject({ secure: false, valueTail: 'synthetic typed value' })
     expect(key).toMatchObject({ secure: false, chars: 'c' })
+  })
+})
+
+describe('M9 one pointer source (actual JXA sensor source)', () => {
+  const clicks = (s: Sensor) => s.env.lines.filter((l) => l.k === 'click')
+  const FIGMA: App = { name: 'Figma', bundleId: 'com.figma.Desktop' }
+  let pressAt = 0
+  /** The physical press happens during this pump; the poller sees the button down after it. */
+  const press = (x: Sensor) => {
+    x.env.elementApp = 'Figma'
+    x.env.buttons = 1
+    pressAt = x.env.uptime - 0.05
+  }
+  const run = (steps: Array<(s: Sensor) => void>) => sensor(FULL_SCREEN, FIGMA, steps)
+
+  it('monitor and poll in the same pump: one event, the monitor copy', () => {
+    const s = run([(x) => (press(x), x.click(pressAt)), (x) => (x.env.buttons = 0)])
+    expect(clicks(s)).toHaveLength(1)
+    expect(clicks(s)[0].via).toBeUndefined()
+  })
+
+  it('monitor one pump late claims the held poll copy', () => {
+    const s = run([press, (x) => x.click(pressAt), (x) => (x.env.buttons = 0)])
+    expect(clicks(s)).toHaveLength(1)
+    expect(clicks(s)[0].via).toBeUndefined()
+  })
+
+  it('R1: the same press delivered by the monitor two pumps late is recorded once', () => {
+    const s = run([press, () => {}, (x) => x.click(pressAt), (x) => (x.env.buttons = 0)])
+    expect(clicks(s)).toHaveLength(1)
+  })
+
+  it('R1: a different button\'s monitor press never suppresses a held polled press; order kept', () => {
+    const s = run([
+      press,
+      (x) => {
+        x.env.buttons = 0
+        x.rightClick()
+      }
+    ])
+    expect(clicks(s).map((c) => c.button)).toEqual(['left', 'right'])
+  })
+
+  it('R1: a distinct later press of the same button is not taken for the earlier poll copy', () => {
+    const s = run([
+      press, // A: polled only, emitted after one pump
+      () => {},
+      (x) => (x.env.buttons = 0), // A released
+      (x) => x.click() // B: a new left press, within a second, monitor only
+    ])
+    expect(clicks(s)).toHaveLength(2)
+    expect(clicks(s).map((c) => c.via ?? 'monitor')).toEqual(['poll', 'monitor'])
+  })
+
+  it('R1 no clock: an unidentifiable poll edge is never matched to a remembered monitor press', () => {
+    // NSEvent still stamps A, but the poller has no clock: B's edge has no interval, so A is not
+    // compared with it. B, delivered by polling only, is kept (degraded, counted).
+    const s = run([
+      (x) => {
+        x.env.noClock = true
+        x.env.elementApp = 'Figma'
+        x.click(100)
+      },
+      (x) => (x.env.buttons = 1),
+      () => {},
+      (x) => (x.env.buttons = 0)
+    ])
+    expect(clicks(s).map((c) => c.via ?? 'monitor')).toEqual(['monitor', 'poll'])
+    // Degraded but not doubled: a same-button monitor delivery in the hold pump claims the edge.
+    const same = run([
+      (x) => {
+        x.env.noClock = true
+        press(x)
+      },
+      (x) => x.click(pressAt),
+      (x) => (x.env.buttons = 0)
+    ])
+    expect(clicks(same).map((c) => c.via ?? 'monitor')).toEqual(['monitor'])
+  })
+
+  it('without monitor delivery, the poller emits once with count and modifiers unknown', () => {
+    const s = run([press, () => {}, (x) => (x.env.buttons = 0)])
+    expect(clicks(s)).toHaveLength(1)
+    expect(clicks(s)[0]).toMatchObject({ via: 'poll', count: null, cmd: null, opt: null, ctrl: null, shift: null })
   })
 })

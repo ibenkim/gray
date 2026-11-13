@@ -8,6 +8,7 @@ import type {
 import { JxaActuator } from './JxaActuator'
 import type {
   Actuator,
+  ActuatorResult,
   ResolutionStats,
   RunEvent,
   RunnerControl,
@@ -396,33 +397,43 @@ export class AutomationRunner {
       }
       case 'activate_element': {
         if (!op.elementLabel) return { ok: false, error: 'missing_label' }
+        // A recorded middle press is not an AXPress either: unsupported, before any effect.
+        if (op.clickButton === 'middle') return { ok: false, error: 'click_unsupported' }
+        // The recorded app must be verified frontmost before any press, keystroke or click.
+        const activated = await this.activateRecordedApp(op, 120)
+        if (!activated.ok) return activated
         const pressed = await this.actuator.pressElement({
           appName: op.appName,
           appBundleId: op.appBundleId,
           elementRole: op.elementRole,
           elementLabel: op.elementLabel,
-          elementPath: op.elementPath
+          elementPath: op.elementPath,
+          // The recorded window, when known, must be found (exactly, once) before any press.
+          windowTitle: op.windowTitle?.trim() || null
         })
         if (pressed.ok) return pressed
+        // Fallbacks are for a label that was not found in the verified window. A failed app or
+        // window identity (absent, ambiguous, unfocusable) stops before any other input.
+        if (pressed.error !== 'element_not_found') return pressed
         // Infer fallbacks when a single AX label cannot be found.
         const addressBar = /address|omnibox|search bar|\burl\b/i.test(op.elementLabel)
         if (addressBar) {
           const focus = await this.actuator.keystroke('Cmd+L')
           if (focus.ok) return focus
         }
+        if (!this.actuator.clickAt) return pressed
+        // The coordinate fallback lands only in the verified recorded app's live window.
         const fallback = await this.resolveClickPoint(op)
-        if (fallback && this.actuator.clickAt) {
-          return this.actuator.clickAt(fallback.x, fallback.y, clickOptionsFromOp(op))
-        }
-        return pressed
+        if (!fallback) return pressed
+        return this.actuator.clickAt(fallback.x, fallback.y, clickOptionsFromOp(op))
       }
       case 'click_at': {
         if (!this.actuator.clickAt) return { ok: false, error: 'click_unsupported' }
-        // Ensure the recorded app is frontmost so coords land in the right window.
-        if (op.appName) {
-          const act = await this.actuator.activateApp(op.appName, op.appBundleId)
-          if (act.ok) await sleep(120)
-        }
+        // Middle click is not replayable; never convert it to a left click.
+        if (op.clickButton === 'middle') return { ok: false, error: 'click_unsupported' }
+        // Coordinates are meaningful only in the recorded app: stop if it cannot be activated.
+        const activated = await this.activateRecordedApp(op, 120)
+        if (!activated.ok) return activated
         const point = await this.resolveClickPoint(op)
         if (!point) return { ok: false, error: 'missing_point' }
         return this.actuator.clickAt(point.x, point.y, clickOptionsFromOp(op))
@@ -430,10 +441,8 @@ export class AutomationRunner {
       case 'scroll': {
         if (!this.actuator.scrollAt) return { ok: false, error: 'scroll_unsupported' }
         if (op.scrollDelta == null) return { ok: false, error: 'missing_delta' }
-        if (op.appName) {
-          const act = await this.actuator.activateApp(op.appName, op.appBundleId)
-          if (act.ok) await sleep(80)
-        }
+        const activated = await this.activateRecordedApp(op, 80)
+        if (!activated.ok) return activated
         const point = await this.resolveClickPoint(op)
         if (!point) return { ok: false, error: 'missing_point' }
         return this.actuator.scrollAt(
@@ -497,16 +506,28 @@ export class AutomationRunner {
     return { ok: false, error: 'wait_timeout' }
   }
 
+  /** A targeted op needs its recorded app frontmost; without a known app there is nothing to bind. */
+  private async activateRecordedApp(op: AutomationOp, settleMs: number): Promise<ActuatorResult> {
+    if (!op.appName && !op.appBundleId) return { ok: false, error: 'app_not_found' }
+    const act = await this.actuator.activateApp(op.appName, op.appBundleId)
+    if (!act.ok) return { ok: false, error: act.error ?? 'app_not_found' }
+    await sleep(settleMs)
+    return { ok: true }
+  }
+
   /**
-   * Prefer window-relative offset re-anchored to the live window frame;
-   * fall back to absolute screen coordinates.
+   * Window-relative offset re-anchored to the live window frame; absolute screen coordinates
+   * only when the point was outside the recorded window (menu bar, Dock).
    */
   private async resolveClickPoint(
     op: AutomationOp
   ): Promise<{ x: number; y: number } | null> {
+    // The recorded window's identity is its title; without one the anchor names no window.
+    const title = op.windowTitle?.trim()
+    if (!title) return null
     return resolveClickPoint(op, async () => {
       if (!this.actuator.windowBounds) return null
-      const r = await this.actuator.windowBounds(op.appName, op.appBundleId)
+      const r = await this.actuator.windowBounds(op.appName, op.appBundleId, title)
       return r.ok && r.bounds ? r.bounds : null
     })
   }
@@ -831,10 +852,7 @@ function clickOptionsFromOp(op: AutomationOp): {
 
 const SIZE_TOLERANCE = 8
 
-/**
- * Resolve a click/scroll point: window anchor when the offset is inside the
- * recorded window, otherwise absolute screen coordinates.
- */
+/** Resolve a click/scroll point from its recorded window anchor and the live window frame. */
 export async function resolveClickPoint(
   op: Pick<
     AutomationOp,
@@ -855,36 +873,32 @@ export async function resolveClickPoint(
     op.windowWidth > 0 &&
     op.windowHeight > 0
 
-  // Menu bar / Dock / Spotlight: offset outside the recorded window → absolute.
+  // Only a point inside the recorded window, re-anchored to that app's live window, is
+  // resolved. Absolute screen coordinates (no anchor, or outside the window: menu bar, Dock)
+  // carry no verified display or window identity, so they are not executed.
   if (
-    hasAnchor &&
-    (op.clickWindowX! < 0 ||
-      op.clickWindowY! < 0 ||
-      op.clickWindowX! > op.windowWidth! ||
-      op.clickWindowY! > op.windowHeight!)
+    !hasAnchor ||
+    op.clickWindowX! < 0 ||
+    op.clickWindowY! < 0 ||
+    op.clickWindowX! > op.windowWidth! ||
+    op.clickWindowY! > op.windowHeight!
   ) {
-    if (op.clickX != null && op.clickY != null) return { x: op.clickX, y: op.clickY }
     return null
   }
 
-  if (hasAnchor) {
-    const now = await fetchBounds()
-    if (now && now.width > 0 && now.height > 0) {
-      const dw = Math.abs(now.width - op.windowWidth!)
-      const dh = Math.abs(now.height - op.windowHeight!)
-      const sx = dw > SIZE_TOLERANCE ? now.width / op.windowWidth! : 1
-      const sy = dh > SIZE_TOLERANCE ? now.height / op.windowHeight! : 1
-      let x = now.x + Math.round(op.clickWindowX! * sx)
-      let y = now.y + Math.round(op.clickWindowY! * sy)
-      // Clamp inside the current window rect.
-      x = Math.min(now.x + now.width - 1, Math.max(now.x, x))
-      y = Math.min(now.y + now.height - 1, Math.max(now.y, y))
-      return { x, y }
-    }
-  }
-
-  if (op.clickX != null && op.clickY != null) return { x: op.clickX, y: op.clickY }
-  return null
+  // An in-window point needs the live window: no frame means no click, never a stale guess.
+  const now = await fetchBounds()
+  if (!now || !(now.width > 0 && now.height > 0)) return null
+  const dw = Math.abs(now.width - op.windowWidth!)
+  const dh = Math.abs(now.height - op.windowHeight!)
+  const sx = dw > SIZE_TOLERANCE ? now.width / op.windowWidth! : 1
+  const sy = dh > SIZE_TOLERANCE ? now.height / op.windowHeight! : 1
+  let x = now.x + Math.round(op.clickWindowX! * sx)
+  let y = now.y + Math.round(op.clickWindowY! * sy)
+  // Clamp inside the current window rect.
+  x = Math.min(now.x + now.width - 1, Math.max(now.x, x))
+  y = Math.min(now.y + now.height - 1, Math.max(now.y, y))
+  return { x, y }
 }
 
 function humanError(code?: string): string {

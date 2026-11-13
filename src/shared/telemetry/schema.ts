@@ -64,11 +64,21 @@ export const ViewportSchema = z.object({
   height: z.number().int().nonnegative()
 })
 
+/**
+ * Display the event belongs to. `binding: 'event_point'` = the display containing the event's
+ * global point (id/origin/logical size in points, `scale` = pixels per point); `'primary'` = no
+ * point, the primary display. Legacy events have no binding and no display guarantee.
+ */
 export const DisplayInfoSchema = z
   .object({
     scale: z.number().positive(),
     width: z.number().int().nonnegative(),
-    height: z.number().int().nonnegative()
+    height: z.number().int().nonnegative(),
+    id: z.number().int().optional(),
+    /** Origin in global points (top-left of the primary display); negative left/above it. */
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    binding: z.enum(['event_point', 'primary']).optional()
   })
   .strict()
 
@@ -403,6 +413,15 @@ export const TelemetryEventDataSchema = z
     clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
     clickModifiers: ClickModifiersSchema.optional(),
+    /**
+     * Which source observed the press: `monitor` (NSEvent: count and modifiers observed; absent
+     * clickModifiers = none held) or `poll` (button-state edge: count and modifiers unknown).
+     */
+    pointerSource: z.enum(['monitor', 'poll']).optional(),
+    /** Title of the AXWindow containing the hit-tested click target (not the sampled context). */
+    targetWindowTitle: z.string().max(300).optional(),
+    /** clickX/clickY space: `global_points` = logical points, top-left of the primary display. */
+    coordinateSpace: z.enum(['global_points']).optional(),
     /** Screen coordinates of a click (top-left origin), when observed. */
     clickX: z.number().int().optional(),
     clickY: z.number().int().optional(),
@@ -841,6 +860,10 @@ export const PolishedActionSchema = z
     textQuality: z.enum(['exact', 'uncertain']).optional(),
     clickButton: z.enum(['left', 'right', 'middle']).optional(),
     clickCount: z.number().int().positive().max(10).optional(),
+    /** `poll`: the press was seen without its count or modifiers (unknown, not "none"). */
+    pointerSource: z.enum(['monitor', 'poll']).optional(),
+    /** Title of the window the clicked target was in, read at the click (window identity). */
+    targetWindowTitle: z.string().max(300).optional(),
     clickX: z.number().int().optional(),
     clickY: z.number().int().optional(),
     /** Window-relative click offset (top-left of owning window). */
@@ -1473,6 +1496,11 @@ export const AutomationOpSchema = z
     /** Recorded window size for rescaling the offset after resize. */
     windowWidth: z.number().int().nonnegative().nullable().optional(),
     windowHeight: z.number().int().nonnegative().nullable().optional(),
+    /**
+     * Title of the recorded window the offset belongs to. A coordinate is replayed only in a live
+     * window of the verified app with exactly this title; without it the point is unresolved.
+     */
+    windowTitle: z.string().max(300).nullable().optional(),
     clickButton: z.enum(['left', 'right', 'middle']).nullable().optional(),
     clickCount: z.number().int().positive().max(10).nullable().optional(),
     /** Modifier flags for click_at — all fields required-nullable for Structured Outputs. */
